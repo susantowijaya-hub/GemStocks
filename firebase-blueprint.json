@@ -1,0 +1,224 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated user profile linked to Firebase Auth UID.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Authentication UID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Verified Google account email address.",
+          "minLength": 3,
+          "maxLength": 254
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Display name shown in the terminal profile menu.",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "photoURL": {
+          "type": "string",
+          "description": "Optional avatar URL from Google Auth.",
+          "maxLength": 512
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of initial registration."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of latest profile update."
+        }
+      },
+      "required": ["uid", "email", "displayName", "createdAt", "updatedAt"]
+    },
+    "PortfolioPosition": {
+      "title": "PortfolioPosition",
+      "description": "Tracked financial asset holding belonging to a specific user.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the position owner.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "symbol": {
+          "type": "string",
+          "description": "Ticker or asset symbol (e.g. SPX, BTC, XAU).",
+          "minLength": 1,
+          "maxLength": 20,
+          "pattern": "^[A-Z0-9._\\-/]+$"
+        },
+        "name": {
+          "type": "string",
+          "description": "Human-readable instrument name.",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "category": {
+          "type": "string",
+          "description": "Asset allocation category.",
+          "enum": ["Equities", "Crypto", "Commodities", "Cash & FX"],
+          "maxLength": 24
+        },
+        "units": {
+          "type": "number",
+          "description": "Number of units held."
+        },
+        "avgCost": {
+          "type": "number",
+          "description": "Average purchase cost per unit in USD."
+        },
+        "currentPrice": {
+          "type": "number",
+          "description": "Latest recorded price per unit in USD."
+        },
+        "linkedAssetId": {
+          "type": "string",
+          "description": "Optional market feed symbol ID for live price syncing.",
+          "maxLength": 32,
+          "pattern": "^[a-zA-Z0-9_\\-]*$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of creation."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of latest modification."
+        }
+      },
+      "required": [
+        "ownerId",
+        "symbol",
+        "name",
+        "category",
+        "units",
+        "avgCost",
+        "currentPrice",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "UserPreferences": {
+      "title": "UserPreferences",
+      "description": "Terminal preferences such as NFP alert status and currency conversion defaults.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the user.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "nfpAlertEnabled": {
+          "type": "boolean",
+          "description": "Whether the NFP countdown macro catalyst alert is enabled."
+        },
+        "preferredCurrency": {
+          "type": "string",
+          "description": "Default currency code for FX Matrix.",
+          "enum": ["USD", "EUR", "GBP", "JPY", "IDR", "SGD", "AUD"],
+          "maxLength": 8
+        },
+        "favoriteAssetIds": {
+          "type": "array",
+          "description": "Bounded list of pinned watchlist asset IDs (max 30)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of creation."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of last update."
+        }
+      },
+      "required": [
+        "ownerId",
+        "nfpAlertEnabled",
+        "preferredCurrency",
+        "favoriteAssetIds",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "AiBrief": {
+      "title": "AiBrief",
+      "description": "Saved Google Search grounded market intelligence brief generated by Gemini.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the brief owner.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "query": {
+          "type": "string",
+          "description": "User prompt or topic query.",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "assetSymbol": {
+          "type": "string",
+          "description": "Optional market symbol context.",
+          "maxLength": 24
+        },
+        "answer": {
+          "type": "string",
+          "description": "Grounded AI market analysis text.",
+          "minLength": 1,
+          "maxLength": 12000
+        },
+        "sources": {
+          "type": "array",
+          "description": "Bounded list of cited source titles/URIs (max 10)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of brief generation."
+        }
+      },
+      "required": ["ownerId", "query", "answer", "sources", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Private user profile document keyed by Firebase Auth UID."
+    },
+    "/users/{userId}/positions/{positionId}": {
+      "schema": { "$ref": "#/entities/PortfolioPosition" },
+      "description": "User-owned portfolio positions synced across web, Android, and iOS browsers."
+    },
+    "/users/{userId}/preferences/{prefId}": {
+      "schema": { "$ref": "#/entities/UserPreferences" },
+      "description": "User terminal preferences (e.g. doc ID 'settings')."
+    },
+    "/users/{userId}/aiBriefs/{briefId}": {
+      "schema": { "$ref": "#/entities/AiBrief" },
+      "description": "User-saved Gemini + Google Search grounded market briefs."
+    }
+  }
+}

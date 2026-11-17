@@ -1,0 +1,6 @@
+{
+  "name": "Stocks — Global Market Terminal",
+  "description": "Multi-asset global market dashboard, real-time crypto WebSocket feed, portfolio tracker, FX matrix, breaking financial news, and economic calendar.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
