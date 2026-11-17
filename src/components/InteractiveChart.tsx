@@ -101,6 +101,24 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
   };
 
   const formatTimeHint = (idx: number) => {
+    const ts = asset.chartTimestamps?.[timeframe]?.[idx];
+    if (typeof ts === 'number' && Number.isFinite(ts)) {
+      const d = new Date(ts);
+      if (timeframe === '1D' || timeframe === '1W') {
+        return new Intl.DateTimeFormat('en-US', {
+          month: 'short',
+          day: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit',
+          hour12: false,
+        }).format(d);
+      }
+      return new Intl.DateTimeFormat('en-US', {
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric',
+      }).format(d);
+    }
     if (timeframe === '1D') {
       const totalMins = 9 * 60 + 30 + Math.round((idx / Math.max(coords.length - 1, 1)) * 390);
       const hh = String(Math.floor(totalMins / 60)).padStart(2, '0');

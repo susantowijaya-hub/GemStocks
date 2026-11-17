@@ -1,21 +1,23 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { ArrowUpDown, Calculator, Grid } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
-import {
-  FX_CURRENCY_META,
-  FX_PAIR_TILES,
-  FX_RATES_USD_BASE,
-} from '../data/marketData';
-import { CurrencyCode } from '../types/market';
+import { FX_CURRENCY_META } from '../data/marketData';
+import { CurrencyCode, FxPairTile } from '../types/market';
 
 interface FxMatrixViewProps {
+  fxRates: Record<CurrencyCode, number>;
+  pairTiles: FxPairTile[];
   searchQuery: string;
 }
 
 const MATRIX_CURRENCIES: CurrencyCode[] = ['USD', 'EUR', 'GBP', 'JPY', 'IDR', 'SGD'];
 const CONVERTER_CURRENCIES: CurrencyCode[] = ['USD', 'EUR', 'GBP', 'JPY', 'IDR', 'SGD', 'AUD'];
 
-export const FxMatrixView: React.FC<FxMatrixViewProps> = ({ searchQuery }) => {
+export const FxMatrixView: React.FC<FxMatrixViewProps> = ({
+  fxRates,
+  pairTiles,
+  searchQuery,
+}) => {
   const { user, preferences, updatePreferences } = useAuth();
   const [amount, setAmount] = useState<string>('1000');
   const [fromCurr, setFromCurr] = useState<CurrencyCode>(preferences.preferredCurrency || 'USD');
@@ -28,8 +30,8 @@ export const FxMatrixView: React.FC<FxMatrixViewProps> = ({ searchQuery }) => {
   }, [user, preferences.preferredCurrency]);
 
   const parsedAmount = parseFloat(amount) || 0;
-  const rateFromUsd = FX_RATES_USD_BASE[fromCurr];
-  const rateToUsd = FX_RATES_USD_BASE[toCurr];
+  const rateFromUsd = fxRates[fromCurr] || 1;
+  const rateToUsd = fxRates[toCurr] || 1;
   const unitRate = (1 / rateFromUsd) * rateToUsd;
   const convertedValue = parsedAmount * unitRate;
   const toDecimals = toCurr === 'IDR' || toCurr === 'JPY' ? 0 : 2;
@@ -47,18 +49,18 @@ export const FxMatrixView: React.FC<FxMatrixViewProps> = ({ searchQuery }) => {
 
   const filteredPairTiles = useMemo(() => {
     const q = searchQuery.toLowerCase().trim();
-    if (!q) return FX_PAIR_TILES;
-    return FX_PAIR_TILES.filter(
+    if (!q) return pairTiles;
+    return pairTiles.filter(
       (t) =>
         t.pair.toLowerCase().includes(q) ||
         t.base.toLowerCase().includes(q) ||
         t.quote.toLowerCase().includes(q)
     );
-  }, [searchQuery]);
+  }, [pairTiles, searchQuery]);
 
   const formatCross = (rowCurr: CurrencyCode, colCurr: CurrencyCode): string => {
     if (rowCurr === colCurr) return '1.0000';
-    const val = (1 / FX_RATES_USD_BASE[rowCurr]) * FX_RATES_USD_BASE[colCurr];
+    const val = (1 / (fxRates[rowCurr] || 1)) * (fxRates[colCurr] || 1);
     if (colCurr === 'IDR' && val > 10) {
       return val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     }
@@ -87,7 +89,10 @@ export const FxMatrixView: React.FC<FxMatrixViewProps> = ({ searchQuery }) => {
         <div className="px-3.5 py-1.5 rounded-full bg-white dark:bg-[#1C1C1E] border border-[#E5E5EA] dark:border-[#2C2C2E] text-xs flex items-center gap-2">
           <span className="font-semibold text-[#1C1C1E] dark:text-white">USD/IDR Ref:</span>
           <span className="text-[#16803C] dark:text-[#30D158] font-bold font-mono tabular-nums">
-            15,845.50
+            {(fxRates.IDR || 0).toLocaleString('en-US', {
+              minimumFractionDigits: 2,
+              maximumFractionDigits: 2,
+            })}
           </span>
         </div>
       </div>
@@ -259,23 +264,23 @@ export const FxMatrixView: React.FC<FxMatrixViewProps> = ({ searchQuery }) => {
         <div className="md:hidden divide-y divide-[#E5E5EA] dark:divide-[#2C2C2E] text-xs font-mono tabular-nums">
           <div className="py-2.5 flex items-center justify-between">
             <span className="font-sans font-bold text-[#1C1C1E] dark:text-white">1 EUR in USD</span>
-            <span className="font-bold text-[#1C1C1E] dark:text-white">$1.0585</span>
+            <span className="font-bold text-[#1C1C1E] dark:text-white">${formatCross('EUR', 'USD')}</span>
           </div>
           <div className="py-2.5 flex items-center justify-between">
             <span className="font-sans font-bold text-[#1C1C1E] dark:text-white">1 GBP in USD</span>
-            <span className="font-bold text-[#1C1C1E] dark:text-white">$1.2675</span>
+            <span className="font-bold text-[#1C1C1E] dark:text-white">${formatCross('GBP', 'USD')}</span>
           </div>
           <div className="py-2.5 flex items-center justify-between">
             <span className="font-sans font-bold text-[#1C1C1E] dark:text-white">1 USD in JPY</span>
-            <span className="font-bold text-[#1C1C1E] dark:text-white">¥154.20</span>
+            <span className="font-bold text-[#1C1C1E] dark:text-white">¥{formatCross('USD', 'JPY')}</span>
           </div>
           <div className="py-2.5 flex items-center justify-between">
             <span className="font-sans font-bold text-[#1C1C1E] dark:text-white">1 USD in IDR</span>
-            <span className="font-bold text-[#16803C] dark:text-[#30D158]">Rp 15,845.50</span>
+            <span className="font-bold text-[#16803C] dark:text-[#30D158]">Rp {formatCross('USD', 'IDR')}</span>
           </div>
           <div className="py-2.5 flex items-center justify-between">
             <span className="font-sans font-bold text-[#1C1C1E] dark:text-white">1 USD in SGD</span>
-            <span className="font-bold text-[#1C1C1E] dark:text-white">S$ 1.3425</span>
+            <span className="font-bold text-[#1C1C1E] dark:text-white">S$ {formatCross('USD', 'SGD')}</span>
           </div>
         </div>
 

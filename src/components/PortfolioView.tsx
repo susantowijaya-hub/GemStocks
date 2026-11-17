@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
+  ArrowDownRight,
   ArrowUpRight,
   Cloud,
   Download,
@@ -117,11 +118,20 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
 
   const positions = user && cloudPositions !== null ? cloudPositions : localPositions;
 
-  // Sync linked positions (SPX, BTC, ETH, Gold) with live prices
+  // Sync linked positions (and matching symbols like SPX, BTC, ETH, XAU, IHSG) with live prices
   const syncedPositions = useMemo(() => {
     return positions.map((pos) => {
-      if (!pos.linkedAssetId) return pos;
-      const liveAsset = assets.find((a) => a.id === pos.linkedAssetId);
+      const sym = pos.symbol.toUpperCase();
+      const liveAsset =
+        (pos.linkedAssetId ? assets.find((a) => a.id === pos.linkedAssetId) : undefined) ||
+        assets.find(
+          (a) =>
+            a.symbol.toUpperCase() === sym ||
+            a.id.toUpperCase() === sym ||
+            (sym === 'BTC' && a.id === 'BTCUSD') ||
+            (sym === 'ETH' && a.id === 'ETHUSD') ||
+            (sym === 'XAU' && a.id === 'XAUUSD')
+        );
       if (!liveAsset) return pos;
       return { ...pos, currentPrice: liveAsset.price };
     });
@@ -141,6 +151,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
   const totals = useMemo(() => {
     let holdingsVal = 0;
     let holdingsCost = 0;
+    let todayPl = 0;
     const byCat: Record<PortfolioPosition['category'], number> = {
       Equities: 0,
       Crypto: 0,
@@ -154,15 +165,32 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
       holdingsVal += val;
       holdingsCost += cost;
       byCat[p.category] = (byCat[p.category] ?? 0) + val;
+
+      const sym = p.symbol.toUpperCase();
+      const liveAsset =
+        (p.linkedAssetId ? assets.find((a) => a.id === p.linkedAssetId) : undefined) ||
+        assets.find(
+          (a) =>
+            a.symbol.toUpperCase() === sym ||
+            a.id.toUpperCase() === sym ||
+            (sym === 'BTC' && a.id === 'BTCUSD') ||
+            (sym === 'ETH' && a.id === 'ETHUSD') ||
+            (sym === 'XAU' && a.id === 'XAUUSD')
+        );
+      if (liveAsset) {
+        todayPl += p.units * (liveAsset.price - liveAsset.prevClose);
+      }
     });
 
     const netWorth = holdingsVal + CASH_BALANCE;
     const totalCost = holdingsCost + CASH_BALANCE;
     const unrealizedPl = holdingsVal - holdingsCost;
     const returnPct = holdingsCost > 0 ? (unrealizedPl / holdingsCost) * 100 : 0;
+    const prevNetWorth = netWorth - todayPl;
+    const todayPct = prevNetWorth > 0 ? (todayPl / prevNetWorth) * 100 : 0;
 
-    return { netWorth, totalCost, unrealizedPl, returnPct, byCat };
-  }, [syncedPositions]);
+    return { netWorth, totalCost, unrealizedPl, returnPct, todayPl, todayPct, byCat };
+  }, [syncedPositions, assets]);
 
   // SVG Ring segments
   const ringSegments = useMemo(() => {
@@ -423,9 +451,25 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
               ${totals.netWorth.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
             </p>
             <div className="flex items-center gap-2 mt-1.5 text-xs">
-              <span className="inline-flex items-center gap-0.5 px-2 py-0.5 rounded-full font-bold bg-[#30D158]/15 text-[#16803C] dark:text-[#30D158] tabular-nums font-mono">
-                <ArrowUpRight className="w-3.5 h-3.5" />
-                +$2,485.60 (+1.36%)
+              <span
+                className={`inline-flex items-center gap-0.5 px-2 py-0.5 rounded-full font-bold tabular-nums font-mono ${
+                  totals.todayPl >= 0
+                    ? 'bg-[#30D158]/15 text-[#16803C] dark:text-[#30D158]'
+                    : 'bg-[#FF453A]/15 text-[#D7261C] dark:text-[#FF453A]'
+                }`}
+              >
+                {totals.todayPl >= 0 ? (
+                  <ArrowUpRight className="w-3.5 h-3.5" />
+                ) : (
+                  <ArrowDownRight className="w-3.5 h-3.5" />
+                )}
+                {totals.todayPl >= 0 ? '+$' : '-$'}
+                {Math.abs(totals.todayPl).toLocaleString('en-US', {
+                  minimumFractionDigits: 2,
+                  maximumFractionDigits: 2,
+                })}{' '}
+                ({totals.todayPct >= 0 ? '+' : ''}
+                {totals.todayPct.toFixed(2)}%)
               </span>
               <span className="text-[#6C6C70] dark:text-[#8E8E93]">Today</span>
             </div>

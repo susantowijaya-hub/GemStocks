@@ -9,13 +9,11 @@ import {
   Sparkles,
   TrendingUp,
 } from 'lucide-react';
-import {
-  CATEGORY_META,
-  ECONOMIC_EVENTS,
-  NEWS_STORIES,
-} from '../data/marketData';
+import { CATEGORY_META } from '../data/marketData';
 import {
   AppRoute,
+  CalendarCatalyst,
+  EconomicEvent,
   MarketAsset,
   NewsStory,
   Timeframe,
@@ -31,6 +29,9 @@ import { InteractiveChart } from './InteractiveChart';
 
 interface MarketDashboardViewProps {
   assets: MarketAsset[];
+  newsStories: NewsStory[];
+  economicEvents: EconomicEvent[];
+  nextCatalyst: CalendarCatalyst | null;
   selectedAssetId: string;
   onSelectAsset: (id: string) => void;
   searchQuery: string;
@@ -40,6 +41,7 @@ interface MarketDashboardViewProps {
   onOpenStory: (story: NewsStory) => void;
   onNavigate: (route: AppRoute) => void;
   onOpenAiAsset?: (asset: MarketAsset) => void;
+  onLoadTimeframe?: (assetId: string, tf: Timeframe) => void;
   countdownSeconds: number;
 }
 
@@ -92,6 +94,9 @@ function formatCountdown(totalSec: number): string {
 
 export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
   assets,
+  newsStories,
+  economicEvents,
+  nextCatalyst,
   selectedAssetId,
   onSelectAsset,
   searchQuery,
@@ -101,6 +106,7 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
   onOpenStory,
   onNavigate,
   onOpenAiAsset,
+  onLoadTimeframe,
   countdownSeconds,
 }) => {
   const [timeframe, setTimeframe] = useState<Timeframe>('1D');
@@ -156,13 +162,19 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
     });
   };
 
+  useEffect(() => {
+    if (onLoadTimeframe && activeAsset?.id) {
+      onLoadTimeframe(activeAsset.id, timeframe);
+    }
+  }, [activeAsset?.id, timeframe, onLoadTimeframe]);
+
   const filteredEvents = useMemo(() => {
-    return ECONOMIC_EVENTS.filter((ev) => {
+    return economicEvents.filter((ev) => {
       const matchDay = calDayFilter === 'week' ? true : ev.day === calDayFilter;
       const matchImpact = highOnly ? ev.impact === 'HIGH' : true;
       return matchDay && matchImpact;
     });
-  }, [calDayFilter, highOnly]);
+  }, [economicEvents, calDayFilter, highOnly]);
 
   const handleSelectRow = (id: string) => {
     onSelectAsset(id);
@@ -533,7 +545,7 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
         </button>
       </div>
 
-      {NEWS_STORIES.slice(0, 3).map((story) => (
+      {newsStories.slice(0, 3).map((story) => (
         <article
           key={story.id}
           onClick={() => onOpenStory(story)}
@@ -584,7 +596,7 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
             Next High Impact Release
           </span>
           <p className="text-xs font-bold text-[#1C1C1E] dark:text-white mt-0.5">
-            US Non-Farm Payrolls
+            {nextCatalyst ? `${nextCatalyst.currency} · ${nextCatalyst.title}` : 'Macro Data Release'}
           </p>
         </div>
         <div className="px-2.5 py-1 rounded-lg bg-white dark:bg-black/60 font-mono text-xs font-bold text-[#16803C] dark:text-[#30D158] tabular-nums border border-[#E5E5EA] dark:border-[#2C2C2E]">
@@ -624,7 +636,7 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
 
       {/* Event Cards */}
       <div className="flex flex-col gap-2.5">
-        {filteredEvents.map((ev) => (
+        {filteredEvents.slice(0, 6).map((ev) => (
           <div
             key={ev.id}
             className="p-3.5 rounded-2xl bg-white dark:bg-[#1C1C1E] border border-[#E5E5EA] dark:border-[#2C2C2E] flex flex-col gap-2"
@@ -694,6 +706,21 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
             </div>
           </div>
         ))}
+        {filteredEvents.length === 0 && (
+          <div className="p-4 rounded-2xl bg-white dark:bg-[#1C1C1E] border border-[#E5E5EA] dark:border-[#2C2C2E] text-center text-xs text-[#6C6C70] dark:text-[#8E8E93] flex flex-col items-center gap-2">
+            <span>No releases match this filter window.</span>
+            <button
+              type="button"
+              onClick={() => {
+                setCalDayFilter('week');
+                setHighOnly(false);
+              }}
+              className="text-[#0071E3] dark:text-[#0A84FF] font-semibold hover:underline"
+            >
+              Show This Week
+            </button>
+          </div>
+        )}
       </div>
     </section>
   );

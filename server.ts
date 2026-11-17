@@ -5,6 +5,13 @@ import type { Request, Response } from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  fetchLiveCalendar,
+  fetchLiveChart,
+  fetchLiveFxRates,
+  fetchLiveNews,
+  fetchLiveQuotes,
+} from './server/liveFeeds.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -55,6 +62,69 @@ async function startServer() {
       grounding: 'googleSearch',
       timestamp: new Date().toISOString(),
     });
+  });
+
+  // Live Market Quotes (all 18 tracked global tickers)
+  app.get('/api/market/quotes', async (_req: Request, res: Response) => {
+    try {
+      const payload = await fetchLiveQuotes();
+      res.json(payload);
+    } catch (err) {
+      console.error('Failed to fetch live quotes:', err);
+      res.status(502).json({ error: 'Unable to fetch live market quotes.' });
+    }
+  });
+
+  // Live Historical Chart Series per ticker & timeframe
+  app.get('/api/market/chart', async (req: Request, res: Response) => {
+    try {
+      const id = typeof req.query.id === 'string' ? req.query.id : '';
+      const timeframe = typeof req.query.timeframe === 'string' ? req.query.timeframe : '1D';
+      if (!id) {
+        return res.status(400).json({ error: 'Missing asset id' });
+      }
+      const chart = await fetchLiveChart(id, timeframe);
+      if (!chart) {
+        return res.status(404).json({ error: 'Chart series unavailable for asset' });
+      }
+      return res.json(chart);
+    } catch (err) {
+      console.error('Failed to fetch live chart:', err);
+      return res.status(502).json({ error: 'Unable to fetch chart series.' });
+    }
+  });
+
+  // Live FX Rates & Major Pairs
+  app.get('/api/fx/rates', async (_req: Request, res: Response) => {
+    try {
+      const fx = await fetchLiveFxRates();
+      res.json(fx);
+    } catch (err) {
+      console.error('Failed to fetch live FX rates:', err);
+      res.status(502).json({ error: 'Unable to fetch live FX rates.' });
+    }
+  });
+
+  // Live Breaking Financial News RSS Aggregator
+  app.get('/api/news/feed', async (_req: Request, res: Response) => {
+    try {
+      const news = await fetchLiveNews();
+      res.json(news);
+    } catch (err) {
+      console.error('Failed to fetch live news:', err);
+      res.status(502).json({ error: 'Unable to fetch live news feed.' });
+    }
+  });
+
+  // Live Macroeconomic Calendar
+  app.get('/api/calendar/events', async (_req: Request, res: Response) => {
+    try {
+      const cal = await fetchLiveCalendar();
+      res.json(cal);
+    } catch (err) {
+      console.error('Failed to fetch live calendar:', err);
+      res.status(502).json({ error: 'Unable to fetch live economic calendar.' });
+    }
   });
 
   // Grounded AI Market Research Endpoint (Gemini 4 Hydrogen + Google Search)

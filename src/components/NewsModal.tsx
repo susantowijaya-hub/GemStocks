@@ -53,7 +53,9 @@ export const NewsModal: React.FC<NewsModalProps> = ({ story, onClose }) => {
             {story.publisher}
           </span>
           <span className="text-[#6C6C70] dark:text-[#8E8E93]">·</span>
-          <span className="text-[#6C6C70] dark:text-[#8E8E93]">{story.timeAgo}</span>
+          <span className="text-[#6C6C70] dark:text-[#8E8E93]">
+            {story.publishedAt ? `${story.timeAgo} (${story.publishedAt})` : story.timeAgo}
+          </span>
         </div>
 
         {/* Headline */}
@@ -78,23 +80,36 @@ export const NewsModal: React.FC<NewsModalProps> = ({ story, onClose }) => {
             Verified Desk Dispatch
           </span>
 
-          <button
-            type="button"
-            onClick={() => setSavedNotice(true)}
-            className="px-4 py-2 rounded-full bg-[#0071E3] dark:bg-[#0A84FF] text-white text-xs font-semibold hover:opacity-90 transition-opacity flex items-center gap-1.5"
-          >
-            {savedNotice ? (
-              <>
-                <CheckCircle2 className="w-3.5 h-3.5" />
-                <span>Saved to Reading Brief</span>
-              </>
-            ) : (
-              <>
-                <span>Save Full Dispatch</span>
+          <div className="flex flex-wrap items-center gap-2">
+            {story.url && (
+              <a
+                href={story.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="px-4 py-2 rounded-full bg-[#E5E5EA] dark:bg-[#2C2C2E] text-[#1C1C1E] dark:text-white text-xs font-semibold hover:opacity-85 transition-opacity flex items-center gap-1.5"
+              >
+                <span>Open on {story.publisher}</span>
                 <ExternalLink className="w-3.5 h-3.5" />
-              </>
+              </a>
             )}
-          </button>
+            <button
+              type="button"
+              onClick={() => setSavedNotice(true)}
+              className="px-4 py-2 rounded-full bg-[#0071E3] dark:bg-[#0A84FF] text-white text-xs font-semibold hover:opacity-90 transition-opacity flex items-center gap-1.5"
+            >
+              {savedNotice ? (
+                <>
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  <span>Saved to Reading Brief</span>
+                </>
+              ) : (
+                <>
+                  <span>Save Full Dispatch</span>
+                  <ExternalLink className="w-3.5 h-3.5" />
+                </>
+              )}
+            </button>
+          </div>
         </div>
       </div>
     </div>

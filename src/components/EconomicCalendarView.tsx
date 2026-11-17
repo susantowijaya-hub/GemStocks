@@ -1,9 +1,11 @@
 import React, { useMemo, useState } from 'react';
 import { Bell, BellRing, Download, Timer } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
-import { ECONOMIC_EVENTS } from '../data/marketData';
+import { CalendarCatalyst, EconomicEvent } from '../types/market';
 
 interface EconomicCalendarViewProps {
+  events: EconomicEvent[];
+  nextCatalyst: CalendarCatalyst | null;
   searchQuery: string;
   countdownSeconds: number;
 }
@@ -20,6 +22,8 @@ function formatCountdown(totalSec: number): string {
 }
 
 export const EconomicCalendarView: React.FC<EconomicCalendarViewProps> = ({
+  events,
+  nextCatalyst,
   searchQuery,
   countdownSeconds,
 }) => {
@@ -30,9 +34,28 @@ export const EconomicCalendarView: React.FC<EconomicCalendarViewProps> = ({
   const [exportNotice, setExportNotice] = useState(false);
   const alertSet = preferences.nfpAlertEnabled;
 
+  const todayLabel = useMemo(
+    () =>
+      new Intl.DateTimeFormat('en-US', {
+        timeZone: 'Asia/Jakarta',
+        month: 'short',
+        day: 'numeric',
+      }).format(new Date()),
+    []
+  );
+  const tomorrowLabel = useMemo(
+    () =>
+      new Intl.DateTimeFormat('en-US', {
+        timeZone: 'Asia/Jakarta',
+        month: 'short',
+        day: 'numeric',
+      }).format(new Date(Date.now() + 86400_000)),
+    []
+  );
+
   const filteredEvents = useMemo(() => {
     const q = searchQuery.toLowerCase().trim();
-    return ECONOMIC_EVENTS.filter((ev) => {
+    return events.filter((ev) => {
       const matchDay = dayFilter === 'all' || dayFilter === 'week' ? true : ev.day === dayFilter;
       const matchCur = currencyFilter === 'ALL' || ev.currency === currencyFilter;
       const matchImp = impactFilter === 'ALL' ? true : impactFilter === 'HIGH' ? ev.impact === 'HIGH' : true;
@@ -43,7 +66,7 @@ export const EconomicCalendarView: React.FC<EconomicCalendarViewProps> = ({
         ev.currency.toLowerCase().includes(q);
       return matchDay && matchCur && matchImp && matchSearch;
     });
-  }, [dayFilter, currencyFilter, impactFilter, searchQuery]);
+  }, [events, dayFilter, currencyFilter, impactFilter, searchQuery]);
 
   const handleExportCsv = () => {
     const header = 'TimeWIB,Currency,Impact,Event,Actual,Forecast,Previous,Deviation\n';
@@ -100,14 +123,16 @@ export const EconomicCalendarView: React.FC<EconomicCalendarViewProps> = ({
               </span>
               <span className="text-[#6C6C70] dark:text-[#8E8E93]">·</span>
               <span className="font-semibold text-[#0071E3] dark:text-[#0A84FF]">
-                USD Macro Catalyst
+                {nextCatalyst ? `${nextCatalyst.currency} Macro Catalyst` : 'USD Macro Catalyst'}
               </span>
             </div>
             <h2 className="text-lg sm:text-2xl font-extrabold text-[#1C1C1E] dark:text-white mt-0.5">
-              US Non-Farm Payrolls &amp; Unemployment Rate
+              {nextCatalyst ? nextCatalyst.title : 'Upcoming High-Impact Macro Release'}
             </h2>
             <p className="text-xs text-[#6C6C70] dark:text-[#8E8E93] mt-0.5">
-              Bureau of Labor Statistics · Washington DC Release (20:30 WIB)
+              {nextCatalyst
+                ? `${nextCatalyst.description} · Release (${nextCatalyst.timeWib} WIB)`
+                : 'Live Economic Calendar Feed · Timed in Asia/Jakarta (WIB)'}
             </p>
           </div>
         </div>
@@ -152,8 +177,8 @@ export const EconomicCalendarView: React.FC<EconomicCalendarViewProps> = ({
           {(
             [
               { id: 'all', label: 'All Days' },
-              { id: 'today', label: 'Today (Nov 17)' },
-              { id: 'tomorrow', label: 'Tomorrow (Nov 18)' },
+              { id: 'today', label: `Today (${todayLabel})` },
+              { id: 'tomorrow', label: `Tomorrow (${tomorrowLabel})` },
               { id: 'week', label: 'This Week' },
             ] as const
           ).map((t) => (

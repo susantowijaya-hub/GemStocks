@@ -1,11 +1,49 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { INITIAL_ASSETS } from '../data/marketData';
-import { MarketAsset } from '../types/market';
+import {
+  ECONOMIC_EVENTS,
+  FX_PAIR_TILES,
+  FX_RATES_USD_BASE,
+  INITIAL_ASSETS,
+  NEWS_STORIES,
+} from '../data/marketData';
+import {
+  CalendarCatalyst,
+  CurrencyCode,
+  EconomicEvent,
+  FxPairTile,
+  MarketAsset,
+  NewsStory,
+  Timeframe,
+} from '../types/market';
+
+interface QuotePatch {
+  id: string;
+  price: number;
+  prevClose: number;
+  changeValue: number;
+  changePercent: number;
+  open: string;
+  dayHigh: string;
+  dayLow: string;
+  volume: string;
+  w52Low: string;
+  w52High: string;
+  w52Pct: number;
+  sparklinePoints: number[];
+  chart1D: number[];
+  timestamps1D: number[];
+}
 
 export function useLiveMarket() {
   const [assets, setAssets] = useState<MarketAsset[]>(INITIAL_ASSETS);
+  const [newsStories, setNewsStories] = useState<NewsStory[]>(NEWS_STORIES);
+  const [economicEvents, setEconomicEvents] = useState<EconomicEvent[]>(ECONOMIC_EVENTS);
+  const [nextCatalyst, setNextCatalyst] = useState<CalendarCatalyst | null>(null);
+  const [fxRates, setFxRates] = useState<Record<CurrencyCode, number>>(FX_RATES_USD_BASE);
+  const [fxPairTiles, setFxPairTiles] = useState<FxPairTile[]>(FX_PAIR_TILES);
   const [isPulseActive, setIsPulseActive] = useState(true);
   const [wsConnected, setWsConnected] = useState(false);
+  const [feedsLive, setFeedsLive] = useState(false);
   const [flashMap, setFlashMap] = useState<Record<string, 'gain' | 'loss'>>({});
   const isPulseRef = useRef(isPulseActive);
   isPulseRef.current = isPulseActive;
@@ -22,7 +60,145 @@ export function useLiveMarket() {
     }, 650);
   }, []);
 
-  // Real Binance WebSocket connection for BTC/USD and ETH/USD
+  // Fetch all 18 live market quotes from backend Yahoo Finance aggregator
+  const refreshQuotes = useCallback(async () => {
+    try {
+      const res = await fetch('/api/market/quotes');
+      if (!res.ok) return;
+      const payload = (await res.json()) as { quotes?: QuotePatch[] };
+      const patches = payload.quotes;
+      if (!Array.isArray(patches) || patches.length === 0) return;
+
+      const patchMap = new Map(patches.map((p) => [p.id, p]));
+      setFeedsLive(true);
+
+      setAssets((prev) =>
+        prev.map((asset) => {
+          const patch = patchMap.get(asset.id);
+          if (!patch) return asset;
+          if (Math.abs(patch.price - asset.price) > 0.0001) {
+            triggerFlash(asset.id, patch.price >= asset.price ? 'gain' : 'loss');
+          }
+          return {
+            ...asset,
+            price: patch.price,
+            prevClose: patch.prevClose,
+            changeValue: patch.changeValue,
+            changePercent: patch.changePercent,
+            open: patch.open,
+            dayHigh: patch.dayHigh,
+            dayLow: patch.dayLow,
+            volume: patch.volume !== 'N/A' ? patch.volume : asset.volume,
+            w52Low: patch.w52Low,
+            w52High: patch.w52High,
+            w52Pct: patch.w52Pct,
+            sparklinePoints: patch.sparklinePoints.length > 1 ? patch.sparklinePoints : asset.sparklinePoints,
+            chartSeries: {
+              ...asset.chartSeries,
+              '1D': patch.chart1D.length > 1 ? patch.chart1D : asset.chartSeries['1D'],
+            },
+            chartTimestamps: {
+              ...asset.chartTimestamps,
+              '1D': patch.timestamps1D,
+            },
+          };
+        })
+      );
+    } catch {
+      // keep existing state on transient network failure
+    }
+  }, [triggerFlash]);
+
+  // Fetch historical chart series on demand when changing timeframe or symbol
+  const loadChartTimeframe = useCallback(async (assetId: string, timeframe: Timeframe) => {
+    try {
+      const res = await fetch(
+        `/api/market/chart?id=${encodeURIComponent(assetId)}&timeframe=${encodeURIComponent(timeframe)}`
+      );
+      if (!res.ok) return;
+      const data = (await res.json()) as {
+        points?: number[];
+        timestamps?: number[];
+        prevClose?: number;
+      };
+      if (!Array.isArray(data.points) || data.points.length < 2) return;
+
+      setAssets((prev) =>
+        prev.map((asset) => {
+          if (asset.id !== assetId) return asset;
+          return {
+            ...asset,
+            chartSeries: {
+              ...asset.chartSeries,
+              [timeframe]: data.points!,
+            },
+            chartTimestamps: {
+              ...asset.chartTimestamps,
+              [timeframe]: data.timestamps,
+            },
+          };
+        })
+      );
+    } catch {
+      // keep existing series
+    }
+  }, []);
+
+  // Fetch live News RSS, Economic Calendar, and FX Rates
+  const refreshSecondaryFeeds = useCallback(async () => {
+    try {
+      const [newsRes, calRes, fxRes] = await Promise.all([
+        fetch('/api/news/feed').then((r) => (r.ok ? r.json() : null)).catch(() => null),
+        fetch('/api/calendar/events').then((r) => (r.ok ? r.json() : null)).catch(() => null),
+        fetch('/api/fx/rates').then((r) => (r.ok ? r.json() : null)).catch(() => null),
+      ]);
+
+      if (newsRes && Array.isArray(newsRes.stories) && newsRes.stories.length > 0) {
+        setNewsStories(newsRes.stories);
+      }
+
+      if (calRes && Array.isArray(calRes.events) && calRes.events.length > 0) {
+        setEconomicEvents(calRes.events);
+        if (calRes.nextCatalyst) {
+          setNextCatalyst(calRes.nextCatalyst);
+        }
+      }
+
+      if (fxRes && fxRes.rates) {
+        setFxRates((prev) => ({ ...prev, ...fxRes.rates }));
+        if (Array.isArray(fxRes.pairTiles) && fxRes.pairTiles.length > 0) {
+          setFxPairTiles(fxRes.pairTiles);
+        }
+      }
+    } catch {
+      // keep fallback state
+    }
+  }, []);
+
+  // Initial fetch + periodic live polling
+  useEffect(() => {
+    void refreshQuotes();
+    void refreshSecondaryFeeds();
+
+    const quoteTimer = window.setInterval(() => {
+      if (isPulseRef.current) {
+        void refreshQuotes();
+      }
+    }, 45_000);
+
+    const secondaryTimer = window.setInterval(() => {
+      if (isPulseRef.current) {
+        void refreshSecondaryFeeds();
+      }
+    }, 300_000);
+
+    return () => {
+      window.clearInterval(quoteTimer);
+      window.clearInterval(secondaryTimer);
+    };
+  }, [refreshQuotes, refreshSecondaryFeeds]);
+
+  // Real Binance WebSocket connection for sub-second BTC/USD and ETH/USD updates
   useEffect(() => {
     let ws: WebSocket | null = null;
     let reconnectTimer: number | null = null;
@@ -107,52 +283,26 @@ export function useLiveMarket() {
     };
   }, [triggerFlash]);
 
-  // Micro-tick pulse simulation for non-WebSocket indices, commodities & FX
-  useEffect(() => {
-    const interval = window.setInterval(() => {
-      if (!isPulseRef.current) return;
-
-      setAssets((prev) => {
-        const candidates = prev.filter((a) => !a.liveStreamable);
-        const picked = candidates[Math.floor(Math.random() * candidates.length)];
-        if (!picked) return prev;
-
-        const stepRatio = (Math.random() - 0.48) * 0.0005;
-        const nextPrice = Number((picked.price * (1 + stepRatio)).toFixed(picked.decimals));
-        const nextChangeVal = Number((nextPrice - picked.prevClose).toFixed(picked.decimals >= 3 ? picked.decimals : 2));
-        const nextChangePct = Number(((nextChangeVal / picked.prevClose) * 100).toFixed(2));
-        const dir = nextPrice >= picked.price ? 'gain' : 'loss';
-        triggerFlash(picked.id, dir);
-
-        return prev.map((asset) => {
-          if (asset.id !== picked.id) return asset;
-          const nextSeries1D = [...asset.chartSeries['1D'].slice(0, -1), nextPrice];
-          return {
-            ...asset,
-            price: nextPrice,
-            changeValue: nextChangeVal,
-            changePercent: nextChangePct,
-            chartSeries: {
-              ...asset.chartSeries,
-              '1D': nextSeries1D,
-            },
-          };
-        });
-      });
-    }, 2800);
-
-    return () => window.clearInterval(interval);
-  }, [triggerFlash]);
-
   const togglePulse = useCallback(() => {
     setIsPulseActive((prev) => !prev);
   }, []);
 
   return {
     assets,
+    newsStories,
+    economicEvents,
+    nextCatalyst,
+    fxRates,
+    fxPairTiles,
     isPulseActive,
     wsConnected,
+    feedsLive,
     flashMap,
     togglePulse,
+    loadChartTimeframe,
+    refreshAll: () => {
+      void refreshQuotes();
+      void refreshSecondaryFeeds();
+    },
   };
 }

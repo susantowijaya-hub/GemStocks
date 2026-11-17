@@ -1,9 +1,10 @@
 import React, { useMemo, useState } from 'react';
 import { ArrowRight, Globe, Sparkles, Tag } from 'lucide-react';
-import { EDITORIAL_INSIGHTS, NEWS_STORIES } from '../data/marketData';
+import { EDITORIAL_INSIGHTS } from '../data/marketData';
 import { NewsStory } from '../types/market';
 
 interface NewsFeedViewProps {
+  stories: NewsStory[];
   searchQuery: string;
   onOpenStory: (story: NewsStory) => void;
   onFetchLiveNewsPulse?: () => void;
@@ -20,6 +21,7 @@ const TOPICS: { id: TopicFilter; label: string }[] = [
 ];
 
 export const NewsFeedView: React.FC<NewsFeedViewProps> = ({
+  stories,
   searchQuery,
   onOpenStory,
   onFetchLiveNewsPulse,
@@ -28,7 +30,7 @@ export const NewsFeedView: React.FC<NewsFeedViewProps> = ({
 
   const filteredStories = useMemo(() => {
     const q = searchQuery.toLowerCase().trim();
-    return NEWS_STORIES.filter((s) => {
+    return stories.filter((s) => {
       const matchTopic = activeTopic === 'all' || s.topic === activeTopic;
       const matchSearch =
         !q ||
@@ -38,7 +40,7 @@ export const NewsFeedView: React.FC<NewsFeedViewProps> = ({
         s.tags.some((t) => t.toLowerCase().includes(q));
       return matchTopic && matchSearch;
     });
-  }, [activeTopic, searchQuery]);
+  }, [stories, activeTopic, searchQuery]);
 
   return (
     <div className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 pb-28 flex flex-col gap-7">
@@ -115,7 +117,9 @@ export const NewsFeedView: React.FC<NewsFeedViewProps> = ({
                         {story.publisher}
                       </span>
                       <span className="text-[#6C6C70] dark:text-[#8E8E93]">·</span>
-                      <span className="text-[#6C6C70] dark:text-[#8E8E93]">{story.timeAgo}</span>
+                      <span className="text-[#6C6C70] dark:text-[#8E8E93]">
+                        {story.publishedAt ? `${story.timeAgo} · ${story.publishedAt}` : story.timeAgo}
+                      </span>
                     </div>
                     {story.impact && (
                       <span className="text-xs font-semibold text-[#0071E3] dark:text-[#0A84FF]">

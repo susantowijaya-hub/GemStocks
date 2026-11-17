@@ -45,6 +45,7 @@ export interface MarketAsset {
   commentary: string;
   sparklinePoints: number[];
   chartSeries: Record<Timeframe, number[]>;
+  chartTimestamps?: Partial<Record<Timeframe, number[]>>;
   liveStreamable?: boolean;
 }
 
@@ -52,6 +53,7 @@ export interface NewsStory {
   id: string;
   publisher: string;
   timeAgo: string;
+  publishedAt?: string;
   isBreaking?: boolean;
   impact?: string;
   topic: 'rates' | 'idx' | 'commodities' | 'crypto';
@@ -61,6 +63,7 @@ export interface NewsStory {
   paragraphs: string[];
   badgeMetric?: string;
   badgePositive?: boolean;
+  url?: string;
 }
 
 export interface EditorialInsight {
@@ -132,4 +135,12 @@ export interface SavedAiBrief {
   answer: string;
   sources: GroundedSource[];
   createdAtLabel?: string;
+}
+
+export interface CalendarCatalyst {
+  title: string;
+  currency: string;
+  timeWib: string;
+  targetEpochMs: number;
+  description: string;
 }

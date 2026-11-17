@@ -15,7 +15,6 @@ import { NewsFeedView } from './components/NewsFeedView';
 import { NewsModal } from './components/NewsModal';
 import { PortfolioView } from './components/PortfolioView';
 import { AuthProvider } from './contexts/AuthContext';
-import { NEWS_STORIES } from './data/marketData';
 import { useLiveMarket } from './hooks/useLiveMarket';
 import { useTheme } from './hooks/useTheme';
 import { AppRoute, MarketAsset, NewsStory } from './types/market';
@@ -30,7 +29,20 @@ function getInitialRoute(): AppRoute {
 
 function StocksTerminalShell() {
   const { isDark, toggleTheme } = useTheme();
-  const { assets, isPulseActive, wsConnected, flashMap, togglePulse } = useLiveMarket();
+  const {
+    assets,
+    newsStories,
+    economicEvents,
+    nextCatalyst,
+    fxRates,
+    fxPairTiles,
+    isPulseActive,
+    wsConnected,
+    feedsLive,
+    flashMap,
+    togglePulse,
+    loadChartTimeframe,
+  } = useLiveMarket();
 
   const [activeRoute, setActiveRoute] = useState<AppRoute>(getInitialRoute);
   const [selectedAssetId, setSelectedAssetId] = useState<string>('SPX');
@@ -62,13 +74,25 @@ function StocksTerminalShell() {
     return () => window.removeEventListener('hashchange', handleHashChange);
   }, []);
 
-  // Shared live NFP countdown timer (3h 42m 15s initial)
+  // Sync live countdown to real nextCatalyst target timestamp
+  useEffect(() => {
+    if (nextCatalyst?.targetEpochMs) {
+      const diff = Math.max(0, Math.floor((nextCatalyst.targetEpochMs - Date.now()) / 1000));
+      setCountdownSeconds(diff);
+    }
+  }, [nextCatalyst]);
+
   useEffect(() => {
     const timer = window.setInterval(() => {
-      setCountdownSeconds((prev) => (prev > 0 ? prev - 1 : 0));
+      if (nextCatalyst?.targetEpochMs) {
+        const diff = Math.max(0, Math.floor((nextCatalyst.targetEpochMs - Date.now()) / 1000));
+        setCountdownSeconds(diff);
+      } else {
+        setCountdownSeconds((prev) => (prev > 0 ? prev - 1 : 0));
+      }
     }, 1000);
     return () => window.clearInterval(timer);
-  }, []);
+  }, [nextCatalyst]);
 
   const handleNavigate = useCallback((route: AppRoute) => {
     setActiveRoute(route);
@@ -120,10 +144,10 @@ function StocksTerminalShell() {
         isPercentMode={isPercentMode}
         onToggleBadgeMode={handleToggleBadgeMode}
         isPulseActive={isPulseActive}
-        wsConnected={wsConnected}
+        wsConnected={wsConnected || feedsLive}
         onTogglePulse={togglePulse}
         onOpenAi={handleOpenAiGeneral}
-        tickerStories={NEWS_STORIES}
+        tickerStories={newsStories}
         onOpenStory={setActiveStory}
       />
 
@@ -131,6 +155,9 @@ function StocksTerminalShell() {
         {activeRoute === 'dashboard' && (
           <MarketDashboardView
             assets={assets}
+            newsStories={newsStories}
+            economicEvents={economicEvents}
+            nextCatalyst={nextCatalyst}
             selectedAssetId={selectedAssetId}
             onSelectAsset={setSelectedAssetId}
             searchQuery={searchQuery}
@@ -140,6 +167,7 @@ function StocksTerminalShell() {
             onOpenStory={setActiveStory}
             onNavigate={handleNavigate}
             onOpenAiAsset={handleOpenAiForAsset}
+            onLoadTimeframe={loadChartTimeframe}
             countdownSeconds={countdownSeconds}
           />
         )}
@@ -148,10 +176,17 @@ function StocksTerminalShell() {
           <PortfolioView assets={assets} searchQuery={searchQuery} />
         )}
 
-        {activeRoute === 'fx' && <FxMatrixView searchQuery={searchQuery} />}
+        {activeRoute === 'fx' && (
+          <FxMatrixView
+            fxRates={fxRates}
+            pairTiles={fxPairTiles}
+            searchQuery={searchQuery}
+          />
+        )}
 
         {activeRoute === 'news' && (
           <NewsFeedView
+            stories={newsStories}
             searchQuery={searchQuery}
             onOpenStory={setActiveStory}
             onFetchLiveNewsPulse={handleFetchLiveNewsPulse}
@@ -159,7 +194,12 @@ function StocksTerminalShell() {
         )}
 
         {activeRoute === 'calendar' && (
-          <EconomicCalendarView searchQuery={searchQuery} countdownSeconds={countdownSeconds} />
+          <EconomicCalendarView
+            events={economicEvents}
+            nextCatalyst={nextCatalyst}
+            searchQuery={searchQuery}
+            countdownSeconds={countdownSeconds}
+          />
         )}
       </main>
 
