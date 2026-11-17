@@ -1,12 +1,11 @@
 import React from 'react';
 import {
-  ArrowLeftRight,
+  BarChart3,
   CalendarDays,
   LayoutDashboard,
   Moon,
   Newspaper,
   Sun,
-  Wallet,
 } from 'lucide-react';
 import { AppRoute } from '../types/market';
 
@@ -24,8 +23,7 @@ const DOCK_ITEMS: {
   icon: React.ComponentType<{ className?: string }>;
 }[] = [
   { id: 'dashboard', label: 'Market Dashboard', shortLabel: 'Markets', icon: LayoutDashboard },
-  { id: 'portfolio', label: 'Portfolio & Holdings', shortLabel: 'Portfolio', icon: Wallet },
-  { id: 'fx', label: 'Currency & FX Matrix', shortLabel: 'FX Matrix', icon: ArrowLeftRight },
+  { id: 'stocks', label: 'Top 10 Stocks (US & ID)', shortLabel: 'Stocks', icon: BarChart3 },
   { id: 'news', label: 'Breaking News', shortLabel: 'News', icon: Newspaper },
   { id: 'calendar', label: 'Economic Calendar', shortLabel: 'Calendar', icon: CalendarDays },
 ];
@@ -39,9 +37,9 @@ export const BottomDock: React.FC<BottomDockProps> = ({
   return (
     <nav
       aria-label="Bottom Dock Navigation"
-      className="fixed bottom-3 sm:bottom-5 left-1/2 -translate-x-1/2 z-40 w-[calc(100%-1.5rem)] max-w-md sm:w-auto pb-safe pointer-events-none flex justify-center"
+      className="fixed bottom-3 sm:bottom-5 left-1/2 -translate-x-1/2 z-40 w-[calc(100%-2rem)] max-w-sm sm:max-w-none sm:w-auto pb-safe pointer-events-none flex justify-center"
     >
-      <div className="pointer-events-auto w-full sm:w-auto rounded-2xl px-2 py-1.5 sm:px-3 sm:py-2 flex items-center justify-between sm:justify-center gap-1 sm:gap-1.5 backdrop-blur-2xl bg-white/90 dark:bg-[#1C1C1E]/85 border border-black/10 dark:border-white/15 shadow-[0_12px_36px_rgba(0,0,0,0.16)] dark:shadow-[0_16px_40px_rgba(0,0,0,0.65)]">
+      <div className="pointer-events-auto w-full sm:w-auto rounded-2xl px-3 py-1.5 sm:px-3 sm:py-2 flex items-center justify-around sm:justify-center gap-1 sm:gap-1.5 backdrop-blur-2xl bg-white/90 dark:bg-[#1C1C1E]/85 border border-black/10 dark:border-white/15 shadow-[0_12px_36px_rgba(0,0,0,0.16)] dark:shadow-[0_16px_40px_rgba(0,0,0,0.65)]">
         {DOCK_ITEMS.map((item) => {
           const Icon = item.icon;
           const isActive = activeRoute === item.id;

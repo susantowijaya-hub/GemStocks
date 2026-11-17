@@ -6,7 +6,6 @@ import {
   ChevronRight,
   LineChart,
   Newspaper,
-  Sparkles,
   TrendingUp,
 } from 'lucide-react';
 import { CATEGORY_META } from '../data/marketData';
@@ -25,6 +24,7 @@ import {
   formatChangeBadge,
   formatFullDelta,
 } from '../utils/formatters';
+import { getAssetSessionStatus } from '../utils/marketSessions';
 import { InteractiveChart } from './InteractiveChart';
 
 interface MarketDashboardViewProps {
@@ -40,7 +40,6 @@ interface MarketDashboardViewProps {
   flashMap: Record<string, 'gain' | 'loss'>;
   onOpenStory: (story: NewsStory) => void;
   onNavigate: (route: AppRoute) => void;
-  onOpenAiAsset?: (asset: MarketAsset) => void;
   onLoadTimeframe?: (assetId: string, tf: Timeframe) => void;
   countdownSeconds: number;
 }
@@ -105,7 +104,6 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
   flashMap,
   onOpenStory,
   onNavigate,
-  onOpenAiAsset,
   onLoadTimeframe,
   countdownSeconds,
 }) => {
@@ -119,6 +117,12 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
   });
   const [calDayFilter, setCalDayFilter] = useState<'today' | 'tomorrow' | 'week'>('today');
   const [highOnly, setHighOnly] = useState(false);
+  const [now, setNow] = useState(() => new Date());
+
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(new Date()), 30_000);
+    return () => window.clearInterval(id);
+  }, []);
 
   // When searching on mobile, switch to watchlist if user is on chart tab
   useEffect(() => {
@@ -131,6 +135,31 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
     () => assets.find((a) => a.id === selectedAssetId) ?? assets[0],
     [assets, selectedAssetId]
   );
+
+  const activeSession = useMemo(
+    () => getAssetSessionStatus(activeAsset.id, activeAsset.category, now),
+    [activeAsset.id, activeAsset.category, now]
+  );
+
+  const yieldCurveInfo = useMemo(() => {
+    const us10y = assets.find((a) => a.id === 'US10Y');
+    const us30y = assets.find((a) => a.id === 'US30Y');
+    const id10y = assets.find((a) => a.id === 'ID10Y');
+    const spreadBps = ((us30y?.price ?? 4.62) - (us10y?.price ?? 4.44)) * 100;
+    const prevSpreadBps = ((us30y?.prevClose ?? 4.61) - (us10y?.prevClose ?? 4.45)) * 100;
+    const deltaBps = spreadBps - prevSpreadBps;
+    const posture =
+      spreadBps < 0 ? 'Inverted' : deltaBps >= 0.3 ? 'Steepening' : deltaBps <= -0.3 ? 'Flattening' : 'Steady';
+    const idUsSpreadBps = ((id10y?.price ?? 7.607) - (us10y?.price ?? 4.44)) * 100;
+    return {
+      spreadBps,
+      posture,
+      us10yVal: us10y?.price.toFixed(3) ?? '—',
+      us30yVal: us30y?.price.toFixed(3) ?? '—',
+      id10yVal: id10y?.price.toFixed(3) ?? '—',
+      idUsSpreadBps,
+    };
+  }, [assets]);
 
   const snapshotAssets = useMemo(
     () => assets.filter((a) => a.isSnapshotTile),
@@ -331,7 +360,7 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
             >
               {formatAssetPrice(activeAsset)}
             </div>
-            <div className="flex items-center sm:justify-end gap-2 mt-1">
+            <div className="flex flex-wrap items-center sm:justify-end gap-2 mt-1">
               <span
                 className={`font-bold text-xs sm:text-sm tabular-nums font-mono ${
                   isGain
@@ -341,8 +370,26 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
               >
                 {formatFullDelta(activeAsset)}
               </span>
-              <span className="text-xs text-[#6C6C70] dark:text-[#8E8E93] tabular-nums">
-                · Session
+              <span
+                title={activeSession.detail}
+                className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-semibold ${
+                  activeSession.tone === 'open'
+                    ? 'bg-[#30D158]/15 text-[#16803C] dark:text-[#30D158]'
+                    : activeSession.tone === 'extended' || activeSession.tone === 'break'
+                      ? 'bg-[#FF9F0A]/15 text-[#B25E09] dark:text-[#FF9F0A]'
+                      : 'bg-[#E5E5EA] dark:bg-[#2C2C2E] text-[#6C6C70] dark:text-[#8E8E93]'
+                }`}
+              >
+                <span
+                  className={`w-1.5 h-1.5 rounded-full ${
+                    activeSession.tone === 'open'
+                      ? 'bg-[#30D158]'
+                      : activeSession.tone === 'extended' || activeSession.tone === 'break'
+                        ? 'bg-[#FF9F0A]'
+                        : 'bg-[#8E8E93]'
+                  }`}
+                />
+                {activeSession.shortLabel}: {activeSession.stateLabel}
               </span>
             </div>
           </div>
@@ -361,8 +408,16 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
             <h2 className="text-base font-bold text-[#1C1C1E] dark:text-white">
               Key Statistics
             </h2>
-            <span className="text-xs text-[#6C6C70] dark:text-[#8E8E93] font-medium">
-              Session Snapshot
+            <span className="text-xs text-[#6C6C70] dark:text-[#8E8E93] font-medium tabular-nums">
+              {activeAsset.updatedAtEpoch
+                ? `Updated ${new Intl.DateTimeFormat('en-GB', {
+                    timeZone: 'Asia/Jakarta',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit',
+                    hour12: false,
+                  }).format(new Date(activeAsset.updatedAtEpoch))} WIB`
+                : 'Session Snapshot'}
             </span>
           </div>
 
@@ -398,7 +453,9 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
               </p>
             </div>
             <div>
-              <span className="text-[#6C6C70] dark:text-[#8E8E93]">Avg Vol (30D)</span>
+              <span className="text-[#6C6C70] dark:text-[#8E8E93]">
+                {activeAsset.avgVolLabel || 'Intraday Spread'}
+              </span>
               <p className="font-bold text-sm text-[#1C1C1E] dark:text-white tabular-nums font-mono mt-0.5">
                 {activeAsset.avgVol}
               </p>
@@ -450,16 +507,6 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
               </h2>
             </div>
             <div className="flex items-center gap-2">
-              {onOpenAiAsset && (
-                <button
-                  type="button"
-                  onClick={() => onOpenAiAsset(activeAsset)}
-                  className="px-3 py-1 rounded-full bg-[#0071E3]/10 dark:bg-[#0A84FF]/15 text-[#0071E3] dark:text-[#0A84FF] text-xs font-semibold flex items-center gap-1.5 hover:opacity-85 transition-opacity"
-                >
-                  <Sparkles className="w-3.5 h-3.5" />
-                  <span>Live AI Brief</span>
-                </button>
-              )}
               <span
                 className={`px-3 py-1 rounded-full text-xs font-bold ${
                   activeAsset.sentiment === 'Bullish'
@@ -501,24 +548,52 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
 
           {activeAsset.isYield && (
             <div className="p-3.5 rounded-xl bg-[#F2F2F7] dark:bg-[#2C2C2E]/60 border border-[#E5E5EA] dark:border-[#38383A] flex flex-col gap-1">
-              <div className="flex items-center justify-between text-xs font-semibold">
-                <span className="text-[#1C1C1E] dark:text-white flex items-center gap-1.5">
-                  <TrendingUp className="w-3.5 h-3.5 text-[#0071E3] dark:text-[#0A84FF]" />
-                  US Yield Curve Spread (10Y vs 2Y &amp; 30Y)
-                </span>
-                <span className="text-[#16803C] dark:text-[#30D158] font-bold">
-                  +17.6 bps (Steepening)
-                </span>
-              </div>
-              <p className="text-xs text-[#6C6C70] dark:text-[#8E8E93]">
-                Un-inversion dynamics continue as short-end rate expectations reprice following FOMC guidance.
-              </p>
+              {activeAsset.id === 'ID10Y' ? (
+                <>
+                  <div className="flex items-center justify-between text-xs font-semibold">
+                    <span className="text-[#1C1C1E] dark:text-white flex items-center gap-1.5">
+                      <TrendingUp className="w-3.5 h-3.5 text-[#0071E3] dark:text-[#0A84FF]" />
+                      Indonesia–US 10Y Sovereign Spread
+                    </span>
+                    <span className="font-bold font-mono tabular-nums text-[#0071E3] dark:text-[#0A84FF]">
+                      {yieldCurveInfo.idUsSpreadBps >= 0 ? '+' : ''}
+                      {yieldCurveInfo.idUsSpreadBps.toFixed(1)} bps
+                    </span>
+                  </div>
+                  <p className="text-xs text-[#6C6C70] dark:text-[#8E8E93]">
+                    Live sovereign yield differential between Indonesia 10Y SBN ({yieldCurveInfo.id10yVal}%) and US 10Y Treasury ({yieldCurveInfo.us10yVal}%).
+                  </p>
+                </>
+              ) : (
+                <>
+                  <div className="flex items-center justify-between text-xs font-semibold">
+                    <span className="text-[#1C1C1E] dark:text-white flex items-center gap-1.5">
+                      <TrendingUp className="w-3.5 h-3.5 text-[#0071E3] dark:text-[#0A84FF]" />
+                      US Yield Curve Spread (30Y vs 10Y)
+                    </span>
+                    <span
+                      className={`font-bold font-mono tabular-nums ${
+                        yieldCurveInfo.spreadBps >= 0
+                          ? 'text-[#16803C] dark:text-[#30D158]'
+                          : 'text-[#D7261C] dark:text-[#FF453A]'
+                      }`}
+                    >
+                      {yieldCurveInfo.spreadBps >= 0 ? '+' : ''}
+                      {yieldCurveInfo.spreadBps.toFixed(1)} bps ({yieldCurveInfo.posture})
+                    </span>
+                  </div>
+                  <p className="text-xs text-[#6C6C70] dark:text-[#8E8E93]">
+                    Live benchmark differential between US 30Y ({yieldCurveInfo.us30yVal}%) and US 10Y (
+                    {yieldCurveInfo.us10yVal}%) Treasury yields.
+                  </p>
+                </>
+              )}
             </div>
           )}
 
           <div>
             <h3 className="text-xs font-semibold text-[#6C6C70] dark:text-[#8E8E93] mb-1.5">
-              Editorial Macro Commentary
+              Live Session Technical Summary
             </h3>
             <p className="text-sm text-[#1C1C1E] dark:text-[#E5E5EA] leading-relaxed">
               {activeAsset.commentary}
@@ -842,7 +917,7 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
       {/* Desktop 3-Column Terminal Layout (lg+) */}
       <div className="hidden lg:grid lg:grid-cols-12 flex-1">
         {/* Left Watchlist Sidebar */}
-        <aside className="lg:col-span-3 border-r border-[#E5E5EA] dark:border-[#2C2C2E] bg-white/60 dark:bg-black/60 overflow-y-auto lg:max-h-[calc(100dvh-195px)] flex flex-col">
+        <aside className="lg:col-span-3 border-r border-[#E5E5EA] dark:border-[#2C2C2E] bg-white/60 dark:bg-black/60 overflow-y-auto lg:max-h-[calc(100dvh-225px)] flex flex-col">
           <div className="p-4 border-b border-[#E5E5EA] dark:border-[#2C2C2E] flex items-center justify-between sticky top-0 bg-white/95 dark:bg-black/95 backdrop-blur z-10">
             <div>
               <h2 className="text-base font-bold text-[#1C1C1E] dark:text-white">Watchlist</h2>
@@ -862,12 +937,12 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
         </aside>
 
         {/* Center Interactive Stage */}
-        <section className="lg:col-span-6 border-r border-[#E5E5EA] dark:border-[#2C2C2E] p-6 pb-28 overflow-y-auto lg:max-h-[calc(100dvh-195px)]">
+        <section className="lg:col-span-6 border-r border-[#E5E5EA] dark:border-[#2C2C2E] p-6 pb-28 overflow-y-auto lg:max-h-[calc(100dvh-225px)]">
           {renderChartAndAnalysis()}
         </section>
 
         {/* Right News & Forex Calendar Column */}
-        <aside className="lg:col-span-3 bg-white/60 dark:bg-black/60 p-5 pb-28 overflow-y-auto lg:max-h-[calc(100dvh-195px)] flex flex-col gap-6">
+        <aside className="lg:col-span-3 bg-white/60 dark:bg-black/60 p-5 pb-28 overflow-y-auto lg:max-h-[calc(100dvh-225px)] flex flex-col gap-6">
           {renderNewsColumn()}
           {renderCalendarColumn()}
         </aside>

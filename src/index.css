@@ -61,15 +61,27 @@
   scrollbar-width: none;
 }
 
-/* Marquee Ticker */
+/* Marquee Ticker (GPU-composited across Desktop, Android, and iOS Safari) */
 .ticker-scroll {
-  display: inline-flex;
-  animation: ticker-slide 38s linear infinite;
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  width: max-content;
+  animation-name: ticker-slide;
+  animation-duration: 180s;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+  transform: translate3d(0, 0, 0);
+  -webkit-transform: translate3d(0, 0, 0);
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
   will-change: transform;
 }
 
-.ticker-scroll:hover {
-  animation-play-state: paused;
+@media (hover: hover) {
+  .ticker-scroll:hover {
+    animation-play-state: paused;
+  }
 }
 
 @keyframes ticker-slide {
@@ -83,7 +95,7 @@
 
 @media (prefers-reduced-motion: reduce) {
   .ticker-scroll {
-    animation: none;
+    animation-duration: 280s;
   }
 }
 

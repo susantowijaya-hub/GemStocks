@@ -11,6 +11,7 @@ import {
   fetchLiveFxRates,
   fetchLiveNews,
   fetchLiveQuotes,
+  fetchTopStockMovers,
 } from './server/liveFeeds.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -124,6 +125,17 @@ async function startServer() {
     } catch (err) {
       console.error('Failed to fetch live calendar:', err);
       res.status(502).json({ error: 'Unable to fetch live economic calendar.' });
+    }
+  });
+
+  // Top 10 High-Impact Stock Movers (US & Indonesia IDX)
+  app.get('/api/stocks/movers', async (_req: Request, res: Response) => {
+    try {
+      const movers = await fetchTopStockMovers();
+      res.json(movers);
+    } catch (err) {
+      console.error('Failed to fetch top stock movers:', err);
+      res.status(502).json({ error: 'Unable to fetch top stock movers.' });
     }
   });
 
@@ -253,8 +265,11 @@ async function startServer() {
     app.use(vite.middlewares);
   } else if (fs.existsSync(distDir)) {
     app.use(express.static(distDir));
-    app.get('*splat', (_req: Request, res: Response) => {
-      res.sendFile(path.join(distDir, 'index.html'));
+    app.get('*', (req: Request, res: Response) => {
+      if (req.path.startsWith('/api/')) {
+        return res.status(404).json({ error: 'API endpoint not found' });
+      }
+      return res.sendFile(path.join(distDir, 'index.html'));
     });
   }
 

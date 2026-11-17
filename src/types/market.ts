@@ -1,4 +1,4 @@
-export type AppRoute = 'dashboard' | 'portfolio' | 'fx' | 'news' | 'calendar';
+export type AppRoute = 'dashboard' | 'stocks' | 'news' | 'calendar';
 
 export type Timeframe = '1D' | '1W' | '1M' | '3M' | 'YTD' | '1Y' | 'ALL';
 
@@ -30,6 +30,7 @@ export interface MarketAsset {
   dayLow: string;
   volume: string;
   avgVol: string;
+  avgVolLabel?: string;
   peLabel: string;
   peValue: string;
   capLabel: string;
@@ -47,6 +48,7 @@ export interface MarketAsset {
   chartSeries: Record<Timeframe, number[]>;
   chartTimestamps?: Partial<Record<Timeframe, number[]>>;
   liveStreamable?: boolean;
+  updatedAtEpoch?: number;
 }
 
 export interface NewsStory {
@@ -143,4 +145,28 @@ export interface CalendarCatalyst {
   timeWib: string;
   targetEpochMs: number;
   description: string;
+}
+
+export interface StockMover {
+  symbol: string;
+  name: string;
+  market: 'US' | 'ID';
+  exchange: string;
+  currency: 'USD' | 'IDR';
+  price: number;
+  prevClose: number;
+  changeValue: number;
+  changePercent: number;
+  dayHigh: number;
+  dayLow: number;
+  volume: string;
+  volumeRaw: number;
+  marketState: string;
+  sparklinePoints: number[];
+}
+
+export interface StocksMoversResponse {
+  us: StockMover[];
+  indonesia: StockMover[];
+  updatedAt: string;
 }

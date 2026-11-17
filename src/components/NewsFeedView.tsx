@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { ArrowRight, Globe, Sparkles, Tag } from 'lucide-react';
+import { ArrowRight, Tag } from 'lucide-react';
 import { EDITORIAL_INSIGHTS } from '../data/marketData';
 import { NewsStory } from '../types/market';
 
@@ -7,7 +7,6 @@ interface NewsFeedViewProps {
   stories: NewsStory[];
   searchQuery: string;
   onOpenStory: (story: NewsStory) => void;
-  onFetchLiveNewsPulse?: () => void;
 }
 
 type TopicFilter = 'all' | 'rates' | 'idx' | 'commodities' | 'crypto';
@@ -24,7 +23,6 @@ export const NewsFeedView: React.FC<NewsFeedViewProps> = ({
   stories,
   searchQuery,
   onOpenStory,
-  onFetchLiveNewsPulse,
 }) => {
   const [activeTopic, setActiveTopic] = useState<TopicFilter>('all');
 
@@ -54,22 +52,11 @@ export const NewsFeedView: React.FC<NewsFeedViewProps> = ({
             Market Breaking News
           </h1>
           <p className="text-xs sm:text-sm text-[#6C6C70] dark:text-[#8E8E93] mt-0.5">
-            Real-time dispatches from Reuters, Bloomberg, CNBC, and Financial Times.
+            Real-time dispatches from Financial Times, MarketWatch, CNBC, BBC Business, CoinDesk, CNBC Indonesia, and Yahoo Finance.
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          {onFetchLiveNewsPulse && (
-            <button
-              type="button"
-              onClick={onFetchLiveNewsPulse}
-              className="min-h-[36px] px-3.5 py-1.5 rounded-full bg-[#0071E3]/10 dark:bg-[#0A84FF]/15 text-[#0071E3] dark:text-[#0A84FF] text-xs font-bold flex items-center gap-1.5 hover:opacity-85 transition-opacity shrink-0"
-            >
-              <Sparkles className="w-3.5 h-3.5" />
-              <Globe className="w-3.5 h-3.5" />
-              <span>Live Web Pulse</span>
-            </button>
-          )}
           <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1">
             {TOPICS.map((t) => {
               const active = activeTopic === t.id;

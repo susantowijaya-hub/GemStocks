@@ -3,23 +3,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { AiResearchModal } from './components/AiResearchModal';
+import { useCallback, useEffect, useState } from 'react';
 import { BottomDock } from './components/BottomDock';
 import { EconomicCalendarView } from './components/EconomicCalendarView';
 import { ErrorBoundary } from './components/ErrorBoundary';
-import { FxMatrixView } from './components/FxMatrixView';
 import { Header } from './components/Header';
 import { MarketDashboardView } from './components/MarketDashboardView';
 import { NewsFeedView } from './components/NewsFeedView';
 import { NewsModal } from './components/NewsModal';
-import { PortfolioView } from './components/PortfolioView';
-import { AuthProvider } from './contexts/AuthContext';
+import { TopStocksView } from './components/TopStocksView';
 import { useLiveMarket } from './hooks/useLiveMarket';
 import { useTheme } from './hooks/useTheme';
-import { AppRoute, MarketAsset, NewsStory } from './types/market';
+import { AppRoute, NewsStory } from './types/market';
 
-const VALID_ROUTES: AppRoute[] = ['dashboard', 'portfolio', 'fx', 'news', 'calendar'];
+const VALID_ROUTES: AppRoute[] = ['dashboard', 'stocks', 'news', 'calendar'];
 
 function getInitialRoute(): AppRoute {
   if (typeof window === 'undefined') return 'dashboard';
@@ -34,14 +31,16 @@ function StocksTerminalShell() {
     newsStories,
     economicEvents,
     nextCatalyst,
-    fxRates,
-    fxPairTiles,
+    usMovers,
+    idxMovers,
+    stocksUpdatedAt,
     isPulseActive,
     wsConnected,
     feedsLive,
     flashMap,
     togglePulse,
     loadChartTimeframe,
+    refreshStocks,
   } = useLiveMarket();
 
   const [activeRoute, setActiveRoute] = useState<AppRoute>(getInitialRoute);
@@ -51,23 +50,14 @@ function StocksTerminalShell() {
   const [activeStory, setActiveStory] = useState<NewsStory | null>(null);
   const [countdownSeconds, setCountdownSeconds] = useState<number>(3 * 3600 + 42 * 60 + 15);
 
-  const [aiOpen, setAiOpen] = useState(false);
-  const [aiInitialPrompt, setAiInitialPrompt] = useState('');
-  const [aiInitialMode, setAiInitialMode] = useState<'asset-brief' | 'news-pulse' | 'macro-qa'>(
-    'macro-qa'
-  );
-
-  const activeAsset = useMemo(
-    () => assets.find((a) => a.id === selectedAssetId) ?? assets[0],
-    [assets, selectedAssetId]
-  );
-
   // Sync browser hash navigation (Back/Forward on Desktop, Android, and iOS Safari)
   useEffect(() => {
     const handleHashChange = () => {
       const next = window.location.hash.replace('#', '') as AppRoute;
       if (VALID_ROUTES.includes(next)) {
         setActiveRoute(next);
+      } else {
+        setActiveRoute('dashboard');
       }
     };
     window.addEventListener('hashchange', handleHashChange);
@@ -110,28 +100,6 @@ function StocksTerminalShell() {
     setIsPercentMode((prev) => !prev);
   }, []);
 
-  const handleOpenAiGeneral = useCallback(() => {
-    setAiInitialPrompt('');
-    setAiInitialMode('macro-qa');
-    setAiOpen(true);
-  }, []);
-
-  const handleOpenAiForAsset = useCallback((asset: MarketAsset) => {
-    setAiInitialPrompt(
-      `Latest live market briefing, catalysts, and technical outlook for ${asset.name} (${asset.symbol})`
-    );
-    setAiInitialMode('asset-brief');
-    setAiOpen(true);
-  }, []);
-
-  const handleFetchLiveNewsPulse = useCallback(() => {
-    setAiInitialPrompt(
-      'Latest breaking global market headlines today across US equities, Fed policy, Bank Indonesia / IDX / IDR, Gold, Oil, and Bitcoin'
-    );
-    setAiInitialMode('news-pulse');
-    setAiOpen(true);
-  }, []);
-
   return (
     <div className="min-h-dvh flex flex-col bg-[#F2F2F7] dark:bg-black text-[#1C1C1E] dark:text-white transition-colors selection:bg-[#0071E3]/20 dark:selection:bg-[#0A84FF]/30">
       <Header
@@ -141,12 +109,9 @@ function StocksTerminalShell() {
         onSearchChange={setSearchQuery}
         isDark={isDark}
         onToggleTheme={toggleTheme}
-        isPercentMode={isPercentMode}
-        onToggleBadgeMode={handleToggleBadgeMode}
         isPulseActive={isPulseActive}
         wsConnected={wsConnected || feedsLive}
         onTogglePulse={togglePulse}
-        onOpenAi={handleOpenAiGeneral}
         tickerStories={newsStories}
         onOpenStory={setActiveStory}
       />
@@ -166,21 +131,18 @@ function StocksTerminalShell() {
             flashMap={flashMap}
             onOpenStory={setActiveStory}
             onNavigate={handleNavigate}
-            onOpenAiAsset={handleOpenAiForAsset}
             onLoadTimeframe={loadChartTimeframe}
             countdownSeconds={countdownSeconds}
           />
         )}
 
-        {activeRoute === 'portfolio' && (
-          <PortfolioView assets={assets} searchQuery={searchQuery} />
-        )}
-
-        {activeRoute === 'fx' && (
-          <FxMatrixView
-            fxRates={fxRates}
-            pairTiles={fxPairTiles}
+        {activeRoute === 'stocks' && (
+          <TopStocksView
+            usMovers={usMovers}
+            idxMovers={idxMovers}
+            stocksUpdatedAt={stocksUpdatedAt}
             searchQuery={searchQuery}
+            onRefresh={refreshStocks}
           />
         )}
 
@@ -189,7 +151,6 @@ function StocksTerminalShell() {
             stories={newsStories}
             searchQuery={searchQuery}
             onOpenStory={setActiveStory}
-            onFetchLiveNewsPulse={handleFetchLiveNewsPulse}
           />
         )}
 
@@ -211,14 +172,6 @@ function StocksTerminalShell() {
       />
 
       <NewsModal story={activeStory} onClose={() => setActiveStory(null)} />
-
-      <AiResearchModal
-        open={aiOpen}
-        onClose={() => setAiOpen(false)}
-        activeAsset={activeAsset}
-        initialPrompt={aiInitialPrompt}
-        initialMode={aiInitialMode}
-      />
     </div>
   );
 }
@@ -226,9 +179,7 @@ function StocksTerminalShell() {
 export default function App() {
   return (
     <ErrorBoundary>
-      <AuthProvider>
-        <StocksTerminalShell />
-      </AuthProvider>
+      <StocksTerminalShell />
     </ErrorBoundary>
   );
 }

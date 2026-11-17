@@ -1,6 +1,5 @@
 import React, { useMemo, useState } from 'react';
 import { Bell, BellRing, Download, Timer } from 'lucide-react';
-import { useAuth } from '../contexts/AuthContext';
 import { CalendarCatalyst, EconomicEvent } from '../types/market';
 
 interface EconomicCalendarViewProps {
@@ -27,12 +26,29 @@ export const EconomicCalendarView: React.FC<EconomicCalendarViewProps> = ({
   searchQuery,
   countdownSeconds,
 }) => {
-  const { preferences, updatePreferences } = useAuth();
   const [dayFilter, setDayFilter] = useState<DayFilter>('all');
   const [currencyFilter, setCurrencyFilter] = useState<CurrencyFilter>('ALL');
   const [impactFilter, setImpactFilter] = useState<ImpactFilter>('ALL');
   const [exportNotice, setExportNotice] = useState(false);
-  const alertSet = preferences.nfpAlertEnabled;
+  const [alertSet, setAlertSet] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('stocks-catalyst-alert') === 'true';
+    } catch {
+      return false;
+    }
+  });
+
+  const handleToggleAlert = () => {
+    setAlertSet((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem('stocks-catalyst-alert', String(next));
+      } catch {
+        // ignore storage errors
+      }
+      return next;
+    });
+  };
 
   const todayLabel = useMemo(
     () =>
@@ -149,7 +165,7 @@ export const EconomicCalendarView: React.FC<EconomicCalendarViewProps> = ({
 
           <button
             type="button"
-            onClick={() => void updatePreferences({ nfpAlertEnabled: !alertSet })}
+            onClick={handleToggleAlert}
             className={`min-h-[40px] px-4 py-2 rounded-full text-xs font-bold transition-colors flex items-center gap-1.5 shadow-sm shrink-0 ${
               alertSet
                 ? 'bg-[#30D158] text-black'

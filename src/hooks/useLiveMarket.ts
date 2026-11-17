@@ -13,6 +13,7 @@ import {
   FxPairTile,
   MarketAsset,
   NewsStory,
+  StockMover,
   Timeframe,
 } from '../types/market';
 
@@ -26,12 +27,25 @@ interface QuotePatch {
   dayHigh: string;
   dayLow: string;
   volume: string;
+  avgVol: string;
+  avgVolLabel: string;
+  peLabel: string;
+  peValue: string;
+  capLabel: string;
+  capValue: string;
   w52Low: string;
   w52High: string;
   w52Pct: number;
+  sentiment: 'Bullish' | 'Bearish' | 'Neutral';
+  support: string;
+  supportNote: string;
+  resistance: string;
+  resistanceNote: string;
+  commentary: string;
   sparklinePoints: number[];
   chart1D: number[];
   timestamps1D: number[];
+  updatedAtEpoch: number;
 }
 
 export function useLiveMarket() {
@@ -41,6 +55,9 @@ export function useLiveMarket() {
   const [nextCatalyst, setNextCatalyst] = useState<CalendarCatalyst | null>(null);
   const [fxRates, setFxRates] = useState<Record<CurrencyCode, number>>(FX_RATES_USD_BASE);
   const [fxPairTiles, setFxPairTiles] = useState<FxPairTile[]>(FX_PAIR_TILES);
+  const [usMovers, setUsMovers] = useState<StockMover[]>([]);
+  const [idxMovers, setIdxMovers] = useState<StockMover[]>([]);
+  const [stocksUpdatedAt, setStocksUpdatedAt] = useState<string | null>(null);
   const [isPulseActive, setIsPulseActive] = useState(true);
   const [wsConnected, setWsConnected] = useState(false);
   const [feedsLive, setFeedsLive] = useState(false);
@@ -88,10 +105,23 @@ export function useLiveMarket() {
             open: patch.open,
             dayHigh: patch.dayHigh,
             dayLow: patch.dayLow,
-            volume: patch.volume !== 'N/A' ? patch.volume : asset.volume,
+            volume: patch.volume,
+            avgVol: patch.avgVol,
+            avgVolLabel: patch.avgVolLabel,
+            peLabel: patch.peLabel,
+            peValue: patch.peValue,
+            capLabel: patch.capLabel,
+            capValue: patch.capValue,
             w52Low: patch.w52Low,
             w52High: patch.w52High,
             w52Pct: patch.w52Pct,
+            sentiment: patch.sentiment,
+            support: patch.support,
+            supportNote: patch.supportNote,
+            resistance: patch.resistance,
+            resistanceNote: patch.resistanceNote,
+            commentary: patch.commentary,
+            updatedAtEpoch: patch.updatedAtEpoch,
             sparklinePoints: patch.sparklinePoints.length > 1 ? patch.sparklinePoints : asset.sparklinePoints,
             chartSeries: {
               ...asset.chartSeries,
@@ -175,16 +205,41 @@ export function useLiveMarket() {
     }
   }, []);
 
+  // Fetch Top 10 US & Indonesia Stock Movers
+  const refreshStocks = useCallback(async () => {
+    try {
+      const res = await fetch('/api/stocks/movers');
+      if (!res.ok) return;
+      const data = (await res.json()) as {
+        us?: StockMover[];
+        indonesia?: StockMover[];
+        updatedAt?: string;
+      };
+      if (Array.isArray(data.us)) setUsMovers(data.us);
+      if (Array.isArray(data.indonesia)) setIdxMovers(data.indonesia);
+      if (data.updatedAt) setStocksUpdatedAt(data.updatedAt);
+    } catch {
+      // keep existing state on transient error
+    }
+  }, []);
+
   // Initial fetch + periodic live polling
   useEffect(() => {
     void refreshQuotes();
     void refreshSecondaryFeeds();
+    void refreshStocks();
 
     const quoteTimer = window.setInterval(() => {
       if (isPulseRef.current) {
         void refreshQuotes();
       }
     }, 45_000);
+
+    const stocksTimer = window.setInterval(() => {
+      if (isPulseRef.current) {
+        void refreshStocks();
+      }
+    }, 60_000);
 
     const secondaryTimer = window.setInterval(() => {
       if (isPulseRef.current) {
@@ -194,9 +249,10 @@ export function useLiveMarket() {
 
     return () => {
       window.clearInterval(quoteTimer);
+      window.clearInterval(stocksTimer);
       window.clearInterval(secondaryTimer);
     };
-  }, [refreshQuotes, refreshSecondaryFeeds]);
+  }, [refreshQuotes, refreshSecondaryFeeds, refreshStocks]);
 
   // Real Binance WebSocket connection for sub-second BTC/USD and ETH/USD updates
   useEffect(() => {
@@ -238,12 +294,20 @@ export function useLiveMarket() {
                   triggerFlash(id, dir);
                 }
                 const nextSeries1D = [...asset.chartSeries['1D'].slice(0, -1), currentPrice];
+                const nextSentiment: 'Bullish' | 'Bearish' | 'Neutral' =
+                  changePercent >= 0.35
+                    ? 'Bullish'
+                    : changePercent <= -0.35
+                      ? 'Bearish'
+                      : 'Neutral';
                 return {
                   ...asset,
                   price: currentPrice,
                   prevClose: Number((currentPrice - changeValue).toFixed(2)),
                   changeValue,
                   changePercent,
+                  sentiment: nextSentiment,
+                  updatedAtEpoch: Date.now(),
                   chartSeries: {
                     ...asset.chartSeries,
                     '1D': nextSeries1D,
@@ -294,15 +358,20 @@ export function useLiveMarket() {
     nextCatalyst,
     fxRates,
     fxPairTiles,
+    usMovers,
+    idxMovers,
+    stocksUpdatedAt,
     isPulseActive,
     wsConnected,
     feedsLive,
     flashMap,
     togglePulse,
     loadChartTimeframe,
+    refreshStocks,
     refreshAll: () => {
       void refreshQuotes();
       void refreshSecondaryFeeds();
+      void refreshStocks();
     },
   };
 }

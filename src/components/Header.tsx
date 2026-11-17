@@ -1,23 +1,21 @@
 import React, { useEffect, useState } from 'react';
 import {
   Activity,
-  ArrowLeftRight,
+  BarChart3,
   CalendarDays,
+  Clock,
   LayoutDashboard,
-  LogIn,
-  LogOut,
   Megaphone,
   Moon,
   Newspaper,
   Search,
-  Sparkles,
   Sun,
   TrendingUp,
   X,
 } from 'lucide-react';
-import { useAuth } from '../contexts/AuthContext';
 import { AppRoute, NewsStory } from '../types/market';
 import { formatWibClock } from '../utils/formatters';
+import { getAllMarketSessions } from '../utils/marketSessions';
 
 interface HeaderProps {
   activeRoute: AppRoute;
@@ -26,12 +24,9 @@ interface HeaderProps {
   onSearchChange: (val: string) => void;
   isDark: boolean;
   onToggleTheme: () => void;
-  isPercentMode: boolean;
-  onToggleBadgeMode: () => void;
   isPulseActive: boolean;
   wsConnected: boolean;
   onTogglePulse: () => void;
-  onOpenAi: () => void;
   tickerStories: NewsStory[];
   onOpenStory: (story: NewsStory) => void;
 }
@@ -43,16 +38,12 @@ export const Header: React.FC<HeaderProps> = ({
   onSearchChange,
   isDark,
   onToggleTheme,
-  isPercentMode,
-  onToggleBadgeMode,
   isPulseActive,
   wsConnected,
   onTogglePulse,
-  onOpenAi,
   tickerStories,
   onOpenStory,
 }) => {
-  const { user, authLoading, authError, signInWithGoogle, logout, clearAuthError } = useAuth();
   const [now, setNow] = useState(() => new Date());
 
   useEffect(() => {
@@ -61,17 +52,20 @@ export const Header: React.FC<HeaderProps> = ({
   }, []);
 
   const clock = formatWibClock(now);
+  const sessions = getAllMarketSessions(now);
+  const sessionList = [sessions.us, sessions.idx, sessions.asia, sessions.crypto];
+
+  const marqueeStories = tickerStories.slice(0, 16);
+  const tickerDurationSec = Math.max(88, Math.round(marqueeStories.length * 8.5));
 
   const searchPlaceholder =
-    activeRoute === 'news'
-      ? 'Search news (Fed, BI-Rate, Gold, OPEC)...'
-      : activeRoute === 'calendar'
-        ? 'Search events (CPI, BI-Rate, NFP, PMI)...'
-        : activeRoute === 'portfolio'
-          ? 'Search holdings (SPX, BTC, Gold, ETH)...'
-          : activeRoute === 'fx'
-            ? 'Filter currency pairs (USD, IDR, EUR)...'
-            : 'Search symbol or market (SPX, IHSG, BTC, Gold, US10Y)...';
+    activeRoute === 'stocks'
+      ? 'Search US or IDX stock (NVDA, AAPL, BBCA, BBRI, GOTO)...'
+      : activeRoute === 'news'
+        ? 'Search news (Fed, BI-Rate, Gold, OPEC)...'
+        : activeRoute === 'calendar'
+          ? 'Search events (CPI, BI-Rate, NFP, PMI)...'
+          : 'Search symbol or market (SPX, IHSG, ID10Y, BTC, Gold)...';
 
   return (
     <header className="sticky top-0 z-40 pt-safe backdrop-blur-xl bg-white/90 dark:bg-black/80 border-b border-[#E5E5EA] dark:border-[#2C2C2E] transition-colors">
@@ -106,19 +100,31 @@ export const Header: React.FC<HeaderProps> = ({
             <button
               type="button"
               onClick={() => onNavigate('dashboard')}
-              className={`px-3.5 py-1.5 rounded-full text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap transition-colors ${
+              className={`px-3 py-1.5 rounded-full text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap transition-colors ${
                 activeRoute === 'dashboard'
                   ? 'bg-[#0071E3] dark:bg-[#0A84FF] text-white shadow-sm'
                   : 'text-[#6C6C70] dark:text-[#8E8E93] hover:text-[#1C1C1E] dark:hover:text-white'
               }`}
             >
               <LayoutDashboard className="w-3.5 h-3.5" />
-              <span>Market Dashboard</span>
+              <span>Markets</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => onNavigate('stocks')}
+              className={`px-3 py-1.5 rounded-full text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap transition-colors ${
+                activeRoute === 'stocks'
+                  ? 'bg-[#0071E3] dark:bg-[#0A84FF] text-white shadow-sm'
+                  : 'text-[#6C6C70] dark:text-[#8E8E93] hover:text-[#1C1C1E] dark:hover:text-white'
+              }`}
+            >
+              <BarChart3 className="w-3.5 h-3.5" />
+              <span>Top Stocks</span>
             </button>
             <button
               type="button"
               onClick={() => onNavigate('news')}
-              className={`px-3.5 py-1.5 rounded-full text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap transition-colors ${
+              className={`px-3 py-1.5 rounded-full text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap transition-colors ${
                 activeRoute === 'news'
                   ? 'bg-[#0071E3] dark:bg-[#0A84FF] text-white shadow-sm'
                   : 'text-[#6C6C70] dark:text-[#8E8E93] hover:text-[#1C1C1E] dark:hover:text-white'
@@ -130,14 +136,14 @@ export const Header: React.FC<HeaderProps> = ({
             <button
               type="button"
               onClick={() => onNavigate('calendar')}
-              className={`px-3.5 py-1.5 rounded-full text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap transition-colors ${
+              className={`px-3 py-1.5 rounded-full text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap transition-colors ${
                 activeRoute === 'calendar'
                   ? 'bg-[#0071E3] dark:bg-[#0A84FF] text-white shadow-sm'
                   : 'text-[#6C6C70] dark:text-[#8E8E93] hover:text-[#1C1C1E] dark:hover:text-white'
               }`}
             >
               <CalendarDays className="w-3.5 h-3.5" />
-              <span>Economic Calendar</span>
+              <span>Calendar</span>
             </button>
           </nav>
         </div>
@@ -169,27 +175,6 @@ export const Header: React.FC<HeaderProps> = ({
 
         {/* Right Controls */}
         <div className="flex items-center gap-2 shrink-0">
-          {/* Live Session Text Metadata (desktop xl+) */}
-          <div className="hidden 2xl:flex items-center gap-3 text-[11px] font-medium text-[#6C6C70] dark:text-[#8E8E93] mr-1">
-            <span className="flex items-center gap-1.5 text-[#1C1C1E] dark:text-white">
-              <span className="w-1.5 h-1.5 rounded-full bg-[#30D158]" />
-              US Market: Open
-            </span>
-            <span aria-hidden="true">·</span>
-            <span>IDX/Asia: Closed</span>
-          </div>
-
-          {/* % / Pts Toggle */}
-          <button
-            type="button"
-            onClick={onToggleBadgeMode}
-            title="Toggle display between percentage and net points change"
-            className="min-h-[36px] sm:min-h-[32px] px-2.5 py-1 rounded-full bg-[#E5E5EA]/80 dark:bg-[#1C1C1E] hover:bg-[#D1D1D6] dark:hover:bg-[#2C2C2E] border border-[#D1D1D6] dark:border-[#2C2C2E] text-[11px] font-semibold text-[#1C1C1E] dark:text-white transition-colors flex items-center gap-1 whitespace-nowrap"
-          >
-            <ArrowLeftRight className="w-3 h-3" />
-            <span className="hidden sm:inline">{isPercentMode ? '% Change' : 'Net Points'}</span>
-            <span className="sm:hidden">{isPercentMode ? '%' : 'Pts'}</span>
-          </button>
 
           {/* Live Pulse / WSS Toggle */}
           <button
@@ -208,18 +193,6 @@ export const Header: React.FC<HeaderProps> = ({
             <span className="sm:hidden">{isPulseActive ? 'Live' : 'Paused'}</span>
           </button>
 
-          {/* AI Search Grounding Trigger */}
-          <button
-            type="button"
-            onClick={onOpenAi}
-            title="Live AI Market Intelligence (Google Search Grounded)"
-            className="min-h-[36px] sm:min-h-[32px] px-2.5 sm:px-3 py-1 rounded-full bg-[#0071E3] dark:bg-[#0A84FF] text-white text-[11px] sm:text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap shadow-sm hover:opacity-90 transition-opacity"
-          >
-            <Sparkles className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">AI Analyst</span>
-            <span className="sm:hidden">AI</span>
-          </button>
-
           {/* Theme Toggle */}
           <button
             type="button"
@@ -229,59 +202,8 @@ export const Header: React.FC<HeaderProps> = ({
           >
             {isDark ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
           </button>
-
-          {/* Google Auth Control */}
-          {user ? (
-            <button
-              type="button"
-              onClick={() => void logout()}
-              title={`Signed in as ${user.email || user.displayName || 'Investor'} — Click to sign out`}
-              className="min-h-[36px] sm:min-h-[32px] pl-1.5 pr-2.5 py-1 rounded-full bg-[#E5E5EA]/80 dark:bg-[#1C1C1E] hover:bg-[#D1D1D6] dark:hover:bg-[#2C2C2E] border border-[#D1D1D6] dark:border-[#2C2C2E] flex items-center gap-1.5 text-[11px] font-semibold text-[#1C1C1E] dark:text-white transition-colors"
-            >
-              {user.photoURL ? (
-                <img
-                  src={user.photoURL}
-                  alt={user.displayName || 'User'}
-                  className="w-5 h-5 rounded-full object-cover"
-                  referrerPolicy="no-referrer"
-                />
-              ) : (
-                <span className="w-5 h-5 rounded-full bg-[#0071E3] text-white text-[10px] font-bold flex items-center justify-center">
-                  {(user.displayName || user.email || 'U').charAt(0).toUpperCase()}
-                </span>
-              )}
-              <span className="hidden xl:inline max-w-[90px] truncate">
-                {user.displayName?.split(' ')[0] || 'Account'}
-              </span>
-              <LogOut className="w-3 h-3 text-[#6C6C70] dark:text-[#8E8E93]" />
-            </button>
-          ) : (
-            <button
-              type="button"
-              disabled={authLoading}
-              onClick={() => void signInWithGoogle()}
-              className="min-h-[36px] sm:min-h-[32px] px-2.5 sm:px-3 py-1 rounded-full bg-[#E5E5EA]/80 dark:bg-[#1C1C1E] hover:bg-[#D1D1D6] dark:hover:bg-[#2C2C2E] border border-[#D1D1D6] dark:border-[#2C2C2E] text-[11px] font-semibold text-[#1C1C1E] dark:text-white flex items-center gap-1.5 whitespace-nowrap transition-colors"
-            >
-              <LogIn className="w-3.5 h-3.5 text-[#0071E3] dark:text-[#0A84FF]" />
-              <span className="hidden sm:inline">{authLoading ? 'Signing in...' : 'Sign In'}</span>
-            </button>
-          )}
         </div>
       </div>
-
-      {/* Auth Error Banner (if popup fails) */}
-      {authError && (
-        <div className="px-4 lg:px-6 py-1.5 bg-[#FF453A]/10 border-t border-[#FF453A]/20 flex items-center justify-between gap-2 text-[11px] text-[#D7261C] dark:text-[#FF453A]">
-          <span className="truncate">{authError}</span>
-          <button
-            type="button"
-            onClick={clearAuthError}
-            className="font-bold underline shrink-0"
-          >
-            Dismiss
-          </button>
-        </div>
-      )}
 
       {/* Mobile Search Bar Row */}
       <div className="md:hidden px-4 pb-2">
@@ -308,15 +230,57 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
       </div>
 
+      {/* Global Market Session Status Strip (Visible across Mobile, Tablet, Desktop) */}
+      <div className="border-t border-[#E5E5EA] dark:border-[#2C2C2E] bg-[#F2F2F7]/70 dark:bg-[#121214] px-4 lg:px-6 py-1.5 flex items-center gap-3 overflow-x-auto no-scrollbar text-[11px]">
+        <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-[#6C6C70] dark:text-[#8E8E93] shrink-0">
+          <Clock className="w-3 h-3" />
+          Sessions
+        </span>
+        <div className="flex items-center gap-2 sm:gap-3 shrink-0">
+          {sessionList.map((s) => {
+            const dotColor =
+              s.tone === 'open'
+                ? 'bg-[#30D158]'
+                : s.tone === 'extended' || s.tone === 'break'
+                  ? 'bg-[#FF9F0A]'
+                  : 'bg-[#8E8E93]';
+            const badgeText =
+              s.tone === 'open'
+                ? 'text-[#16803C] dark:text-[#30D158]'
+                : s.tone === 'extended' || s.tone === 'break'
+                  ? 'text-[#B25E09] dark:text-[#FF9F0A]'
+                  : 'text-[#6C6C70] dark:text-[#8E8E93]';
+
+            return (
+              <div
+                key={s.id}
+                title={`${s.label}: ${s.stateLabel} (${s.detail})`}
+                className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-white/80 dark:bg-[#1C1C1E] border border-[#E5E5EA] dark:border-[#2C2C2E] whitespace-nowrap"
+              >
+                <span className={`w-1.5 h-1.5 rounded-full ${dotColor}`} />
+                <span className="font-semibold text-[#1C1C1E] dark:text-white">{s.shortLabel}:</span>
+                <span className={`font-bold ${badgeText}`}>{s.stateLabel}</span>
+                <span className="hidden xl:inline text-[10px] text-[#6C6C70] dark:text-[#8E8E93]">
+                  · {s.detail}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
       {/* Breaking News Marquee Ticker Bar */}
       <div className="bg-[#E5E5EA]/60 dark:bg-[#0D0D0E] border-t border-[#E5E5EA] dark:border-[#2C2C2E] py-1.5 px-4 lg:px-6 flex items-center gap-3 overflow-hidden text-[11px] sm:text-xs">
         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-[#FF453A]/15 text-[#D7261C] dark:text-[#FF453A] font-bold text-[10px] tracking-wider uppercase shrink-0">
           <Megaphone className="w-3 h-3" />
           BREAKING
         </span>
-        <div className="overflow-hidden whitespace-nowrap flex-1">
-          <div className="ticker-scroll flex items-center gap-6">
-            {[...tickerStories, ...tickerStories].map((story, idx) => (
+        <div className="relative overflow-hidden whitespace-nowrap flex-1 min-w-0">
+          <div
+            className="ticker-scroll gap-8"
+            style={{ animationDuration: `${tickerDurationSec}s` }}
+          >
+            {[...marqueeStories, ...marqueeStories].map((story, idx) => (
               <button
                 key={`${story.id}-${idx}`}
                 type="button"
