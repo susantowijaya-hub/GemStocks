@@ -1,10 +1,14 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
   BarChart3,
+  Bookmark,
+  Briefcase,
   CalendarDays,
   Clock,
+  FileText,
   LayoutDashboard,
+  Loader2,
   Megaphone,
   Moon,
   Newspaper,
@@ -13,9 +17,17 @@ import {
   TrendingUp,
   X,
 } from 'lucide-react';
-import { AppRoute, MarketAsset, NewsStory, StockMover } from '../types/market';
+import {
+  AppRoute,
+  MarketAsset,
+  NewsStory,
+  StockMover,
+  StockSearchResult,
+  ThemeMode,
+} from '../types/market';
 import { formatAssetPrice, formatWibClock } from '../utils/formatters';
 import { getAllMarketSessions, isIndexOpenSession } from '../utils/marketSessions';
+import { GoogleFinanceDeltaPill, GoogleFinanceMiniChart } from './GoogleFinanceMiniChart';
 import { PWAInstallButton } from './PWAInstallButton';
 
 interface HeaderProps {
@@ -23,7 +35,7 @@ interface HeaderProps {
   onNavigate: (route: AppRoute) => void;
   searchQuery: string;
   onSearchChange: (val: string) => void;
-  isDark: boolean;
+  themeMode: ThemeMode;
   onToggleTheme: () => void;
   isPulseActive: boolean;
   wsConnected: boolean;
@@ -34,16 +46,37 @@ interface HeaderProps {
   usMovers: StockMover[];
   idxMovers: StockMover[];
   onSelectAsset: (id: string) => void;
+  onInspectSymbol: (yahooSymbol: string, builtInAssetId?: string) => void;
 }
 
 const INDEX_IDS = ['SPX', 'IXIC', 'DJI', 'IHSG', 'HSI', 'TAIEX', 'KOSPI', 'SSEC', 'NIFTY'];
+
+function formatDropdownPrice(item: StockSearchResult): string {
+  if (typeof item.price !== 'number' || !Number.isFinite(item.price) || item.price <= 0) {
+    return 'View chart';
+  }
+  if (item.isIndex) {
+    return item.price.toLocaleString('en-US', {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    });
+  }
+  if (item.currency === 'IDR') {
+    return `Rp ${Math.round(item.price).toLocaleString('en-US')}`;
+  }
+  const decimals = item.price < 2 ? 4 : 2;
+  return `$${item.price.toLocaleString('en-US', {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
+  })}`;
+}
 
 export const Header: React.FC<HeaderProps> = ({
   activeRoute,
   onNavigate,
   searchQuery,
   onSearchChange,
-  isDark,
+  themeMode,
   onToggleTheme,
   isPulseActive,
   wsConnected,
@@ -54,23 +87,89 @@ export const Header: React.FC<HeaderProps> = ({
   usMovers,
   idxMovers,
   onSelectAsset,
+  onInspectSymbol,
 }) => {
   const [now, setNow] = useState(() => new Date());
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchResults, setSearchResults] = useState<StockSearchResult[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const desktopSearchWrapRef = useRef<HTMLDivElement | null>(null);
+  const mobileSearchWrapRef = useRef<HTMLDivElement | null>(null);
+  const headerRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    const el = headerRef.current;
+    if (!el || typeof window === 'undefined') return;
+    const updateHeight = () => {
+      const h = el.getBoundingClientRect().height;
+      document.documentElement.style.setProperty('--app-header-height', `${Math.round(h)}px`);
+    };
+    updateHeight();
+    if (typeof ResizeObserver !== 'undefined') {
+      const ro = new ResizeObserver(updateHeight);
+      ro.observe(el);
+      return () => ro.disconnect();
+    }
+    window.addEventListener('resize', updateHeight);
+    return () => window.removeEventListener('resize', updateHeight);
+  }, []);
 
   useEffect(() => {
     const id = window.setInterval(() => setNow(new Date()), 1000);
     return () => window.clearInterval(id);
   }, []);
 
+  // Close search dropdown on outside click
+  useEffect(() => {
+    const handleOutside = (e: MouseEvent | TouchEvent) => {
+      const target = e.target as Node;
+      const inDesktop = desktopSearchWrapRef.current?.contains(target);
+      const inMobile = mobileSearchWrapRef.current?.contains(target);
+      if (!inDesktop && !inMobile) {
+        setSearchOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleOutside);
+    document.addEventListener('touchstart', handleOutside);
+    return () => {
+      document.removeEventListener('mousedown', handleOutside);
+      document.removeEventListener('touchstart', handleOutside);
+    };
+  }, []);
+
+  // Query live US + Indonesia stocks & indices with mini sparklines when search dropdown is active
+  useEffect(() => {
+    if (!searchOpen) return;
+    const trimmed = searchQuery.trim();
+    const timer = window.setTimeout(async () => {
+      setSearchLoading(true);
+      try {
+        const res = await fetch(
+          `/api/stocks/search?q=${encodeURIComponent(trimmed)}&quotes=1`
+        );
+        if (res.ok) {
+          const data = (await res.json()) as { results?: StockSearchResult[] };
+          if (Array.isArray(data.results)) {
+            setSearchResults(data.results);
+          }
+        }
+      } catch {
+        // retain prior results
+      } finally {
+        setSearchLoading(false);
+      }
+    }, trimmed ? 220 : 40);
+
+    return () => window.clearTimeout(timer);
+  }, [searchQuery, searchOpen]);
+
   const clock = formatWibClock(now);
   const sessions = getAllMarketSessions(now);
   const sessionList = [sessions.us, sessions.idx, sessions.asia, sessions.crypto];
 
-  // 0.5x speed of previous (2x duration)
   const marqueeStories = tickerStories.slice(0, 16);
   const tickerDurationSec = Math.max(176, Math.round(marqueeStories.length * 17));
 
-  // Open-session indices + Top 3 high-impact US & Indonesia stocks for running strip below Breaking News
   const liveTapeItems = useMemo(() => {
     const openIndices = assets.filter(
       (a) => INDEX_IDS.includes(a.id) && isIndexOpenSession(a.id, now)
@@ -99,6 +198,7 @@ export const Header: React.FC<HeaderProps> = ({
           key: string;
           badge: string;
           symbol: string;
+          yahooSymbol: string;
           priceText: string;
           changePercent: number;
         };
@@ -123,6 +223,7 @@ export const Header: React.FC<HeaderProps> = ({
         key: `us-${stk.symbol}`,
         badge: `US #${i + 1}`,
         symbol: stk.symbol,
+        yahooSymbol: stk.symbol,
         priceText: `$${stk.price.toFixed(2)}`,
         changePercent: stk.changePercent,
       });
@@ -134,6 +235,7 @@ export const Header: React.FC<HeaderProps> = ({
         key: `id-${stk.symbol}`,
         badge: `IDX #${i + 1}`,
         symbol: stk.symbol,
+        yahooSymbol: `${stk.symbol}.JK`,
         priceText: `Rp ${Math.round(stk.price).toLocaleString('en-US')}`,
         changePercent: stk.changePercent,
       });
@@ -145,20 +247,113 @@ export const Header: React.FC<HeaderProps> = ({
     };
   }, [assets, usMovers, idxMovers, now]);
 
-  // 0.5x speed (slow, steady, easy to scan)
-  const tapeDurationSec = Math.max(120, Math.round(Math.max(1, liveTapeItems.entries.length) * 16));
+  const tapeDurationSec = Math.max(
+    120,
+    Math.round(Math.max(1, liveTapeItems.entries.length) * 16)
+  );
 
   const searchPlaceholder =
-    activeRoute === 'stocks'
-      ? 'Search US or IDX stock (NVDA, AAPL, BBCA, BBRI, GOTO)...'
-      : activeRoute === 'news'
-        ? 'Search news (Fed, BI-Rate, Gold, OPEC)...'
-        : activeRoute === 'calendar'
-          ? 'Search events (CPI, BI-Rate, NFP, PMI)...'
-          : 'Search symbol or market (SPX, IHSG, ID10Y, BTC, Gold)...';
+    activeRoute === 'watchlist'
+      ? 'Filter watchlist or lookup symbol chart (SPX, IHSG, BBCA, NVDA)...'
+      : activeRoute === 'portfolio'
+        ? 'Search US/IDX stocks, indices, or filter portfolio...'
+        : activeRoute === 'stocks'
+          ? 'Search US or IDX stock & chart (NVDA, AAPL, BBCA, IHSG)...'
+          : activeRoute === 'news'
+            ? 'Search news or lookup symbol chart (SPX, IHSG, BBCA)...'
+            : activeRoute === 'calendar'
+              ? 'Search macro releases or lookup symbol chart...'
+              : 'Search US & IDX stocks or indices for chart (SPX, IHSG, BBCA, NVDA)...';
+
+  const handleSelectSearchItem = (item: StockSearchResult) => {
+    setSearchOpen(false);
+    if (item.assetId) {
+      onSelectAsset(item.assetId);
+    }
+    onInspectSymbol(item.yahooSymbol, item.assetId);
+  };
+
+  const renderSearchDropdown = () => {
+    if (!searchOpen) return null;
+    return (
+      <div className="absolute left-0 right-0 top-full mt-1.5 z-50 rounded-2xl bg-white dark:bg-[#1C1C1E] border border-[#D1D1D6] dark:border-[#2C2C2E] shadow-2xl overflow-hidden max-h-[420px] flex flex-col">
+        <div className="px-3.5 py-2 border-b border-[#E5E5EA] dark:border-[#2C2C2E] flex items-center justify-between text-[11px] font-semibold text-[#6C6C70] dark:text-[#8E8E93]">
+          <span>
+            {searchQuery.trim()
+              ? `US & IDX Results for "${searchQuery.trim()}"`
+              : 'Popular US & Indonesia Indices and Stocks'}
+          </span>
+          {searchLoading && <Loader2 className="w-3.5 h-3.5 animate-spin text-[#0071E3]" />}
+        </div>
+
+        <div className="overflow-y-auto divide-y divide-[#E5E5EA]/70 dark:divide-[#2C2C2E]/60">
+          {searchResults.length === 0 && !searchLoading ? (
+            <div className="p-4 text-center text-xs text-[#6C6C70] dark:text-[#8E8E93]">
+              No matching US or Indonesia tickers found.
+            </div>
+          ) : (
+            searchResults.map((item) => {
+              const hasQuote = typeof item.price === 'number' && item.price > 0;
+              const isGain = (item.changePercent ?? 0) >= 0;
+              return (
+                <button
+                  key={item.yahooSymbol}
+                  type="button"
+                  onClick={() => handleSelectSearchItem(item)}
+                  className="w-full px-3.5 py-2.5 text-left hover:bg-[#F2F2F7] dark:hover:bg-[#2C2C2E]/70 flex items-center justify-between gap-3 transition-colors"
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-bold text-xs sm:text-sm text-[#1C1C1E] dark:text-white truncate">
+                        {item.symbol}
+                      </span>
+                      <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-[#E5E5EA]/80 dark:bg-[#2C2C2E] text-[#6C6C70] dark:text-[#AEAEB2] shrink-0">
+                        {item.exchange}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-[#6C6C70] dark:text-[#8E8E93] truncate">
+                      {item.name}
+                    </p>
+                  </div>
+
+                  {/* Mini Chart Preview inside Search Dropdown */}
+                  {item.sparklinePoints && item.sparklinePoints.length >= 2 && (
+                    <div className="w-14 h-7 shrink-0">
+                      <GoogleFinanceMiniChart
+                        points={item.sparklinePoints}
+                        prevClose={item.prevClose ?? item.sparklinePoints[0]}
+                        isGain={isGain}
+                        progressRatio={item.sessionOpen ? 0.85 : 1}
+                        className="w-14 h-7"
+                        showEndDot={Boolean(item.sessionOpen)}
+                      />
+                    </div>
+                  )}
+
+                  <div className="text-right shrink-0">
+                    <div className="font-mono font-bold text-xs text-[#1C1C1E] dark:text-white tabular-nums">
+                      {formatDropdownPrice(item)}
+                    </div>
+                    {hasQuote && typeof item.changePercent === 'number' && (
+                      <div className="mt-0.5 flex justify-end">
+                        <GoogleFinanceDeltaPill changePercent={item.changePercent} compact />
+                      </div>
+                    )}
+                  </div>
+                </button>
+              );
+            })
+          )}
+        </div>
+      </div>
+    );
+  };
 
   return (
-    <header className="sticky top-0 z-40 pt-safe backdrop-blur-xl bg-white/90 dark:bg-black/80 border-b border-[#E5E5EA] dark:border-[#2C2C2E] transition-colors">
+    <header
+      ref={headerRef}
+      className="sticky top-0 z-40 pt-safe backdrop-blur-xl bg-white/90 dark:bg-black/80 border-b border-[#E5E5EA] dark:border-[#2C2C2E] transition-colors"
+    >
       {/* Main Row */}
       <div className="px-4 lg:px-6 py-2.5 lg:py-3 flex items-center justify-between gap-3">
         {/* Left: Brand + Clock + Desktop Tabs */}
@@ -173,10 +368,10 @@ export const Header: React.FC<HeaderProps> = ({
               <span className="text-lg lg:text-xl font-extrabold tracking-tight text-[#1C1C1E] dark:text-white whitespace-nowrap">
                 Stocks
               </span>
-              <span className="hidden xl:inline text-xs font-medium text-[#6C6C70] dark:text-[#8E8E93] tabular-nums whitespace-nowrap">
+              <span className="hidden xl:inline text-xs font-mono font-medium text-[#6C6C70] dark:text-[#8E8E93] tabular-nums whitespace-nowrap">
                 {clock.full}
               </span>
-              <span className="text-[10px] sm:hidden font-medium text-[#6C6C70] dark:text-[#8E8E93] tabular-nums whitespace-nowrap">
+              <span className="xl:hidden text-[10px] sm:text-xs font-mono font-medium text-[#6C6C70] dark:text-[#8E8E93] tabular-nums whitespace-nowrap">
                 {clock.short}
               </span>
             </div>
@@ -198,6 +393,30 @@ export const Header: React.FC<HeaderProps> = ({
             >
               <LayoutDashboard className="w-3.5 h-3.5" />
               <span>Markets</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => onNavigate('watchlist')}
+              className={`px-3 py-1.5 rounded-full text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap transition-colors ${
+                activeRoute === 'watchlist'
+                  ? 'bg-[#0071E3] dark:bg-[#0A84FF] text-white shadow-sm'
+                  : 'text-[#6C6C70] dark:text-[#8E8E93] hover:text-[#1C1C1E] dark:hover:text-white'
+              }`}
+            >
+              <Bookmark className="w-3.5 h-3.5" />
+              <span>Watchlist</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => onNavigate('portfolio')}
+              className={`px-3 py-1.5 rounded-full text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap transition-colors ${
+                activeRoute === 'portfolio'
+                  ? 'bg-[#0071E3] dark:bg-[#0A84FF] text-white shadow-sm'
+                  : 'text-[#6C6C70] dark:text-[#8E8E93] hover:text-[#1C1C1E] dark:hover:text-white'
+              }`}
+            >
+              <Briefcase className="w-3.5 h-3.5" />
+              <span>Portfolio</span>
             </button>
             <button
               type="button"
@@ -238,16 +457,20 @@ export const Header: React.FC<HeaderProps> = ({
           </nav>
         </div>
 
-        {/* Center: Search Input (Desktop & Tablet) */}
-        <div className="hidden md:block flex-1 max-w-md mx-2">
+        {/* Center: Search Input with Live Chart Dropdown (Desktop & Tablet) */}
+        <div ref={desktopSearchWrapRef} className="hidden md:block flex-1 max-w-md mx-2 relative">
           <div className="relative w-full">
             <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-[#6C6C70] dark:text-[#8E8E93] pointer-events-none" />
             <input
               type="search"
               value={searchQuery}
-              onChange={(e) => onSearchChange(e.target.value)}
+              onFocus={() => setSearchOpen(true)}
+              onChange={(e) => {
+                onSearchChange(e.target.value);
+                setSearchOpen(true);
+              }}
               placeholder={searchPlaceholder}
-              aria-label="Search markets, news, or events"
+              aria-label="Search markets, stocks, indices, or news"
               className="w-full bg-[#E5E5EA]/80 dark:bg-[#1C1C1E] hover:bg-[#E5E5EA] dark:hover:bg-[#2C2C2E] focus:bg-white dark:focus:bg-[#1C1C1E] text-[#1C1C1E] dark:text-white placeholder:text-[#6C6C70] dark:placeholder:text-[#8E8E93] text-xs rounded-full pl-9 pr-8 py-2 border border-[#D1D1D6] dark:border-[#2C2C2E] focus:border-[#0071E3] dark:focus:border-[#0A84FF] focus:outline-none transition-colors"
             />
             {searchQuery && (
@@ -261,6 +484,7 @@ export const Header: React.FC<HeaderProps> = ({
               </button>
             )}
           </div>
+          {renderSearchDropdown()}
         </div>
 
         {/* Right Controls */}
@@ -284,26 +508,40 @@ export const Header: React.FC<HeaderProps> = ({
             <span className="sm:hidden">{isPulseActive ? 'Live' : 'Paused'}</span>
           </button>
 
-          {/* Theme Toggle */}
+          {/* Theme Toggle (Light -> Dark -> Paper Matte Monochrome) */}
           <button
             type="button"
             onClick={onToggleTheme}
-            aria-label={isDark ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
-            className="w-9 h-9 sm:w-8 sm:h-8 rounded-full bg-[#E5E5EA]/80 dark:bg-[#1C1C1E] hover:bg-[#D1D1D6] dark:hover:bg-[#2C2C2E] border border-[#D1D1D6] dark:border-[#2C2C2E] flex items-center justify-center text-[#1C1C1E] dark:text-white transition-colors"
+            title={`Theme: ${themeMode === 'monochrome' ? 'Paper Matte' : themeMode === 'dark' ? 'Dark' : 'Light'} (tap to cycle)`}
+            aria-label={`Current theme ${themeMode === 'monochrome' ? 'Paper Matte Monochrome' : themeMode}. Tap to switch theme.`}
+            className="min-h-[36px] sm:min-h-[32px] px-2.5 py-1 rounded-full bg-[#E5E5EA]/80 dark:bg-[#1C1C1E] hover:bg-[#D1D1D6] dark:hover:bg-[#2C2C2E] border border-[#D1D1D6] dark:border-[#2C2C2E] flex items-center justify-center gap-1.5 text-[11px] sm:text-xs font-semibold text-[#1C1C1E] dark:text-white transition-colors shrink-0"
           >
-            {isDark ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+            {themeMode === 'dark' ? (
+              <Moon className="w-3.5 h-3.5" />
+            ) : themeMode === 'monochrome' ? (
+              <FileText className="w-3.5 h-3.5" />
+            ) : (
+              <Sun className="w-3.5 h-3.5" />
+            )}
+            <span className="hidden sm:inline">
+              {themeMode === 'monochrome' ? 'Matte' : themeMode === 'dark' ? 'Dark' : 'Light'}
+            </span>
           </button>
         </div>
       </div>
 
       {/* Mobile Search Bar Row */}
-      <div className="md:hidden px-4 pb-2">
+      <div ref={mobileSearchWrapRef} className="md:hidden px-4 pb-2 relative">
         <div className="relative w-full">
           <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-[#6C6C70] dark:text-[#8E8E93] pointer-events-none" />
           <input
             type="search"
             value={searchQuery}
-            onChange={(e) => onSearchChange(e.target.value)}
+            onFocus={() => setSearchOpen(true)}
+            onChange={(e) => {
+              onSearchChange(e.target.value);
+              setSearchOpen(true);
+            }}
             placeholder={searchPlaceholder}
             aria-label="Search"
             className="w-full bg-[#E5E5EA]/80 dark:bg-[#1C1C1E] text-[#1C1C1E] dark:text-white placeholder:text-[#6C6C70] dark:placeholder:text-[#8E8E93] text-xs rounded-full pl-8 pr-8 py-2 border border-[#D1D1D6] dark:border-[#2C2C2E] focus:border-[#0071E3] dark:focus:border-[#0A84FF] focus:outline-none"
@@ -319,6 +557,7 @@ export const Header: React.FC<HeaderProps> = ({
             </button>
           )}
         </div>
+        {renderSearchDropdown()}
       </div>
 
       {/* Global Market Session Status Strip */}
@@ -414,7 +653,7 @@ export const Header: React.FC<HeaderProps> = ({
                         onSelectAsset(item.assetId);
                         onNavigate('dashboard');
                       } else {
-                        onNavigate('stocks');
+                        onInspectSymbol(item.yahooSymbol);
                       }
                     }}
                     className="inline-flex items-center gap-2 px-2.5 py-0.5 rounded-full bg-[#F2F2F7] dark:bg-[#1C1C1E] border border-[#E5E5EA] dark:border-[#2C2C2E] hover:border-[#0071E3] dark:hover:border-[#0A84FF] transition-colors shrink-0"
@@ -456,3 +695,4 @@ export const Header: React.FC<HeaderProps> = ({
     </header>
   );
 };
+

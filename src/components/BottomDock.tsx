@@ -1,18 +1,21 @@
 import React from 'react';
 import {
   BarChart3,
+  Bookmark,
+  Briefcase,
   CalendarDays,
+  FileText,
   LayoutDashboard,
   Moon,
   Newspaper,
   Sun,
 } from 'lucide-react';
-import { AppRoute } from '../types/market';
+import { AppRoute, ThemeMode } from '../types/market';
 
 interface BottomDockProps {
   activeRoute: AppRoute;
   onNavigate: (route: AppRoute) => void;
-  isDark: boolean;
+  themeMode: ThemeMode;
   onToggleTheme: () => void;
 }
 
@@ -23,23 +26,28 @@ const DOCK_ITEMS: {
   icon: React.ComponentType<{ className?: string }>;
 }[] = [
   { id: 'dashboard', label: 'Market Dashboard', shortLabel: 'Markets', icon: LayoutDashboard },
+  { id: 'watchlist', label: 'Market Watchlist', shortLabel: 'Watchlist', icon: Bookmark },
+  { id: 'portfolio', label: 'Portfolios & Lists', shortLabel: 'Portfolio', icon: Briefcase },
   { id: 'stocks', label: 'Top 10 Stocks (US & ID)', shortLabel: 'Stocks', icon: BarChart3 },
   { id: 'news', label: 'Breaking News', shortLabel: 'News', icon: Newspaper },
-  { id: 'calendar', label: 'Economic Calendar', shortLabel: 'Calendar', icon: CalendarDays },
+  { id: 'calendar', label: 'Macro Calendar', shortLabel: 'Calendar', icon: CalendarDays },
 ];
 
 export const BottomDock: React.FC<BottomDockProps> = ({
   activeRoute,
   onNavigate,
-  isDark,
+  themeMode,
   onToggleTheme,
 }) => {
+  const themeLabel =
+    themeMode === 'monochrome' ? 'Matte' : themeMode === 'dark' ? 'Dark' : 'Light';
+
   return (
     <nav
       aria-label="Bottom Dock Navigation"
-      className="fixed bottom-3 sm:bottom-5 left-1/2 -translate-x-1/2 z-40 w-[calc(100%-2rem)] max-w-sm sm:max-w-none sm:w-auto pb-safe pointer-events-none flex justify-center"
+      className="fixed bottom-3 sm:bottom-5 left-1/2 -translate-x-1/2 z-40 w-[calc(100%-1.25rem)] max-w-md sm:max-w-none sm:w-auto pb-safe pointer-events-none flex justify-center"
     >
-      <div className="pointer-events-auto w-full sm:w-auto rounded-2xl px-3 py-1.5 sm:px-3 sm:py-2 flex items-center justify-around sm:justify-center gap-1 sm:gap-1.5 backdrop-blur-2xl bg-white/90 dark:bg-[#1C1C1E]/85 border border-black/10 dark:border-white/15 shadow-[0_12px_36px_rgba(0,0,0,0.16)] dark:shadow-[0_16px_40px_rgba(0,0,0,0.65)]">
+      <div className="pointer-events-auto w-full sm:w-auto rounded-2xl px-2 py-1.5 sm:px-3 sm:py-2 flex items-center justify-around sm:justify-center gap-0.5 sm:gap-1.5 backdrop-blur-2xl bg-white/90 dark:bg-[#1C1C1E]/85 border border-black/10 dark:border-white/15 shadow-[0_12px_36px_rgba(0,0,0,0.16)] dark:shadow-[0_16px_40px_rgba(0,0,0,0.65)]">
         {DOCK_ITEMS.map((item) => {
           const Icon = item.icon;
           const isActive = activeRoute === item.id;
@@ -49,13 +57,13 @@ export const BottomDock: React.FC<BottomDockProps> = ({
               type="button"
               onClick={() => onNavigate(item.id)}
               title={item.label}
-              className={`relative group flex flex-col items-center justify-center min-w-[48px] sm:w-14 h-12 sm:h-14 rounded-xl transition-transform duration-150 active:scale-95 sm:hover:-translate-y-1 ${
+              className={`relative group flex-1 sm:flex-none flex flex-col items-center justify-center min-w-[44px] sm:w-14 h-12 sm:h-14 rounded-xl transition-transform duration-150 active:scale-95 sm:hover:-translate-y-1 ${
                 isActive
                   ? 'bg-black/10 dark:bg-white/15 text-[#1C1C1E] dark:text-white shadow-inner'
                   : 'text-[#6C6C70] dark:text-[#8E8E93] hover:bg-black/5 dark:hover:bg-white/10 hover:text-[#1C1C1E] dark:hover:text-white'
               }`}
             >
-              <Icon className="w-5 h-5 sm:w-[22px] sm:h-[22px]" />
+              <Icon className="w-[18px] h-[18px] sm:w-[22px] sm:h-[22px]" />
               <span
                 className={`text-[9px] sm:text-[10px] tracking-tight mt-0.5 whitespace-nowrap ${
                   isActive ? 'font-bold' : 'font-medium'
@@ -78,13 +86,19 @@ export const BottomDock: React.FC<BottomDockProps> = ({
         <button
           type="button"
           onClick={onToggleTheme}
-          title={isDark ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+          title={`Theme: ${themeMode === 'monochrome' ? 'Paper Matte' : themeMode === 'dark' ? 'Dark' : 'Light'} (click to cycle)`}
           className="hidden sm:flex relative group flex-col items-center justify-center w-14 h-14 rounded-xl text-[#6C6C70] dark:text-[#8E8E93] hover:bg-black/5 dark:hover:bg-white/10 hover:text-[#1C1C1E] dark:hover:text-white transition-transform duration-150 active:scale-95 hover:-translate-y-1"
         >
-          {isDark ? <Sun className="w-[22px] h-[22px]" /> : <Moon className="w-[22px] h-[22px]" />}
-          <span className="text-[10px] font-medium tracking-tight mt-0.5">Theme</span>
+          {themeMode === 'dark' ? (
+            <Moon className="w-[22px] h-[22px]" />
+          ) : themeMode === 'monochrome' ? (
+            <FileText className="w-[22px] h-[22px]" />
+          ) : (
+            <Sun className="w-[22px] h-[22px]" />
+          )}
+          <span className="text-[10px] font-medium tracking-tight mt-0.5">{themeLabel}</span>
           <span className="hidden lg:block absolute -top-9 px-2.5 py-1 rounded-md bg-[#1C1C1E] dark:bg-black/95 text-white text-[10px] font-semibold opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none whitespace-nowrap border border-white/10 shadow-lg">
-            Toggle Dark / Light
+            Light / Dark / Paper Matte
           </span>
         </button>
       </div>

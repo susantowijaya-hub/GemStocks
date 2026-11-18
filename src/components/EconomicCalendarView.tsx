@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Bell, BellRing, Download, Timer } from 'lucide-react';
+import { Bell, BellRing, CalendarClock, Download } from 'lucide-react';
 import { CalendarCatalyst, EconomicEvent } from '../types/market';
 
 interface EconomicCalendarViewProps {
@@ -11,7 +11,6 @@ interface EconomicCalendarViewProps {
 
 type DayFilter = 'all' | 'today' | 'tomorrow' | 'week';
 type CurrencyFilter = 'ALL' | 'USD' | 'IDR' | 'CNY' | 'EUR' | 'JPY';
-type ImpactFilter = 'ALL' | 'HIGH' | 'MED';
 
 function formatCountdown(totalSec: number): string {
   const h = Math.floor(totalSec / 3600);
@@ -28,7 +27,6 @@ export const EconomicCalendarView: React.FC<EconomicCalendarViewProps> = ({
 }) => {
   const [dayFilter, setDayFilter] = useState<DayFilter>('all');
   const [currencyFilter, setCurrencyFilter] = useState<CurrencyFilter>('ALL');
-  const [impactFilter, setImpactFilter] = useState<ImpactFilter>('ALL');
   const [exportNotice, setExportNotice] = useState(false);
   const [alertSet, setAlertSet] = useState<boolean>(() => {
     try {
@@ -69,20 +67,25 @@ export const EconomicCalendarView: React.FC<EconomicCalendarViewProps> = ({
     []
   );
 
+  // Strictly display market-moving high-impact macroeconomic releases only
+  const marketImpactEvents = useMemo(
+    () => events.filter((ev) => ev.impact === 'HIGH'),
+    [events]
+  );
+
   const filteredEvents = useMemo(() => {
     const q = searchQuery.toLowerCase().trim();
-    return events.filter((ev) => {
+    return marketImpactEvents.filter((ev) => {
       const matchDay = dayFilter === 'all' || dayFilter === 'week' ? true : ev.day === dayFilter;
       const matchCur = currencyFilter === 'ALL' || ev.currency === currencyFilter;
-      const matchImp = impactFilter === 'ALL' ? true : impactFilter === 'HIGH' ? ev.impact === 'HIGH' : true;
       const matchSearch =
         !q ||
         ev.title.toLowerCase().includes(q) ||
         ev.description.toLowerCase().includes(q) ||
         ev.currency.toLowerCase().includes(q);
-      return matchDay && matchCur && matchImp && matchSearch;
+      return matchDay && matchCur && matchSearch;
     });
-  }, [events, dayFilter, currencyFilter, impactFilter, searchQuery]);
+  }, [marketImpactEvents, dayFilter, currencyFilter, searchQuery]);
 
   const handleExportCsv = () => {
     const header = 'TimeWIB,Currency,Impact,Event,Actual,Forecast,Previous,Deviation\n';
@@ -96,7 +99,7 @@ export const EconomicCalendarView: React.FC<EconomicCalendarViewProps> = ({
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'economic-calendar-wib.csv';
+    a.download = 'market-impact-macro-calendar-wib.csv';
     a.click();
     URL.revokeObjectURL(url);
     setExportNotice(true);
@@ -104,69 +107,61 @@ export const EconomicCalendarView: React.FC<EconomicCalendarViewProps> = ({
   };
 
   return (
-    <div className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 pb-28 flex flex-col gap-6">
-      {/* Header Row */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
+    <div className="flex-1 max-w-6xl w-full mx-auto p-4 sm:p-6 pb-28 flex flex-col gap-5">
+      {/* Header matching Market section Calendar styling */}
+      <div className="flex flex-wrap items-end justify-between gap-3 pb-3 border-b border-[#E5E5EA] dark:border-[#2C2C2E]">
         <div>
-          <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight text-[#1C1C1E] dark:text-white">
-            Economic Calendar
+          <div className="flex items-center gap-2">
+            <CalendarClock className="w-4 h-4 text-[#16803C] dark:text-[#30D158]" />
+            <span className="text-xs font-bold text-[#16803C] dark:text-[#30D158] uppercase tracking-wider">
+              Market-Moving Macro Releases Only
+            </span>
+          </div>
+          <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight text-[#1C1C1E] dark:text-white mt-1">
+            Forex &amp; Macro Calendar
           </h1>
           <p className="text-xs sm:text-sm text-[#6C6C70] dark:text-[#8E8E93] mt-0.5">
-            Macro releases timed in WIB (Asia/Jakarta UTC+7)
+            High-impact macroeconomic data releases timed in WIB (Asia/Jakarta UTC+7)
           </p>
         </div>
 
         <button
           type="button"
           onClick={handleExportCsv}
-          className="min-h-[40px] px-4 py-2 rounded-full bg-white dark:bg-[#1C1C1E] hover:bg-[#E5E5EA] dark:hover:bg-[#2C2C2E] border border-[#D1D1D6] dark:border-[#2C2C2E] text-xs font-semibold text-[#1C1C1E] dark:text-white transition-colors flex items-center gap-1.5"
+          className="min-h-[38px] px-4 py-1.5 rounded-xl bg-white dark:bg-[#1C1C1E] hover:bg-[#E5E5EA] dark:hover:bg-[#2C2C2E] border border-[#D1D1D6] dark:border-[#2C2C2E] text-xs font-semibold text-[#1C1C1E] dark:text-white transition-colors flex items-center gap-1.5"
         >
           <Download className="w-3.5 h-3.5" />
           <span>{exportNotice ? 'CSV Exported' : 'Export CSV'}</span>
         </button>
       </div>
 
-      {/* High Impact Countdown Banner */}
-      <section className="rounded-2xl bg-white dark:bg-[#1C1C1E] border border-[#E5E5EA] dark:border-[#2C2C2E] p-5 sm:p-6 flex flex-col md:flex-row md:items-center justify-between gap-5">
-        <div className="flex items-start gap-4">
-          <div className="w-12 h-12 rounded-xl bg-[#FF453A]/15 border border-[#FF453A]/30 flex items-center justify-center text-[#D7261C] dark:text-[#FF453A] shrink-0">
-            <Timer className="w-6 h-6" />
-          </div>
-          <div>
-            <div className="flex flex-wrap items-center gap-2 text-xs">
-              <span className="font-bold text-[#D7261C] dark:text-[#FF453A] uppercase tracking-wider">
-                High Impact Countdown
-              </span>
-              <span className="text-[#6C6C70] dark:text-[#8E8E93]">·</span>
-              <span className="font-semibold text-[#0071E3] dark:text-[#0A84FF]">
-                {nextCatalyst ? `${nextCatalyst.currency} Macro Catalyst` : 'USD Macro Catalyst'}
-              </span>
-            </div>
-            <h2 className="text-lg sm:text-2xl font-extrabold text-[#1C1C1E] dark:text-white mt-0.5">
-              {nextCatalyst ? nextCatalyst.title : 'Upcoming High-Impact Macro Release'}
-            </h2>
-            <p className="text-xs text-[#6C6C70] dark:text-[#8E8E93] mt-0.5">
-              {nextCatalyst
-                ? `${nextCatalyst.description} · Release (${nextCatalyst.timeWib} WIB)`
-                : 'Live Economic Calendar Feed · Timed in Asia/Jakarta (WIB)'}
-            </p>
-          </div>
+      {/* Market-Section Style High Impact Countdown Banner */}
+      <section className="p-4 sm:p-5 rounded-2xl bg-[#0071E3]/10 dark:bg-[#0A84FF]/10 border border-[#0071E3]/25 dark:border-[#0A84FF]/30 flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div className="min-w-0">
+          <span className="text-[10px] uppercase font-bold tracking-wider text-[#0071E3] dark:text-[#0A84FF] block">
+            Next High Impact Release
+          </span>
+          <h2 className="text-base sm:text-xl font-extrabold text-[#1C1C1E] dark:text-white mt-0.5">
+            {nextCatalyst
+              ? `${nextCatalyst.currency} · ${nextCatalyst.title}`
+              : 'Upcoming High-Impact Macro Release'}
+          </h2>
+          <p className="text-xs text-[#6C6C70] dark:text-[#8E8E93] mt-0.5">
+            {nextCatalyst
+              ? `${nextCatalyst.description} · ${nextCatalyst.timeWib} WIB`
+              : 'Live High-Impact Economic Calendar Feed · Timed in Asia/Jakarta (WIB)'}
+          </p>
         </div>
 
-        <div className="flex items-center justify-between md:justify-end gap-4 pt-3 md:pt-0 border-t md:border-t-0 border-[#E5E5EA] dark:border-[#2C2C2E]">
-          <div className="text-left md:text-right">
-            <span className="text-[11px] text-[#6C6C70] dark:text-[#8E8E93] font-medium block">
-              Starts in (WIB UTC+7)
-            </span>
-            <div className="font-mono text-xl sm:text-2xl font-extrabold text-[#16803C] dark:text-[#30D158] tabular-nums">
-              {formatCountdown(countdownSeconds)}
-            </div>
+        <div className="flex items-center justify-between md:justify-end gap-3 pt-3 md:pt-0 border-t md:border-t-0 border-[#0071E3]/20 dark:border-[#0A84FF]/25 shrink-0">
+          <div className="px-3 py-1.5 rounded-xl bg-white dark:bg-black/60 font-mono text-sm sm:text-base font-extrabold text-[#16803C] dark:text-[#30D158] tabular-nums border border-[#E5E5EA] dark:border-[#2C2C2E]">
+            {formatCountdown(countdownSeconds)}
           </div>
 
           <button
             type="button"
             onClick={handleToggleAlert}
-            className={`min-h-[40px] px-4 py-2 rounded-full text-xs font-bold transition-colors flex items-center gap-1.5 shadow-sm shrink-0 ${
+            className={`min-h-[38px] px-3.5 py-1.5 rounded-xl text-xs font-bold transition-colors flex items-center gap-1.5 shrink-0 ${
               alertSet
                 ? 'bg-[#30D158] text-black'
                 : 'bg-[#0071E3] dark:bg-[#0A84FF] text-white hover:opacity-90'
@@ -187,9 +182,9 @@ export const EconomicCalendarView: React.FC<EconomicCalendarViewProps> = ({
         </div>
       </section>
 
-      {/* Filters & Time Window Bar */}
-      <section className="rounded-2xl bg-white dark:bg-[#1C1C1E] border border-[#E5E5EA] dark:border-[#2C2C2E] p-3.5 sm:p-4 flex flex-wrap items-center justify-between gap-3">
-        <div className="inline-flex rounded-xl bg-[#F2F2F7] dark:bg-black/50 p-1 border border-[#E5E5EA] dark:border-[#2C2C2E] overflow-x-auto no-scrollbar max-w-full">
+      {/* Filter Bar matching Market section controls */}
+      <div className="flex flex-wrap items-center justify-between gap-3 text-xs">
+        <div className="inline-flex rounded-xl bg-[#E5E5EA]/80 dark:bg-[#1C1C1E] p-1 border border-[#D1D1D6] dark:border-[#2C2C2E] overflow-x-auto no-scrollbar max-w-full">
           {(
             [
               { id: 'all', label: 'All Days' },
@@ -202,7 +197,7 @@ export const EconomicCalendarView: React.FC<EconomicCalendarViewProps> = ({
               key={t.id}
               type="button"
               onClick={() => setDayFilter(t.id)}
-              className={`min-h-[34px] px-3 sm:px-4 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-colors ${
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-colors ${
                 dayFilter === t.id
                   ? 'bg-white dark:bg-[#2C2C2E] text-[#1C1C1E] dark:text-white shadow-sm'
                   : 'text-[#6C6C70] dark:text-[#8E8E93] hover:text-[#1C1C1E] dark:hover:text-white'
@@ -213,67 +208,43 @@ export const EconomicCalendarView: React.FC<EconomicCalendarViewProps> = ({
           ))}
         </div>
 
-        <div className="flex flex-wrap items-center gap-3 text-xs">
-          <div className="flex items-center gap-1.5">
-            <span className="text-[#6C6C70] dark:text-[#8E8E93]">Currency:</span>
-            <select
-              aria-label="Filter by currency"
-              value={currencyFilter}
-              onChange={(e) => setCurrencyFilter(e.target.value as CurrencyFilter)}
-              className="bg-[#F2F2F7] dark:bg-black/50 border border-[#D1D1D6] dark:border-[#2C2C2E] rounded-lg px-2.5 py-1.5 text-xs text-[#1C1C1E] dark:text-white focus:outline-none focus:border-[#0071E3] dark:focus:border-[#0A84FF]"
-            >
-              <option value="ALL">All Currencies</option>
-              <option value="USD">USD (United States)</option>
-              <option value="IDR">IDR (Indonesia)</option>
-              <option value="CNY">CNY (China)</option>
-              <option value="EUR">EUR (Eurozone)</option>
-              <option value="JPY">JPY (Japan)</option>
-            </select>
-          </div>
-
-          <div className="flex items-center gap-1.5">
-            <span className="text-[#6C6C70] dark:text-[#8E8E93]">Impact:</span>
-            <select
-              aria-label="Filter by impact"
-              value={impactFilter}
-              onChange={(e) => setImpactFilter(e.target.value as ImpactFilter)}
-              className="bg-[#F2F2F7] dark:bg-black/50 border border-[#D1D1D6] dark:border-[#2C2C2E] rounded-lg px-2.5 py-1.5 text-xs text-[#1C1C1E] dark:text-white focus:outline-none focus:border-[#0071E3] dark:focus:border-[#0A84FF]"
-            >
-              <option value="ALL">All Significance</option>
-              <option value="HIGH">High Impact Only</option>
-              <option value="MED">Medium &amp; High</option>
-            </select>
-          </div>
+        <div className="flex items-center gap-2">
+          <span className="text-[#6C6C70] dark:text-[#8E8E93] font-medium">Currency:</span>
+          <select
+            aria-label="Filter by currency"
+            value={currencyFilter}
+            onChange={(e) => setCurrencyFilter(e.target.value as CurrencyFilter)}
+            className="bg-white dark:bg-[#1C1C1E] border border-[#D1D1D6] dark:border-[#2C2C2E] rounded-xl px-3 py-1.5 text-xs font-semibold text-[#1C1C1E] dark:text-white focus:outline-none focus:border-[#0071E3] dark:focus:border-[#0A84FF]"
+          >
+            <option value="ALL">All Currencies</option>
+            <option value="USD">USD (United States)</option>
+            <option value="IDR">IDR (Indonesia)</option>
+            <option value="CNY">CNY (China)</option>
+            <option value="EUR">EUR (Eurozone)</option>
+            <option value="JPY">JPY (Japan)</option>
+          </select>
         </div>
-      </section>
+      </div>
 
-      {/* Mobile Card List (< md) */}
-      <section className="md:hidden flex flex-col gap-3">
+      {/* Market-Section Style Compact Macro Release Cards Grid (Mobile + Tablet) */}
+      <section className="grid grid-cols-1 md:grid-cols-2 lg:hidden gap-3">
         {filteredEvents.map((ev) => (
           <article
             key={ev.id}
-            className="rounded-2xl bg-white dark:bg-[#1C1C1E] border border-[#E5E5EA] dark:border-[#2C2C2E] p-4 flex flex-col gap-2.5"
+            className="p-4 rounded-2xl bg-white dark:bg-[#1C1C1E] border border-[#E5E5EA] dark:border-[#2C2C2E] flex flex-col gap-2.5"
           >
             <div className="flex items-center justify-between text-xs">
               <div className="flex items-center gap-2 text-[#6C6C70] dark:text-[#8E8E93]">
                 <span className="font-bold text-[#1C1C1E] dark:text-white">{ev.currency}</span>
-                <span>·</span>
-                <span className="font-mono tabular-nums font-semibold text-[#1C1C1E] dark:text-white">
-                  {ev.timeWib}
-                </span>
-                <span>·</span>
-                <span
-                  className={`font-semibold ${
-                    ev.impact === 'HIGH'
-                      ? 'text-[#D7261C] dark:text-[#FF453A]'
-                      : 'text-[#B25E09] dark:text-[#FF9F0A]'
-                  }`}
-                >
-                  {ev.impact}
+                <span aria-hidden="true">·</span>
+                <span className="tabular-nums font-mono">{ev.timeWib}</span>
+                <span aria-hidden="true">·</span>
+                <span className="font-semibold text-[#D7261C] dark:text-[#FF453A]">
+                  High Impact
                 </span>
               </div>
               <span
-                className={`text-[11px] font-bold ${
+                className={`text-[11px] font-semibold ${
                   ev.deviationType === 'beat'
                     ? 'text-[#16803C] dark:text-[#30D158]'
                     : ev.deviationType === 'miss'
@@ -292,45 +263,74 @@ export const EconomicCalendarView: React.FC<EconomicCalendarViewProps> = ({
               </p>
             </div>
 
-            <div className="grid grid-cols-3 gap-2 pt-2 border-t border-[#E5E5EA] dark:border-[#2C2C2E] text-xs font-mono tabular-nums">
+            <div className="grid grid-cols-3 gap-2 pt-2.5 border-t border-[#E5E5EA] dark:border-[#2C2C2E]/60 text-xs text-center font-mono tabular-nums">
               <div>
-                <span className="text-[10px] font-sans text-[#6C6C70] dark:text-[#8E8E93] block">
+                <span className="text-[9px] text-[#6C6C70] dark:text-[#8E8E93] block font-sans uppercase">
                   Actual
                 </span>
-                <span className="font-bold text-[#1C1C1E] dark:text-white">{ev.actual}</span>
+                <span
+                  className={`font-bold ${
+                    ev.deviationType === 'beat'
+                      ? 'text-[#16803C] dark:text-[#30D158]'
+                      : ev.deviationType === 'miss'
+                        ? 'text-[#D7261C] dark:text-[#FF453A]'
+                        : 'text-[#1C1C1E] dark:text-white'
+                  }`}
+                >
+                  {ev.actual}
+                </span>
               </div>
               <div>
-                <span className="text-[10px] font-sans text-[#6C6C70] dark:text-[#8E8E93] block">
+                <span className="text-[9px] text-[#6C6C70] dark:text-[#8E8E93] block font-sans uppercase">
                   Forecast
                 </span>
-                <span className="font-medium text-[#1C1C1E] dark:text-[#E5E5EA]">
+                <span className="font-semibold text-[#1C1C1E] dark:text-[#E5E5EA]">
                   {ev.forecast}
                 </span>
               </div>
               <div>
-                <span className="text-[10px] font-sans text-[#6C6C70] dark:text-[#8E8E93] block">
-                  Previous
+                <span className="text-[9px] text-[#6C6C70] dark:text-[#8E8E93] block font-sans uppercase">
+                  Prev
                 </span>
                 <span className="text-[#6C6C70] dark:text-[#8E8E93]">{ev.previous}</span>
               </div>
             </div>
           </article>
         ))}
+
+        {filteredEvents.length === 0 && (
+          <div className="md:col-span-2 p-6 rounded-2xl bg-white dark:bg-[#1C1C1E] border border-[#E5E5EA] dark:border-[#2C2C2E] text-center text-xs text-[#6C6C70] dark:text-[#8E8E93] flex flex-col items-center gap-2">
+            <span>No high-impact macro releases match this filter window.</span>
+            <button
+              type="button"
+              onClick={() => {
+                setDayFilter('all');
+                setCurrencyFilter('ALL');
+              }}
+              className="text-[#0071E3] dark:text-[#0A84FF] font-semibold hover:underline"
+            >
+              Show All Market-Moving Releases
+            </button>
+          </div>
+        )}
       </section>
 
-      {/* Desktop/Tablet Economic Calendar Data Table (md+) */}
-      <section className="hidden md:flex rounded-2xl bg-white dark:bg-[#1C1C1E] border border-[#E5E5EA] dark:border-[#2C2C2E] overflow-hidden flex-col">
+      {/* Desktop High-Impact Macro Table (lg+) */}
+      <section className="hidden lg:flex rounded-2xl bg-white dark:bg-[#1C1C1E] border border-[#E5E5EA] dark:border-[#2C2C2E] overflow-hidden flex-col">
         <div className="p-4 border-b border-[#E5E5EA] dark:border-[#2C2C2E] flex items-center justify-between">
-          <div>
-            <h2 className="text-base font-bold text-[#1C1C1E] dark:text-white">
-              Forex &amp; Macroeconomic Release Calendar
-            </h2>
-            <p className="text-xs text-[#6C6C70] dark:text-[#8E8E93]">
-              Release times shown in WIB (UTC+7) with consensus deviations
-            </p>
+          <div className="flex items-center gap-2">
+            <CalendarClock className="w-4 h-4 text-[#16803C] dark:text-[#30D158]" />
+            <div>
+              <h2 className="text-base font-bold text-[#1C1C1E] dark:text-white">
+                Market-Moving Macroeconomic Releases
+              </h2>
+              <p className="text-xs text-[#6C6C70] dark:text-[#8E8E93]">
+                Filtered strictly to high-impact data releases · Timed in WIB (UTC+7)
+              </p>
+            </div>
           </div>
-          <span className="text-xs text-[#6C6C70] dark:text-[#8E8E93] font-medium">
-            {filteredEvents.length} Macro Releases
+          <span className="text-xs text-[#6C6C70] dark:text-[#8E8E93] font-medium tabular-nums">
+            {filteredEvents.length} High-Impact Releases
           </span>
         </div>
 
@@ -338,21 +338,21 @@ export const EconomicCalendarView: React.FC<EconomicCalendarViewProps> = ({
           <table className="w-full text-left border-collapse text-xs">
             <thead>
               <tr className="border-b border-[#E5E5EA] dark:border-[#2C2C2E] bg-[#F2F2F7] dark:bg-black/40 text-[#6C6C70] dark:text-[#8E8E93] font-semibold">
-                <th className="py-3 px-4 w-28">Time (WIB)</th>
+                <th className="py-3 px-4 w-32">Time (WIB)</th>
                 <th className="py-3 px-3 w-20">Cur</th>
                 <th className="py-3 px-3 w-24">Impact</th>
-                <th className="py-3 px-4">Event &amp; Description</th>
+                <th className="py-3 px-4">Macro Release &amp; Market Scope</th>
                 <th className="py-3 px-4 w-24 text-right">Actual</th>
                 <th className="py-3 px-4 w-24 text-right">Forecast</th>
-                <th className="py-3 px-4 w-24 text-right">Previous</th>
-                <th className="py-3 px-4 w-28 text-center">Deviation</th>
+                <th className="py-3 px-4 w-24 text-right">Prev</th>
+                <th className="py-3 px-4 w-32 text-center">Surprise</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[#E5E5EA] dark:divide-[#2C2C2E]/40">
               {filteredEvents.map((ev) => (
                 <tr
                   key={ev.id}
-                  className="hover:bg-[#F2F2F7] dark:hover:bg-[#2C2C2E]/40 transition-colors"
+                  className="hover:bg-[#E5E5EA]/40 dark:hover:bg-[#2C2C2E]/40 transition-colors"
                 >
                   <td className="py-3.5 px-4 font-semibold text-[#1C1C1E] dark:text-white tabular-nums font-mono">
                     {ev.timeWib}
@@ -361,14 +361,8 @@ export const EconomicCalendarView: React.FC<EconomicCalendarViewProps> = ({
                     {ev.currency}
                   </td>
                   <td className="py-3.5 px-3">
-                    <span
-                      className={`font-bold ${
-                        ev.impact === 'HIGH'
-                          ? 'text-[#D7261C] dark:text-[#FF453A]'
-                          : 'text-[#B25E09] dark:text-[#FF9F0A]'
-                      }`}
-                    >
-                      {ev.impact === 'HIGH' ? 'High' : 'Medium'}
+                    <span className="font-bold text-[#D7261C] dark:text-[#FF453A]">
+                      High
                     </span>
                   </td>
                   <td className="py-3.5 px-4">
@@ -416,8 +410,18 @@ export const EconomicCalendarView: React.FC<EconomicCalendarViewProps> = ({
         </div>
 
         {filteredEvents.length === 0 && (
-          <div className="p-8 text-center text-xs text-[#6C6C70] dark:text-[#8E8E93]">
-            No macroeconomic releases match the selected filters.
+          <div className="p-8 text-center text-xs text-[#6C6C70] dark:text-[#8E8E93] flex flex-col items-center gap-2">
+            <span>No high-impact macroeconomic releases match the selected filters.</span>
+            <button
+              type="button"
+              onClick={() => {
+                setDayFilter('all');
+                setCurrencyFilter('ALL');
+              }}
+              className="text-[#0071E3] dark:text-[#0A84FF] font-semibold hover:underline"
+            >
+              Show All Market-Moving Releases
+            </button>
           </div>
         )}
       </section>

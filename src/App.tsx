@@ -12,12 +12,16 @@ import { MarketDashboardView } from './components/MarketDashboardView';
 import { NewsFeedView } from './components/NewsFeedView';
 import { NewsModal } from './components/NewsModal';
 import { OfflineIndicator } from './components/OfflineIndicator';
+import { PortfolioView } from './components/PortfolioView';
+import { SymbolDetailModal } from './components/SymbolDetailModal';
 import { TopStocksView } from './components/TopStocksView';
+import { WatchlistView } from './components/WatchlistView';
+import { AuthProvider } from './contexts/AuthContext';
 import { useLiveMarket } from './hooks/useLiveMarket';
 import { useTheme } from './hooks/useTheme';
 import { AppRoute, CalendarCatalyst, NewsStory } from './types/market';
 
-const VALID_ROUTES: AppRoute[] = ['dashboard', 'stocks', 'news', 'calendar'];
+const VALID_ROUTES: AppRoute[] = ['dashboard', 'watchlist', 'portfolio', 'stocks', 'news', 'calendar'];
 
 function getInitialRoute(): AppRoute {
   if (typeof window === 'undefined') return 'dashboard';
@@ -26,15 +30,21 @@ function getInitialRoute(): AppRoute {
 }
 
 function StocksTerminalShell() {
-  const { isDark, toggleTheme } = useTheme();
+  const { themeMode, toggleTheme } = useTheme();
   const {
     assets,
     newsStories,
     economicEvents,
     nextCatalyst,
+    fxRates,
     usMovers,
     idxMovers,
+    usMoversBucket,
+    idxMoversBucket,
     stocksUpdatedAt,
+    dailySummary,
+    dailySummaryLoading,
+    refreshDailySummary,
     isPulseActive,
     wsConnected,
     feedsLive,
@@ -47,6 +57,7 @@ function StocksTerminalShell() {
 
   const [activeRoute, setActiveRoute] = useState<AppRoute>(getInitialRoute);
   const [selectedAssetId, setSelectedAssetId] = useState<string>('SPX');
+  const [inspectedSymbol, setInspectedSymbol] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [isPercentMode, setIsPercentMode] = useState<boolean>(true);
   const [activeStory, setActiveStory] = useState<NewsStory | null>(null);
@@ -142,6 +153,16 @@ function StocksTerminalShell() {
     setIsPercentMode((prev) => !prev);
   }, []);
 
+  const handleInspectSymbol = useCallback(
+    (yahooSymbol: string, builtInAssetId?: string) => {
+      if (builtInAssetId) {
+        setSelectedAssetId(builtInAssetId);
+      }
+      setInspectedSymbol(yahooSymbol);
+    },
+    []
+  );
+
   return (
     <div className="min-h-dvh flex flex-col bg-[#F2F2F7] dark:bg-black text-[#1C1C1E] dark:text-white transition-colors selection:bg-[#0071E3]/20 dark:selection:bg-[#0A84FF]/30">
       <Header
@@ -149,7 +170,7 @@ function StocksTerminalShell() {
         onNavigate={handleNavigate}
         searchQuery={searchQuery}
         onSearchChange={setSearchQuery}
-        isDark={isDark}
+        themeMode={themeMode}
         onToggleTheme={toggleTheme}
         isPulseActive={isPulseActive}
         wsConnected={wsConnected || feedsLive}
@@ -160,35 +181,53 @@ function StocksTerminalShell() {
         usMovers={usMovers}
         idxMovers={idxMovers}
         onSelectAsset={setSelectedAssetId}
+        onInspectSymbol={handleInspectSymbol}
       />
 
       <main className="flex-1 flex flex-col">
         {activeRoute === 'dashboard' && (
           <MarketDashboardView
             assets={assets}
-            newsStories={newsStories}
-            economicEvents={economicEvents}
-            nextCatalyst={activeCatalyst}
             selectedAssetId={selectedAssetId}
             onSelectAsset={setSelectedAssetId}
+            searchQuery={searchQuery}
+            flashMap={flashMap}
+            onNavigate={handleNavigate}
+            onLoadTimeframe={loadChartTimeframe}
+          />
+        )}
+
+        {activeRoute === 'watchlist' && (
+          <WatchlistView
+            assets={assets}
+            selectedAssetId={selectedAssetId}
+            onSelectAsset={setSelectedAssetId}
+            onNavigate={handleNavigate}
+            onInspectSymbol={handleInspectSymbol}
             searchQuery={searchQuery}
             isPercentMode={isPercentMode}
             onToggleBadgeMode={handleToggleBadgeMode}
             flashMap={flashMap}
-            onOpenStory={setActiveStory}
-            onNavigate={handleNavigate}
-            onLoadTimeframe={loadChartTimeframe}
-            countdownSeconds={countdownSeconds}
+          />
+        )}
+
+        {activeRoute === 'portfolio' && (
+          <PortfolioView
+            assets={assets}
+            fxRates={fxRates}
+            searchQuery={searchQuery}
+            onInspectSymbol={(sym) => handleInspectSymbol(sym)}
           />
         )}
 
         {activeRoute === 'stocks' && (
           <TopStocksView
-            usMovers={usMovers}
-            idxMovers={idxMovers}
+            usBucket={usMoversBucket}
+            idxBucket={idxMoversBucket}
             stocksUpdatedAt={stocksUpdatedAt}
             searchQuery={searchQuery}
             onRefresh={refreshStocks}
+            onInspectSymbol={(sym) => handleInspectSymbol(sym)}
           />
         )}
 
@@ -197,6 +236,16 @@ function StocksTerminalShell() {
             stories={newsStories}
             searchQuery={searchQuery}
             onOpenStory={setActiveStory}
+            dailySummary={dailySummary}
+            dailySummaryLoading={dailySummaryLoading}
+            onRefreshDailySummary={refreshDailySummary}
+            assets={assets}
+            economicEvents={economicEvents}
+            usBucket={usMoversBucket}
+            idxBucket={idxMoversBucket}
+            onSelectAsset={setSelectedAssetId}
+            onInspectSymbol={handleInspectSymbol}
+            onNavigate={handleNavigate}
           />
         )}
 
@@ -213,12 +262,16 @@ function StocksTerminalShell() {
       <BottomDock
         activeRoute={activeRoute}
         onNavigate={handleNavigate}
-        isDark={isDark}
+        themeMode={themeMode}
         onToggleTheme={toggleTheme}
       />
 
       <OfflineIndicator />
       <NewsModal story={activeStory} onClose={() => setActiveStory(null)} />
+      <SymbolDetailModal
+        yahooSymbol={inspectedSymbol}
+        onClose={() => setInspectedSymbol(null)}
+      />
     </div>
   );
 }
@@ -226,7 +279,9 @@ function StocksTerminalShell() {
 export default function App() {
   return (
     <ErrorBoundary>
-      <StocksTerminalShell />
+      <AuthProvider>
+        <StocksTerminalShell />
+      </AuthProvider>
     </ErrorBoundary>
   );
 }

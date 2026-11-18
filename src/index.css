@@ -1,5 +1,6 @@
 @import "tailwindcss";
 @custom-variant dark (&:where(.dark, .dark *));
+@custom-variant monochrome (&:where(.monochrome, .monochrome *));
 
 @theme {
   --color-gain: #30D158;
@@ -31,6 +32,128 @@
   input {
     touch-action: manipulation;
   }
+}
+
+/* Monochrome Paper Matte Display Mode (Archival E-Ink / Newsprint) */
+html.monochrome {
+  color-scheme: light;
+}
+
+html.monochrome body {
+  background-color: #EFECE4;
+  background-image:
+    radial-gradient(rgba(24, 24, 22, 0.032) 0.75px, transparent 0.75px),
+    radial-gradient(rgba(24, 24, 22, 0.022) 0.75px, #EFECE4 0.75px);
+  background-size: 16px 16px;
+  background-position: 0 0, 8px 8px;
+  color: #181816;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Flatten glossy blurs and convert color accents into crisp monochrome ink & paper surfaces */
+html.monochrome header,
+html.monochrome nav,
+html.monochrome section,
+html.monochrome article,
+html.monochrome aside,
+html.monochrome .backdrop-blur-xl,
+html.monochrome .backdrop-blur-2xl {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+html.monochrome .min-h-dvh {
+  background-color: transparent;
+  color: #181816;
+}
+
+html.monochrome .bg-white,
+html.monochrome .bg-white\/95,
+html.monochrome .bg-white\/90,
+html.monochrome .bg-white\/80,
+html.monochrome .bg-white\/60 {
+  background-color: #F7F4EC;
+}
+
+html.monochrome .bg-\[\#F2F2F7\],
+html.monochrome .bg-\[\#F2F2F7\]\/95,
+html.monochrome .bg-\[\#F2F2F7\]\/70,
+html.monochrome .bg-\[\#F2F2F7\]\/65,
+html.monochrome .bg-\[\#E5E5EA\],
+html.monochrome .bg-\[\#E5E5EA\]\/80,
+html.monochrome .bg-\[\#E5E5EA\]\/70,
+html.monochrome .bg-\[\#E5E5EA\]\/60,
+html.monochrome .bg-\[\#E5E5EA\]\/40 {
+  background-color: #E7E2D7;
+}
+
+html.monochrome .border-\[\#E5E5EA\],
+html.monochrome .border-\[\#D1D1D6\],
+html.monochrome .divide-\[\#E5E5EA\] > :not(:last-child) {
+  border-color: #CFCAC0;
+}
+
+html.monochrome .text-\[\#1C1C1E\] {
+  color: #171715;
+}
+
+html.monochrome .text-\[\#6C6C70\],
+html.monochrome .text-\[\#8E8E93\],
+html.monochrome .text-\[\#3A3A3C\] {
+  color: #54524B;
+}
+
+/* Monochrome ink conversion for colored accents, charts, badges, and pills */
+html.monochrome .bg-\[\#0071E3\] {
+  background-color: #181816;
+  color: #F7F4EC;
+}
+
+html.monochrome .border-\[\#0071E3\] {
+  border-color: #181816;
+}
+
+html.monochrome .text-\[\#0071E3\],
+html.monochrome .text-\[\#16803C\],
+html.monochrome .text-\[\#B25E09\] {
+  color: #181816;
+}
+
+html.monochrome .text-\[\#D7261C\] {
+  color: #4A4842;
+}
+
+html.monochrome .bg-\[\#30D158\],
+html.monochrome .bg-\[\#FF453A\] {
+  background-color: #181816;
+  color: #F7F4EC;
+}
+
+html.monochrome .bg-\[\#30D158\]\/15,
+html.monochrome .bg-\[\#30D158\]\/20,
+html.monochrome .bg-\[\#30D158\]\/25,
+html.monochrome .bg-\[\#30D158\]\/12,
+html.monochrome .bg-\[\#0071E3\]\/10,
+html.monochrome .bg-\[\#0071E3\]\/12,
+html.monochrome .bg-\[\#0071E3\]\/15,
+html.monochrome .bg-\[\#FF453A\]\/12,
+html.monochrome .bg-\[\#FF453A\]\/15,
+html.monochrome .bg-\[\#FF453A\]\/20,
+html.monochrome .bg-\[\#FF9F0A\]\/15 {
+  background-color: #E3DEC9;
+  color: #181816;
+  border-color: #BDB7A8;
+}
+
+html.monochrome .shadow-sm,
+html.monochrome .shadow-lg,
+html.monochrome .shadow-2xl {
+  box-shadow: 0 1px 0 rgba(24, 24, 22, 0.14);
+}
+
+/* Desaturate charts and icons only (never html/body so fixed dock & modals stay viewport-pinned) */
+html.monochrome svg {
+  filter: grayscale(100%) contrast(1.12);
 }
 
 /* Thin Apple-style scrollbar on desktop, clean hidden scrollbars on horizontal carousels */
@@ -116,3 +239,4 @@
 .pt-safe {
   padding-top: env(safe-area-inset-top);
 }
+

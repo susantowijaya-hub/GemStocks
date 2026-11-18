@@ -1,42 +1,58 @@
 import { useCallback, useEffect, useState } from 'react';
+import { ThemeMode } from '../types/market';
+
+const THEME_ORDER: ThemeMode[] = ['light', 'dark', 'monochrome'];
 
 export function useTheme() {
-  const [isDark, setIsDark] = useState<boolean>(() => {
+  const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
     try {
       const saved = localStorage.getItem('stocks-theme');
-      if (saved === 'light') return false;
-      if (saved === 'dark') return true;
-      return true;
+      if (saved === 'light' || saved === 'dark' || saved === 'monochrome') {
+        return saved;
+      }
+      return 'dark';
     } catch {
-      return true;
+      return 'dark';
     }
   });
 
   useEffect(() => {
     const root = document.documentElement;
-    if (isDark) {
-      root.classList.add('dark');
-      root.classList.remove('light');
-    } else {
-      root.classList.remove('dark');
-      root.classList.add('light');
-    }
+    root.classList.remove('dark', 'light', 'monochrome');
+    root.classList.add(themeMode);
+    root.dataset.theme = themeMode;
 
     try {
-      localStorage.setItem('stocks-theme', isDark ? 'dark' : 'light');
+      localStorage.setItem('stocks-theme', themeMode);
     } catch {
       // ignore storage failure
     }
 
     const themeMeta = document.querySelector('meta[name="theme-color"]');
     if (themeMeta) {
-      themeMeta.setAttribute('content', isDark ? '#000000' : '#F2F2F7');
+      const metaColor =
+        themeMode === 'dark'
+          ? '#000000'
+          : themeMode === 'monochrome'
+            ? '#EFECE4'
+            : '#F2F2F7';
+      themeMeta.setAttribute('content', metaColor);
     }
-  }, [isDark]);
+  }, [themeMode]);
 
   const toggleTheme = useCallback(() => {
-    setIsDark((prev) => !prev);
+    setThemeMode((prev) => {
+      const idx = THEME_ORDER.indexOf(prev);
+      return THEME_ORDER[(idx + 1) % THEME_ORDER.length];
+    });
   }, []);
 
-  return { isDark, toggleTheme };
+  return {
+    themeMode,
+    setThemeMode,
+    isDark: themeMode === 'dark',
+    isMonochrome: themeMode === 'monochrome',
+    toggleTheme,
+  };
 }
+

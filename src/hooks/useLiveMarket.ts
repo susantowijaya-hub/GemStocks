@@ -9,11 +9,13 @@ import {
 import {
   CalendarCatalyst,
   CurrencyCode,
+  DailyMarketHighlight,
+  DailyMarketSummaryResponse,
   EconomicEvent,
   FxPairTile,
   MarketAsset,
   NewsStory,
-  StockMover,
+  StocksMoversBucket,
   Timeframe,
 } from '../types/market';
 
@@ -46,6 +48,9 @@ interface QuotePatch {
   chart1D: number[];
   timestamps1D: number[];
   updatedAtEpoch: number;
+  marketSessionOpen?: boolean;
+  sessionStateLabel?: string;
+  sessionProgressRatio?: number;
 }
 
 export function useLiveMarket() {
@@ -55,15 +60,32 @@ export function useLiveMarket() {
   const [nextCatalyst, setNextCatalyst] = useState<CalendarCatalyst | null>(null);
   const [fxRates, setFxRates] = useState<Record<CurrencyCode, number>>(FX_RATES_USD_BASE);
   const [fxPairTiles, setFxPairTiles] = useState<FxPairTile[]>(FX_PAIR_TILES);
-  const [usMovers, setUsMovers] = useState<StockMover[]>([]);
-  const [idxMovers, setIdxMovers] = useState<StockMover[]>([]);
+  const [usMoversBucket, setUsMoversBucket] = useState<StocksMoversBucket>({
+    impact: [],
+    gainers: [],
+    losers: [],
+  });
+  const [idxMoversBucket, setIdxMoversBucket] = useState<StocksMoversBucket>({
+    impact: [],
+    gainers: [],
+    losers: [],
+    foreignBuy: [],
+    foreignSell: [],
+  });
   const [stocksUpdatedAt, setStocksUpdatedAt] = useState<string | null>(null);
+  const [dailySummary, setDailySummary] = useState<DailyMarketSummaryResponse | null>(null);
+  const [dailySummaryLoading, setDailySummaryLoading] = useState<boolean>(false);
   const [isPulseActive, setIsPulseActive] = useState(true);
   const [wsConnected, setWsConnected] = useState(false);
   const [feedsLive, setFeedsLive] = useState(false);
   const [flashMap, setFlashMap] = useState<Record<string, 'gain' | 'loss'>>({});
   const isPulseRef = useRef(isPulseActive);
   isPulseRef.current = isPulseActive;
+  const quotesInFlightRef = useRef(false);
+  const stocksInFlightRef = useRef(false);
+  const summaryInFlightRef = useRef(false);
+  const anySessionOpenRef = useRef(true);
+  const lastClosedPollAtRef = useRef(0);
 
   const triggerFlash = useCallback((id: string, dir: 'gain' | 'loss') => {
     setFlashMap((prev) => ({ ...prev, [id]: dir }));
@@ -77,8 +99,10 @@ export function useLiveMarket() {
     }, 650);
   }, []);
 
-  // Fetch all 18 live market quotes from backend Yahoo Finance aggregator
+  // Fetch all 19 live market quotes from backend aggregator (1s during open session, last settle when closed)
   const refreshQuotes = useCallback(async () => {
+    if (quotesInFlightRef.current) return;
+    quotesInFlightRef.current = true;
     try {
       const res = await fetch('/api/market/quotes');
       if (!res.ok) return;
@@ -87,12 +111,14 @@ export function useLiveMarket() {
       if (!Array.isArray(patches) || patches.length === 0) return;
 
       const patchMap = new Map(patches.map((p) => [p.id, p]));
+      anySessionOpenRef.current = patches.some((p) => p.marketSessionOpen !== false);
       setFeedsLive(true);
 
       setAssets((prev) =>
         prev.map((asset) => {
           const patch = patchMap.get(asset.id);
           if (!patch) return asset;
+          // Freeze Binance-streamed crypto when WS is connected unless backend value is newer
           if (Math.abs(patch.price - asset.price) > 0.0001) {
             triggerFlash(asset.id, patch.price >= asset.price ? 'gain' : 'loss');
           }
@@ -122,6 +148,9 @@ export function useLiveMarket() {
             resistanceNote: patch.resistanceNote,
             commentary: patch.commentary,
             updatedAtEpoch: patch.updatedAtEpoch,
+            marketSessionOpen: patch.marketSessionOpen,
+            sessionStateLabel: patch.sessionStateLabel,
+            sessionProgressRatio: patch.sessionProgressRatio,
             sparklinePoints: patch.sparklinePoints.length > 1 ? patch.sparklinePoints : asset.sparklinePoints,
             chartSeries: {
               ...asset.chartSeries,
@@ -136,6 +165,8 @@ export function useLiveMarket() {
       );
     } catch {
       // keep existing state on transient network failure
+    } finally {
+      quotesInFlightRef.current = false;
     }
   }, [triggerFlash]);
 
@@ -205,54 +236,111 @@ export function useLiveMarket() {
     }
   }, []);
 
-  // Fetch Top 10 US & Indonesia Stock Movers
+  // Fetch Top 10 US & Indonesia Stock Movers (impact, gainers, losers + IDX foreign buy/sell)
   const refreshStocks = useCallback(async () => {
+    if (stocksInFlightRef.current) return;
+    stocksInFlightRef.current = true;
     try {
       const res = await fetch('/api/stocks/movers');
       if (!res.ok) return;
       const data = (await res.json()) as {
-        us?: StockMover[];
-        indonesia?: StockMover[];
+        us?: StocksMoversBucket;
+        indonesia?: StocksMoversBucket;
         updatedAt?: string;
       };
-      if (Array.isArray(data.us)) setUsMovers(data.us);
-      if (Array.isArray(data.indonesia)) setIdxMovers(data.indonesia);
+      if (data.us && Array.isArray(data.us.impact)) {
+        setUsMoversBucket(data.us);
+      }
+      if (data.indonesia && Array.isArray(data.indonesia.impact)) {
+        setIdxMoversBucket(data.indonesia);
+      }
       if (data.updatedAt) setStocksUpdatedAt(data.updatedAt);
     } catch {
       // keep existing state on transient error
+    } finally {
+      stocksInFlightRef.current = false;
     }
   }, []);
 
-  // Initial fetch + periodic live polling
+  // Fetch and map summarized 24-hour market activity JSON (top gainers, losers, macro events)
+  const fetchDailySummary = useCallback(async () => {
+    if (summaryInFlightRef.current) return;
+    summaryInFlightRef.current = true;
+    setDailySummaryLoading(true);
+    try {
+      const res = await fetch('/api/market/daily-summary');
+      if (!res.ok) return;
+      const raw = (await res.json()) as Partial<DailyMarketSummaryResponse>;
+      if (!Array.isArray(raw.highlights)) return;
+
+      const mappedHighlights: DailyMarketHighlight[] = raw.highlights
+        .filter((h) => h && typeof h.title === 'string' && typeof h.summaryText === 'string')
+        .map((h) => ({
+          id: String(h.id || `${h.category}-${h.title}`),
+          category: h.category === 'loser' || h.category === 'event' ? h.category : 'gainer',
+          title: h.title.trim(),
+          metricText: String(h.metricText || '').trim(),
+          summaryText: h.summaryText.trim(),
+          metaText: String(h.metaText || '').trim(),
+          symbol: h.symbol,
+          yahooSymbol: h.yahooSymbol,
+          assetId: h.assetId,
+          routeTarget: h.routeTarget,
+        }));
+
+      setDailySummary({
+        windowLabel: raw.windowLabel || 'Last 24 hours',
+        dateLabel: raw.dateLabel || new Date().toLocaleDateString('en-US'),
+        updatedAt: raw.updatedAt || new Date().toISOString(),
+        highlights: mappedHighlights,
+      });
+    } catch {
+      // retain existing summary on transient error
+    } finally {
+      summaryInFlightRef.current = false;
+      setDailySummaryLoading(false);
+    }
+  }, []);
+
+  // Initial fetch + 1-second live polling during open sessions (last close freeze when closed)
   useEffect(() => {
     void refreshQuotes();
     void refreshSecondaryFeeds();
     void refreshStocks();
+    void fetchDailySummary();
 
     const quoteTimer = window.setInterval(() => {
-      if (isPulseRef.current) {
+      if (!isPulseRef.current) return;
+      if (anySessionOpenRef.current) {
         void refreshQuotes();
+      } else {
+        const now = Date.now();
+        if (now - lastClosedPollAtRef.current >= 60_000) {
+          lastClosedPollAtRef.current = now;
+          void refreshQuotes();
+        }
       }
-    }, 45_000);
+    }, 1_000);
 
     const stocksTimer = window.setInterval(() => {
       if (isPulseRef.current) {
         void refreshStocks();
       }
-    }, 60_000);
+    }, 5_000);
 
     const secondaryTimer = window.setInterval(() => {
       if (isPulseRef.current) {
         void refreshSecondaryFeeds();
+        void fetchDailySummary();
       }
-    }, 300_000);
+    }, 60_000);
 
     return () => {
       window.clearInterval(quoteTimer);
       window.clearInterval(stocksTimer);
       window.clearInterval(secondaryTimer);
     };
-  }, [refreshQuotes, refreshSecondaryFeeds, refreshStocks]);
+  }, [refreshQuotes, refreshSecondaryFeeds, refreshStocks, fetchDailySummary]);
 
   // Real Binance WebSocket connection for sub-second BTC/USD and ETH/USD updates
   useEffect(() => {
@@ -355,7 +443,8 @@ export function useLiveMarket() {
     void refreshQuotes();
     void refreshSecondaryFeeds();
     void refreshStocks();
-  }, [refreshQuotes, refreshSecondaryFeeds, refreshStocks]);
+    void fetchDailySummary();
+  }, [refreshQuotes, refreshSecondaryFeeds, refreshStocks, fetchDailySummary]);
 
   return {
     assets,
@@ -364,9 +453,14 @@ export function useLiveMarket() {
     nextCatalyst,
     fxRates,
     fxPairTiles,
-    usMovers,
-    idxMovers,
+    usMovers: usMoversBucket.impact,
+    idxMovers: idxMoversBucket.impact,
+    usMoversBucket,
+    idxMoversBucket,
     stocksUpdatedAt,
+    dailySummary,
+    dailySummaryLoading,
+    refreshDailySummary: fetchDailySummary,
     isPulseActive,
     wsConnected,
     feedsLive,

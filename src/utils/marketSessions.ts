@@ -391,3 +391,132 @@ export function getAssetSessionStatus(
     isLiveRunning: !isWeekendClosed,
   };
 }
+
+export function getSessionProgressRatio(assetId: string, now: Date): number {
+  const clamp = (v: number) => Math.max(0.08, Math.min(1, v));
+
+  if (assetId === 'SPX' || assetId === 'IXIC' || assetId === 'DJI') {
+    const ny = getTzClock(now, 'America/New_York');
+    if (ny.isWeekend) return 1;
+    if (ny.totalMin >= 9 * 60 + 30 && ny.totalMin < 16 * 60) {
+      return clamp((ny.totalMin - (9 * 60 + 30)) / 390);
+    }
+    return 1;
+  }
+
+  if (assetId === 'IHSG') {
+    const jkt = getTzClock(now, 'Asia/Jakarta');
+    if (jkt.isWeekend) return 1;
+    if (jkt.totalMin >= 9 * 60 && jkt.totalMin < 16 * 60) {
+      return clamp((jkt.totalMin - 9 * 60) / (7 * 60));
+    }
+    return 1;
+  }
+
+  if (assetId === 'HSI') {
+    const hkg = getTzClock(now, 'Asia/Hong_Kong');
+    if (hkg.isWeekend) return 1;
+    if (hkg.totalMin >= 9 * 60 + 30 && hkg.totalMin < 16 * 60) {
+      return clamp((hkg.totalMin - (9 * 60 + 30)) / (6 * 60 + 30));
+    }
+    return 1;
+  }
+
+  if (assetId === 'TAIEX') {
+    const tw = getTzClock(now, 'Asia/Taipei');
+    if (!tw.isWeekend && tw.totalMin >= 9 * 60 && tw.totalMin < 13 * 60 + 30) {
+      return clamp((tw.totalMin - 9 * 60) / 270);
+    }
+    return 1;
+  }
+
+  if (assetId === 'KOSPI') {
+    const kr = getTzClock(now, 'Asia/Seoul');
+    if (!kr.isWeekend && kr.totalMin >= 9 * 60 && kr.totalMin < 15 * 60 + 30) {
+      return clamp((kr.totalMin - 9 * 60) / 390);
+    }
+    return 1;
+  }
+
+  if (assetId === 'SSEC') {
+    const cn = getTzClock(now, 'Asia/Shanghai');
+    if (!cn.isWeekend && cn.totalMin >= 9 * 60 + 30 && cn.totalMin < 15 * 60) {
+      return clamp((cn.totalMin - (9 * 60 + 30)) / 330);
+    }
+    return 1;
+  }
+
+  if (assetId === 'NIFTY') {
+    const ist = getTzClock(now, 'Asia/Kolkata');
+    if (!ist.isWeekend && ist.totalMin >= 9 * 60 + 15 && ist.totalMin < 15 * 60 + 30) {
+      return clamp((ist.totalMin - (9 * 60 + 15)) / 375);
+    }
+    return 1;
+  }
+
+  if (assetId === 'ID10Y') {
+    const jkt = getTzClock(now, 'Asia/Jakarta');
+    if (!jkt.isWeekend && jkt.totalMin >= 9 * 60 && jkt.totalMin < 16 * 60 + 30) {
+      return clamp((jkt.totalMin - 9 * 60) / 450);
+    }
+    return 1;
+  }
+
+  if (assetId === 'BTCUSD' || assetId === 'ETHUSD') {
+    const utcMins = now.getUTCHours() * 60 + now.getUTCMinutes();
+    return clamp(utcMins / 1440);
+  }
+
+  return 1;
+}
+
+export type DashboardRegionTab = 'all' | 'us' | 'asia' | 'commodities' | 'currencies';
+
+export function getRegionStatusSummary(
+  region: DashboardRegionTab,
+  now: Date
+): { text: string; isOpen: boolean } {
+  const sessions = getAllMarketSessions(now);
+
+  if (region === 'us') {
+    if (sessions.us.tone === 'open') {
+      return { text: 'US markets are open · 1s live feed', isOpen: true };
+    }
+    if (sessions.us.tone === 'extended') {
+      return { text: `US ${sessions.us.stateLabel.toLowerCase()} · Last regular close held`, isOpen: false };
+    }
+    return { text: 'US markets are closed · Showing last close', isOpen: false };
+  }
+
+  if (region === 'asia') {
+    const asiaAny = sessions.idx.tone === 'open' || sessions.asia.tone === 'open';
+    if (asiaAny) {
+      return { text: 'Some Asian markets are open · 1s live feed', isOpen: true };
+    }
+    return { text: 'Asian markets are closed · Showing last close', isOpen: false };
+  }
+
+  if (region === 'commodities') {
+    return { text: 'Crypto 24/7 & Commodities electronic session live', isOpen: true };
+  }
+
+  if (region === 'currencies') {
+    const anyFxOpen = sessions.crypto.isLiveRunning;
+    return {
+      text: anyFxOpen ? 'Global FX & Sovereign Yields active' : 'FX & Bond markets closed',
+      isOpen: anyFxOpen,
+    };
+  }
+
+  const anyOpen = sessions.us.tone === 'open' || sessions.idx.tone === 'open' || sessions.asia.tone === 'open';
+  if (sessions.us.tone === 'open') {
+    return { text: 'US markets are open · 1s live feed active', isOpen: true };
+  }
+  if (sessions.idx.tone === 'open' || sessions.asia.tone === 'open') {
+    return { text: 'Some Asian markets are open · US closed (last settle)', isOpen: true };
+  }
+  return {
+    text: anyOpen ? 'Global markets active' : 'Cash equity markets closed · 24/7 Crypto live',
+    isOpen: false,
+  };
+}

@@ -68,6 +68,6 @@ export function formatWibClock(date: Date): { full: string; short: string } {
 
   return {
     full: `${wibDate} · ${wibTime} WIB (UTC+7)`,
-    short: `${wibShortDate} · ${wibTime.slice(0, 5)} WIB`,
+    short: `${wibShortDate} · ${wibTime} WIB`,
   };
 }

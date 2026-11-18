@@ -1,4 +1,6 @@
-export type AppRoute = 'dashboard' | 'stocks' | 'news' | 'calendar';
+export type AppRoute = 'dashboard' | 'watchlist' | 'portfolio' | 'stocks' | 'news' | 'calendar';
+
+export type ThemeMode = 'light' | 'dark' | 'monochrome';
 
 export type Timeframe = '1D' | '1W' | '1M' | '3M' | 'YTD' | '1Y' | 'ALL';
 
@@ -49,6 +51,9 @@ export interface MarketAsset {
   chartTimestamps?: Partial<Record<Timeframe, number[]>>;
   liveStreamable?: boolean;
   updatedAtEpoch?: number;
+  marketSessionOpen?: boolean;
+  sessionStateLabel?: string;
+  sessionProgressRatio?: number;
 }
 
 export interface NewsStory {
@@ -164,10 +169,150 @@ export interface StockMover {
   volumeRaw: number;
   marketState: string;
   sparklinePoints: number[];
+  foreignNetAmount?: number;
+  foreignNetLabel?: string;
+  foreignFlowSide?: 'BUY' | 'SELL';
+  foreignSourceLabel?: string;
+}
+
+export interface StocksMoversBucket {
+  impact: StockMover[];
+  gainers: StockMover[];
+  losers: StockMover[];
+  foreignBuy?: StockMover[];
+  foreignSell?: StockMover[];
 }
 
 export interface StocksMoversResponse {
-  us: StockMover[];
-  indonesia: StockMover[];
+  us: StocksMoversBucket;
+  indonesia: StocksMoversBucket;
   updatedAt: string;
 }
+
+export type PortfolioAssetCategory = 'Equities' | 'Crypto' | 'Commodities' | 'Cash & FX';
+
+export interface PortfolioGroup {
+  id: string;
+  name: string;
+  displayCurrency: 'IDR' | 'USD';
+  createdAt: string;
+}
+
+export interface PortfolioPurchaseLot {
+  id: string;
+  portfolioId: string;
+  symbol: string;
+  yahooSymbol: string;
+  name: string;
+  category: PortfolioAssetCategory;
+  currency: 'USD' | 'IDR';
+  units: number;
+  remainingUnits: number;
+  pricePerUnit: number;
+  purchaseDateIso: string;
+}
+
+export interface PortfolioHolding {
+  id: string;
+  portfolioId: string;
+  symbol: string;
+  yahooSymbol: string;
+  name: string;
+  category: PortfolioAssetCategory;
+  currency: 'USD' | 'IDR';
+  units: number;
+  avgCost: number;
+  linkedAssetId?: string;
+  createdAt: string;
+}
+
+export interface PortfolioTransaction {
+  id: string;
+  portfolioId: string;
+  lotId?: string;
+  symbol: string;
+  yahooSymbol: string;
+  name: string;
+  type: 'BUY' | 'SELL';
+  units: number;
+  pricePerUnit: number;
+  currency: 'USD' | 'IDR';
+  dateIso: string;
+  note?: string;
+}
+
+export interface PortfolioQuoteItem {
+  symbol: string;
+  yahooSymbol: string;
+  name: string;
+  exchange: string;
+  currency: 'USD' | 'IDR';
+  price: number;
+  prevClose: number;
+  changeValue: number;
+  changePercent: number;
+  dayHigh: number;
+  dayLow: number;
+  sessionOpen: boolean;
+  sessionStateLabel: string;
+  sessionProgressRatio: number;
+  chart1D: number[];
+  timestamps1D: number[];
+  updatedAtEpoch: number;
+}
+
+export interface PortfolioMoverItem {
+  symbol: string;
+  yahooSymbol: string;
+  name: string;
+  currency: 'USD' | 'IDR';
+  price: number;
+  changePercent: number;
+  dayHigh: number;
+  dayLow: number;
+  headline: string;
+  summary: string;
+  source: string;
+  publishedAt?: string;
+  url?: string;
+}
+
+export interface StockSearchResult {
+  symbol: string;
+  yahooSymbol: string;
+  name: string;
+  exchange: string;
+  typeDisp: string;
+  currency: 'USD' | 'IDR';
+  category: PortfolioAssetCategory;
+  isIndex?: boolean;
+  assetId?: string;
+  price?: number;
+  prevClose?: number;
+  changePercent?: number;
+  sparklinePoints?: number[];
+  sessionOpen?: boolean;
+}
+
+export type DailySummaryCategory = 'gainer' | 'loser' | 'event';
+
+export interface DailyMarketHighlight {
+  id: string;
+  category: DailySummaryCategory;
+  title: string;
+  metricText: string;
+  summaryText: string;
+  metaText: string;
+  symbol?: string;
+  yahooSymbol?: string;
+  assetId?: string;
+  routeTarget?: AppRoute;
+}
+
+export interface DailyMarketSummaryResponse {
+  windowLabel: string;
+  dateLabel: string;
+  updatedAt: string;
+  highlights: DailyMarketHighlight[];
+}
+

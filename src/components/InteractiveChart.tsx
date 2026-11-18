@@ -49,24 +49,31 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
   const strokeColor = isGain ? '#30D158' : '#FF453A';
   const gradientId = `chartGrad-${asset.id}-${isGain ? 'gain' : 'loss'}`;
 
-  const { coords, linePath, areaPath, prevCloseY, minVal, maxVal } = useMemo(() => {
+  const effectiveProgress =
+    timeframe === '1D' && typeof asset.sessionProgressRatio === 'number'
+      ? Math.max(0.15, Math.min(1, asset.sessionProgressRatio))
+      : 1;
+
+  const { coords, linePath, areaPath, prevCloseY, minVal, maxVal, lastCoord } = useMemo(() => {
     const width = 700;
     const height = 220;
     const padY = 18;
+    const drawW = width * effectiveProgress;
     const allVals = [...series, asset.prevClose];
     const min = Math.min(...allVals);
     const max = Math.max(...allVals);
     const span = max - min || 1;
 
     const pts = series.map((val, idx) => {
-      const x = (idx / Math.max(series.length - 1, 1)) * width;
+      const x = (idx / Math.max(series.length - 1, 1)) * drawW;
       const y = padY + ((max - val) / span) * (height - padY * 2);
       return { x, y, val };
     });
 
     const pCloseY = padY + ((max - asset.prevClose) / span) * (height - padY * 2);
     const line = buildSmoothPath(pts);
-    const area = `${line} L${width},${height} L0,${height} Z`;
+    const lastPt = pts[pts.length - 1] ?? { x: drawW, y: height / 2, val: asset.price };
+    const area = `${line} L${lastPt.x.toFixed(1)},${height} L0,${height} Z`;
 
     return {
       coords: pts,
@@ -75,16 +82,17 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
       prevCloseY: Math.max(8, Math.min(height - 8, pCloseY)),
       minVal: min,
       maxVal: max,
+      lastCoord: lastPt,
     };
-  }, [series, asset.prevClose]);
+  }, [series, asset.prevClose, asset.price, effectiveProgress]);
 
   const handlePointerPosition = (clientX: number) => {
     const svg = svgRef.current;
     if (!svg) return;
     const rect = svg.getBoundingClientRect();
     const relX = Math.max(0, Math.min(clientX - rect.left, rect.width));
-    const ratio = relX / Math.max(rect.width, 1);
-    const idx = Math.round(ratio * (coords.length - 1));
+    const ratio = relX / Math.max(rect.width * effectiveProgress, 1);
+    const idx = Math.round(Math.min(1, ratio) * (coords.length - 1));
     setHoverIndex(Math.max(0, Math.min(coords.length - 1, idx)));
   };
 
@@ -237,16 +245,17 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
             </linearGradient>
           </defs>
 
-          {/* Dashed Prev Close Reference Line */}
+          {/* Dotted Prev Close Reference Line (Google Finance style) */}
           <line
             x1="0"
             y1={prevCloseY}
             x2="700"
             y2={prevCloseY}
             stroke="#8E8E93"
-            strokeWidth="1.25"
-            strokeDasharray="4,4"
-            opacity="0.55"
+            strokeWidth="1.5"
+            strokeDasharray="2 5"
+            strokeLinecap="round"
+            opacity="0.65"
           />
 
           {/* Area Fill */}
@@ -261,6 +270,17 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
             strokeLinecap="round"
             className={isGain ? 'sparkline-glow-gain' : 'sparkline-glow-loss'}
           />
+
+          {/* Live Session Endpoint Dot */}
+          {timeframe === '1D' && asset.marketSessionOpen && !activePoint && (
+            <circle
+              cx={lastCoord.x}
+              cy={lastCoord.y}
+              r="4"
+              fill={strokeColor}
+              className="pointer-events-none"
+            />
+          )}
 
           {/* Crosshair & Active Tracker Dot */}
           {activePoint && (

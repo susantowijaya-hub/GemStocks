@@ -9,12 +9,18 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  fetchDailyMarketSummary,
   fetchLiveCalendar,
   fetchLiveChart,
   fetchLiveFxRates,
   fetchLiveNews,
   fetchLiveQuotes,
+  fetchPortfolioMoversBrief,
+  fetchPortfolioQuotes,
+  fetchPortfolioSymbolSeries,
+  fetchSymbolDetail,
   fetchTopStockMovers,
+  searchMarketSymbols,
 } from './server/liveFeeds.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -79,6 +85,17 @@ async function startServer() {
     }
   });
 
+  // 24-Hour Daily Market Summary JSON (Top Performers, Decliners & Economic Events)
+  app.get('/api/market/daily-summary', async (_req: Request, res: Response) => {
+    try {
+      const summary = await fetchDailyMarketSummary();
+      res.json(summary);
+    } catch (err) {
+      console.error('Failed to fetch daily market summary:', err);
+      res.status(502).json({ error: 'Unable to fetch daily market summary.' });
+    }
+  });
+
   // Live Historical Chart Series per ticker & timeframe
   app.get('/api/market/chart', async (req: Request, res: Response) => {
     try {
@@ -139,6 +156,92 @@ async function startServer() {
     } catch (err) {
       console.error('Failed to fetch top stock movers:', err);
       res.status(502).json({ error: 'Unable to fetch top stock movers.' });
+    }
+  });
+
+  // Live Symbol Search (IDX .JK, US Equities, Indices, ETFs, Crypto, Commodities)
+  app.get('/api/stocks/search', async (req: Request, res: Response) => {
+    try {
+      const q = typeof req.query.q === 'string' ? req.query.q : '';
+      const includeQuotes = req.query.quotes === '1' || req.query.quotes === 'true';
+      const results = await searchMarketSymbols(q, includeQuotes);
+      res.json({ results });
+    } catch (err) {
+      console.error('Failed to search market symbols:', err);
+      res.status(502).json({ error: 'Unable to search market symbols.' });
+    }
+  });
+
+  // Universal Full Quote + Chart Series for any searched US or IDX Stock/Index
+  app.get('/api/symbol/detail', async (req: Request, res: Response) => {
+    try {
+      const symbol = typeof req.query.symbol === 'string' ? req.query.symbol : '';
+      const timeframe = typeof req.query.timeframe === 'string' ? req.query.timeframe : '1D';
+      if (!symbol) {
+        return res.status(400).json({ error: 'Missing symbol parameter' });
+      }
+      const detail = await fetchSymbolDetail(symbol, timeframe);
+      if (!detail) {
+        return res.status(404).json({ error: 'Symbol quote or chart unavailable' });
+      }
+      return res.json(detail);
+    } catch (err) {
+      console.error('Failed to fetch symbol detail:', err);
+      return res.status(502).json({ error: 'Unable to fetch symbol detail.' });
+    }
+  });
+
+  // Portfolio Holdings Daily Movers Analysis & Live Headlines
+  app.get('/api/portfolio/movers-brief', async (req: Request, res: Response) => {
+    try {
+      const symbolsParam = typeof req.query.symbols === 'string' ? req.query.symbols : '';
+      const symbols = symbolsParam
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const brief = await fetchPortfolioMoversBrief(symbols);
+      return res.json(brief);
+    } catch (err) {
+      console.error('Failed to fetch portfolio movers brief:', err);
+      return res.status(502).json({ error: 'Unable to fetch portfolio movers brief.' });
+    }
+  });
+
+  // Portfolio Holdings Live Quotes (1s refresh during open session, last settle when closed)
+  app.get('/api/portfolio/quotes', async (req: Request, res: Response) => {
+    try {
+      const symbolsParam = typeof req.query.symbols === 'string' ? req.query.symbols : '';
+      const symbols = symbolsParam
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (symbols.length === 0) {
+        return res.json({ quotes: [], updatedAt: new Date().toISOString() });
+      }
+      const payload = await fetchPortfolioQuotes(symbols);
+      return res.json(payload);
+    } catch (err) {
+      console.error('Failed to fetch portfolio quotes:', err);
+      return res.status(502).json({ error: 'Unable to fetch portfolio quotes.' });
+    }
+  });
+
+  // Portfolio Symbol Historical Chart Series
+  app.get('/api/portfolio/chart', async (req: Request, res: Response) => {
+    try {
+      const yahooSymbol = typeof req.query.symbol === 'string' ? req.query.symbol : '';
+      const timeframe = typeof req.query.timeframe === 'string' ? req.query.timeframe : '1D';
+      if (!yahooSymbol) {
+        return res.status(400).json({ error: 'Missing symbol parameter' });
+      }
+      const data = await fetchPortfolioSymbolSeries(yahooSymbol, timeframe);
+      if (!data) {
+        return res.status(404).json({ error: 'Chart series unavailable' });
+      }
+      return res.json(data);
+    } catch (err) {
+      console.error('Failed to fetch portfolio symbol chart:', err);
+      return res.status(502).json({ error: 'Unable to fetch portfolio symbol chart.' });
     }
   });
 
