@@ -81,6 +81,7 @@ export interface EditorialInsight {
 export interface EconomicEvent {
   id: string;
   timeWib: string;
+  isoDate?: string;
   day: 'today' | 'tomorrow' | 'week';
   currency: 'USD' | 'IDR' | 'CNY' | 'EUR' | 'JPY';
   impact: 'HIGH' | 'MED';

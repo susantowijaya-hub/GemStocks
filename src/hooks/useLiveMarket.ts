@@ -351,6 +351,12 @@ export function useLiveMarket() {
     setIsPulseActive((prev) => !prev);
   }, []);
 
+  const refreshAll = useCallback(() => {
+    void refreshQuotes();
+    void refreshSecondaryFeeds();
+    void refreshStocks();
+  }, [refreshQuotes, refreshSecondaryFeeds, refreshStocks]);
+
   return {
     assets,
     newsStories,
@@ -368,10 +374,6 @@ export function useLiveMarket() {
     togglePulse,
     loadChartTimeframe,
     refreshStocks,
-    refreshAll: () => {
-      void refreshQuotes();
-      void refreshSecondaryFeeds();
-      void refreshStocks();
-    },
+    refreshAll,
   };
 }

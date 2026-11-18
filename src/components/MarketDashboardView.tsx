@@ -917,7 +917,7 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
       {/* Desktop 3-Column Terminal Layout (lg+) */}
       <div className="hidden lg:grid lg:grid-cols-12 flex-1">
         {/* Left Watchlist Sidebar */}
-        <aside className="lg:col-span-3 border-r border-[#E5E5EA] dark:border-[#2C2C2E] bg-white/60 dark:bg-black/60 overflow-y-auto lg:max-h-[calc(100dvh-225px)] flex flex-col">
+        <aside className="lg:col-span-3 border-r border-[#E5E5EA] dark:border-[#2C2C2E] bg-white/60 dark:bg-black/60 overflow-y-auto lg:max-h-[calc(100dvh-258px)] flex flex-col">
           <div className="p-4 border-b border-[#E5E5EA] dark:border-[#2C2C2E] flex items-center justify-between sticky top-0 bg-white/95 dark:bg-black/95 backdrop-blur z-10">
             <div>
               <h2 className="text-base font-bold text-[#1C1C1E] dark:text-white">Watchlist</h2>
@@ -937,12 +937,12 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
         </aside>
 
         {/* Center Interactive Stage */}
-        <section className="lg:col-span-6 border-r border-[#E5E5EA] dark:border-[#2C2C2E] p-6 pb-28 overflow-y-auto lg:max-h-[calc(100dvh-225px)]">
+        <section className="lg:col-span-6 border-r border-[#E5E5EA] dark:border-[#2C2C2E] p-6 pb-28 overflow-y-auto lg:max-h-[calc(100dvh-258px)]">
           {renderChartAndAnalysis()}
         </section>
 
         {/* Right News & Forex Calendar Column */}
-        <aside className="lg:col-span-3 bg-white/60 dark:bg-black/60 p-5 pb-28 overflow-y-auto lg:max-h-[calc(100dvh-225px)] flex flex-col gap-6">
+        <aside className="lg:col-span-3 bg-white/60 dark:bg-black/60 p-5 pb-28 overflow-y-auto lg:max-h-[calc(100dvh-258px)] flex flex-col gap-6">
           {renderNewsColumn()}
           {renderCalendarColumn()}
         </aside>

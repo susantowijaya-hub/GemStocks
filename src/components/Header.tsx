@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Activity,
   BarChart3,
@@ -13,9 +13,10 @@ import {
   TrendingUp,
   X,
 } from 'lucide-react';
-import { AppRoute, NewsStory } from '../types/market';
-import { formatWibClock } from '../utils/formatters';
-import { getAllMarketSessions } from '../utils/marketSessions';
+import { AppRoute, MarketAsset, NewsStory, StockMover } from '../types/market';
+import { formatAssetPrice, formatWibClock } from '../utils/formatters';
+import { getAllMarketSessions, isIndexOpenSession } from '../utils/marketSessions';
+import { PWAInstallButton } from './PWAInstallButton';
 
 interface HeaderProps {
   activeRoute: AppRoute;
@@ -29,7 +30,13 @@ interface HeaderProps {
   onTogglePulse: () => void;
   tickerStories: NewsStory[];
   onOpenStory: (story: NewsStory) => void;
+  assets: MarketAsset[];
+  usMovers: StockMover[];
+  idxMovers: StockMover[];
+  onSelectAsset: (id: string) => void;
 }
+
+const INDEX_IDS = ['SPX', 'IXIC', 'DJI', 'IHSG', 'HSI', 'TAIEX', 'KOSPI', 'SSEC', 'NIFTY'];
 
 export const Header: React.FC<HeaderProps> = ({
   activeRoute,
@@ -43,6 +50,10 @@ export const Header: React.FC<HeaderProps> = ({
   onTogglePulse,
   tickerStories,
   onOpenStory,
+  assets,
+  usMovers,
+  idxMovers,
+  onSelectAsset,
 }) => {
   const [now, setNow] = useState(() => new Date());
 
@@ -55,8 +66,87 @@ export const Header: React.FC<HeaderProps> = ({
   const sessions = getAllMarketSessions(now);
   const sessionList = [sessions.us, sessions.idx, sessions.asia, sessions.crypto];
 
+  // 0.5x speed of previous (2x duration)
   const marqueeStories = tickerStories.slice(0, 16);
-  const tickerDurationSec = Math.max(88, Math.round(marqueeStories.length * 8.5));
+  const tickerDurationSec = Math.max(176, Math.round(marqueeStories.length * 17));
+
+  // Open-session indices + Top 3 high-impact US & Indonesia stocks for running strip below Breaking News
+  const liveTapeItems = useMemo(() => {
+    const openIndices = assets.filter(
+      (a) => INDEX_IDS.includes(a.id) && isIndexOpenSession(a.id, now)
+    );
+    const cryptoFallback =
+      openIndices.length === 0
+        ? assets.filter((a) => a.id === 'BTCUSD' || a.id === 'ETHUSD')
+        : [];
+    const activeBenchmarks = openIndices.length > 0 ? openIndices : cryptoFallback;
+
+    const topUs = usMovers.slice(0, 3);
+    const topIdx = idxMovers.slice(0, 3);
+
+    type TapeEntry =
+      | {
+          kind: 'index';
+          key: string;
+          badge: string;
+          symbol: string;
+          priceText: string;
+          changePercent: number;
+          assetId: string;
+        }
+      | {
+          kind: 'stock';
+          key: string;
+          badge: string;
+          symbol: string;
+          priceText: string;
+          changePercent: number;
+        };
+
+    const entries: TapeEntry[] = [];
+
+    for (const idxAsset of activeBenchmarks) {
+      entries.push({
+        kind: 'index',
+        key: `idx-${idxAsset.id}`,
+        badge: openIndices.length > 0 ? 'OPEN' : '24/7',
+        symbol: idxAsset.symbol,
+        priceText: formatAssetPrice(idxAsset),
+        changePercent: idxAsset.changePercent,
+        assetId: idxAsset.id,
+      });
+    }
+
+    topUs.forEach((stk, i) => {
+      entries.push({
+        kind: 'stock',
+        key: `us-${stk.symbol}`,
+        badge: `US #${i + 1}`,
+        symbol: stk.symbol,
+        priceText: `$${stk.price.toFixed(2)}`,
+        changePercent: stk.changePercent,
+      });
+    });
+
+    topIdx.forEach((stk, i) => {
+      entries.push({
+        kind: 'stock',
+        key: `id-${stk.symbol}`,
+        badge: `IDX #${i + 1}`,
+        symbol: stk.symbol,
+        priceText: `Rp ${Math.round(stk.price).toLocaleString('en-US')}`,
+        changePercent: stk.changePercent,
+      });
+    });
+
+    return {
+      entries,
+      openIndexCount: openIndices.length,
+    };
+  }, [assets, usMovers, idxMovers, now]);
+
+  // 0.5x speed (slow, steady, easy to scan)
+  const tapeDurationSec = Math.max(120, Math.round(Math.max(1, liveTapeItems.entries.length) * 16));
 
   const searchPlaceholder =
     activeRoute === 'stocks'
@@ -175,6 +265,7 @@ export const Header: React.FC<HeaderProps> = ({
 
         {/* Right Controls */}
         <div className="flex items-center gap-2 shrink-0">
+          <PWAInstallButton />
 
           {/* Live Pulse / WSS Toggle */}
           <button
@@ -230,7 +321,7 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
       </div>
 
-      {/* Global Market Session Status Strip (Visible across Mobile, Tablet, Desktop) */}
+      {/* Global Market Session Status Strip */}
       <div className="border-t border-[#E5E5EA] dark:border-[#2C2C2E] bg-[#F2F2F7]/70 dark:bg-[#121214] px-4 lg:px-6 py-1.5 flex items-center gap-3 overflow-x-auto no-scrollbar text-[11px]">
         <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-[#6C6C70] dark:text-[#8E8E93] shrink-0">
           <Clock className="w-3 h-3" />
@@ -269,7 +360,7 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
       </div>
 
-      {/* Breaking News Marquee Ticker Bar */}
+      {/* Breaking News Marquee Ticker Bar (0.5x slower readable speed) */}
       <div className="bg-[#E5E5EA]/60 dark:bg-[#0D0D0E] border-t border-[#E5E5EA] dark:border-[#2C2C2E] py-1.5 px-4 lg:px-6 flex items-center gap-3 overflow-hidden text-[11px] sm:text-xs">
         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-[#FF453A]/15 text-[#D7261C] dark:text-[#FF453A] font-bold text-[10px] tracking-wider uppercase shrink-0">
           <Megaphone className="w-3 h-3" />
@@ -297,6 +388,69 @@ export const Header: React.FC<HeaderProps> = ({
               </button>
             ))}
           </div>
+        </div>
+      </div>
+
+      {/* Open Session Indices & Top 3 High-Impact Stocks Running Strip (0.5x speed) */}
+      <div className="bg-white/95 dark:bg-[#07080A] border-t border-[#E5E5EA] dark:border-[#2C2C2E] py-1.5 px-4 lg:px-6 flex items-center gap-3 overflow-hidden text-[11px] sm:text-xs">
+        <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-[#30D158]/15 text-[#16803C] dark:text-[#30D158] font-bold text-[10px] tracking-wider uppercase shrink-0">
+          <span className="w-1.5 h-1.5 rounded-full bg-[#30D158] animate-pulse" />
+          {liveTapeItems.openIndexCount > 0 ? 'OPEN & TOP 3' : 'LIVE TOP 3'}
+        </span>
+        <div className="relative overflow-hidden whitespace-nowrap flex-1 min-w-0">
+          {liveTapeItems.entries.length > 0 ? (
+            <div
+              className="ticker-scroll gap-6"
+              style={{ animationDuration: `${tapeDurationSec}s` }}
+            >
+              {[...liveTapeItems.entries, ...liveTapeItems.entries].map((item, idx) => {
+                const isGain = item.changePercent >= 0;
+                return (
+                  <button
+                    key={`${item.key}-${idx}`}
+                    type="button"
+                    onClick={() => {
+                      if (item.kind === 'index') {
+                        onSelectAsset(item.assetId);
+                        onNavigate('dashboard');
+                      } else {
+                        onNavigate('stocks');
+                      }
+                    }}
+                    className="inline-flex items-center gap-2 px-2.5 py-0.5 rounded-full bg-[#F2F2F7] dark:bg-[#1C1C1E] border border-[#E5E5EA] dark:border-[#2C2C2E] hover:border-[#0071E3] dark:hover:border-[#0A84FF] transition-colors shrink-0"
+                  >
+                    <span
+                      className={`text-[9px] font-extrabold uppercase tracking-wider px-1.5 py-0.2 rounded ${
+                        item.kind === 'index'
+                          ? 'bg-[#30D158]/20 text-[#16803C] dark:text-[#30D158]'
+                          : 'bg-[#0071E3]/15 text-[#0071E3] dark:text-[#0A84FF]'
+                      }`}
+                    >
+                      {item.badge}
+                    </span>
+                    <span className="font-bold text-[#1C1C1E] dark:text-white">{item.symbol}</span>
+                    <span className="font-mono font-semibold text-[#1C1C1E] dark:text-[#E5E5EA] tabular-nums">
+                      {item.priceText}
+                    </span>
+                    <span
+                      className={`font-mono font-bold tabular-nums ${
+                        isGain
+                          ? 'text-[#16803C] dark:text-[#30D158]'
+                          : 'text-[#D7261C] dark:text-[#FF453A]'
+                      }`}
+                    >
+                      {isGain ? '+' : ''}
+                      {item.changePercent.toFixed(2)}%
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          ) : (
+            <span className="text-[#6C6C70] dark:text-[#8E8E93] text-[11px]">
+              Loading open-session indices &amp; top impact stocks...
+            </span>
+          )}
         </div>
       </div>
     </header>

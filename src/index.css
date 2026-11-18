@@ -68,7 +68,7 @@
   align-items: center;
   width: max-content;
   animation-name: ticker-slide;
-  animation-duration: 180s;
+  animation-duration: 360s;
   animation-timing-function: linear;
   animation-iteration-count: infinite;
   transform: translate3d(0, 0, 0);
@@ -95,7 +95,7 @@
 
 @media (prefers-reduced-motion: reduce) {
   .ticker-scroll {
-    animation-duration: 280s;
+    animation-duration: 480s;
   }
 }
 

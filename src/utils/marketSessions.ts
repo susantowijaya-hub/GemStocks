@@ -29,54 +29,56 @@ function getTzClock(now: Date, timeZone: string) {
   return { weekday, hour, minute, isWeekend, totalMin };
 }
 
-export function getAllMarketSessions(now: Date): Record<'us' | 'idx' | 'asia' | 'crypto', MarketSessionStatus> {
-  // 1. US Equities (NYSE / NASDAQ) - America/New_York
-  const ny = getTzClock(now, 'America/New_York');
-  let us: MarketSessionStatus;
-  if (ny.isWeekend) {
-    us = {
+function getSingleIndexSession(assetId: string, now: Date): MarketSessionStatus | null {
+  if (assetId === 'SPX' || assetId === 'IXIC' || assetId === 'DJI') {
+    const ny = getTzClock(now, 'America/New_York');
+    if (ny.isWeekend) {
+      return {
+        id: 'us',
+        label: 'US Equities (NYSE/NASDAQ)',
+        shortLabel: 'US',
+        stateLabel: 'Closed',
+        detail: 'Weekend · Opens Mon 21:30 WIB',
+        tone: 'closed',
+        isLiveRunning: false,
+      };
+    }
+    if (ny.totalMin >= 9 * 60 + 30 && ny.totalMin < 16 * 60) {
+      return {
+        id: 'us',
+        label: 'US Equities (NYSE/NASDAQ)',
+        shortLabel: 'US',
+        stateLabel: 'Open',
+        detail: 'Regular Session · Closes 04:00 WIB',
+        tone: 'open',
+        isLiveRunning: true,
+      };
+    }
+    if (ny.totalMin >= 4 * 60 && ny.totalMin < 9 * 60 + 30) {
+      return {
+        id: 'us',
+        label: 'US Equities (NYSE/NASDAQ)',
+        shortLabel: 'US',
+        stateLabel: 'Pre-Market',
+        detail: 'Extended Hours · Regular 21:30 WIB',
+        tone: 'extended',
+        isLiveRunning: true,
+      };
+    }
+    if (ny.totalMin >= 16 * 60 && ny.totalMin < 20 * 60) {
+      return {
+        id: 'us',
+        label: 'US Equities (NYSE/NASDAQ)',
+        shortLabel: 'US',
+        stateLabel: 'After-Hours',
+        detail: 'Extended Trading · Ends 08:00 WIB',
+        tone: 'extended',
+        isLiveRunning: true,
+      };
+    }
+    return {
       id: 'us',
-      label: 'US Market (NYSE/NASDAQ)',
-      shortLabel: 'US',
-      stateLabel: 'Closed',
-      detail: 'Weekend · Opens Mon 21:30 WIB',
-      tone: 'closed',
-      isLiveRunning: false,
-    };
-  } else if (ny.totalMin >= 9 * 60 + 30 && ny.totalMin < 16 * 60) {
-    us = {
-      id: 'us',
-      label: 'US Market (NYSE/NASDAQ)',
-      shortLabel: 'US',
-      stateLabel: 'Open',
-      detail: 'Regular Session · Closes 04:00 WIB',
-      tone: 'open',
-      isLiveRunning: true,
-    };
-  } else if (ny.totalMin >= 4 * 60 && ny.totalMin < 9 * 60 + 30) {
-    us = {
-      id: 'us',
-      label: 'US Market (NYSE/NASDAQ)',
-      shortLabel: 'US',
-      stateLabel: 'Pre-Market',
-      detail: 'Extended Hours · Regular 21:30 WIB',
-      tone: 'extended',
-      isLiveRunning: true,
-    };
-  } else if (ny.totalMin >= 16 * 60 && ny.totalMin < 20 * 60) {
-    us = {
-      id: 'us',
-      label: 'US Market (NYSE/NASDAQ)',
-      shortLabel: 'US',
-      stateLabel: 'After-Hours',
-      detail: 'Extended Trading · Ends 08:00 WIB',
-      tone: 'extended',
-      isLiveRunning: true,
-    };
-  } else {
-    us = {
-      id: 'us',
-      label: 'US Market (NYSE/NASDAQ)',
+      label: 'US Equities (NYSE/NASDAQ)',
       shortLabel: 'US',
       stateLabel: 'Closed',
       detail: 'Last Session Close · Next 21:30 WIB',
@@ -85,54 +87,56 @@ export function getAllMarketSessions(now: Date): Record<'us' | 'idx' | 'asia' | 
     };
   }
 
-  // 2. Indonesia Stock Exchange (IDX / BEI) - Asia/Jakarta (WIB)
-  const jkt = getTzClock(now, 'Asia/Jakarta');
-  const isFri = jkt.weekday === 'Fri';
-  const lunchStart = isFri ? 11 * 60 + 30 : 12 * 60;
-  const lunchEnd = isFri ? 14 * 60 : 13 * 60 + 30;
-  let idx: MarketSessionStatus;
-  if (jkt.isWeekend) {
-    idx = {
-      id: 'idx',
-      label: 'Indonesia (IDX)',
-      shortLabel: 'IDX',
-      stateLabel: 'Closed',
-      detail: 'Weekend · Opens Mon 09:00 WIB',
-      tone: 'closed',
-      isLiveRunning: false,
-    };
-  } else if (jkt.totalMin >= 9 * 60 && jkt.totalMin < lunchStart) {
-    idx = {
-      id: 'idx',
-      label: 'Indonesia (IDX)',
-      shortLabel: 'IDX',
-      stateLabel: 'Open (Ses I)',
-      detail: 'Running Session · Break at 12:00 WIB',
-      tone: 'open',
-      isLiveRunning: true,
-    };
-  } else if (jkt.totalMin >= lunchStart && jkt.totalMin < lunchEnd) {
-    idx = {
-      id: 'idx',
-      label: 'Indonesia (IDX)',
-      shortLabel: 'IDX',
-      stateLabel: 'Lunch Break',
-      detail: `Resumes ${isFri ? '14:00' : '13:30'} WIB`,
-      tone: 'break',
-      isLiveRunning: false,
-    };
-  } else if (jkt.totalMin >= lunchEnd && jkt.totalMin < 16 * 60) {
-    idx = {
-      id: 'idx',
-      label: 'Indonesia (IDX)',
-      shortLabel: 'IDX',
-      stateLabel: 'Open (Ses II)',
-      detail: 'Running Session · Closes 16:00 WIB',
-      tone: 'open',
-      isLiveRunning: true,
-    };
-  } else {
-    idx = {
+  if (assetId === 'IHSG') {
+    const jkt = getTzClock(now, 'Asia/Jakarta');
+    const isFri = jkt.weekday === 'Fri';
+    const lunchStart = isFri ? 11 * 60 + 30 : 12 * 60;
+    const lunchEnd = isFri ? 14 * 60 : 13 * 60 + 30;
+    if (jkt.isWeekend) {
+      return {
+        id: 'idx',
+        label: 'Indonesia (IDX)',
+        shortLabel: 'IDX',
+        stateLabel: 'Closed',
+        detail: 'Weekend · Opens Mon 09:00 WIB',
+        tone: 'closed',
+        isLiveRunning: false,
+      };
+    }
+    if (jkt.totalMin >= 9 * 60 && jkt.totalMin < lunchStart) {
+      return {
+        id: 'idx',
+        label: 'Indonesia (IDX)',
+        shortLabel: 'IDX',
+        stateLabel: 'Open (Ses I)',
+        detail: `Running Session · Break ${isFri ? '11:30' : '12:00'} WIB`,
+        tone: 'open',
+        isLiveRunning: true,
+      };
+    }
+    if (jkt.totalMin >= lunchStart && jkt.totalMin < lunchEnd) {
+      return {
+        id: 'idx',
+        label: 'Indonesia (IDX)',
+        shortLabel: 'IDX',
+        stateLabel: 'Lunch Break',
+        detail: `Resumes ${isFri ? '14:00' : '13:30'} WIB`,
+        tone: 'break',
+        isLiveRunning: false,
+      };
+    }
+    if (jkt.totalMin >= lunchEnd && jkt.totalMin < 16 * 60) {
+      return {
+        id: 'idx',
+        label: 'Indonesia (IDX)',
+        shortLabel: 'IDX',
+        stateLabel: 'Open (Ses II)',
+        detail: 'Running Session · Closes 16:00 WIB',
+        tone: 'open',
+        isLiveRunning: true,
+      };
+    }
+    return {
       id: 'idx',
       label: 'Indonesia (IDX)',
       shortLabel: 'IDX',
@@ -143,34 +147,190 @@ export function getAllMarketSessions(now: Date): Record<'us' | 'idx' | 'asia' | 
     };
   }
 
-  // 3. Asia-Pacific (HKEX / TWSE / KRX / SSE / NSE)
-  const hkg = getTzClock(now, 'Asia/Hong_Kong');
-  const ist = getTzClock(now, 'Asia/Kolkata');
-  const asiaOpen =
-    (!hkg.isWeekend && hkg.totalMin >= 9 * 60 && hkg.totalMin < 16 * 60 + 15) ||
-    (!ist.isWeekend && ist.totalMin >= 9 * 60 + 15 && ist.totalMin < 15 * 60 + 30);
-
-  const asia: MarketSessionStatus = asiaOpen
-    ? {
+  if (assetId === 'HSI') {
+    const hkg = getTzClock(now, 'Asia/Hong_Kong');
+    if (hkg.isWeekend) {
+      return {
         id: 'asia',
-        label: 'Asia-Pacific',
-        shortLabel: 'Asia',
-        stateLabel: 'Open',
-        detail: 'Regional Exchanges Active',
-        tone: 'open',
-        isLiveRunning: true,
-      }
-    : {
-        id: 'asia',
-        label: 'Asia-Pacific',
-        shortLabel: 'Asia',
+        label: 'HKEX Hong Kong',
+        shortLabel: 'HKEX',
         stateLabel: 'Closed',
-        detail: 'Regional Session Closed',
+        detail: 'Weekend · Opens Mon 08:30 WIB',
         tone: 'closed',
         isLiveRunning: false,
       };
+    }
+    if (hkg.totalMin >= 9 * 60 + 30 && hkg.totalMin < 12 * 60) {
+      return {
+        id: 'asia',
+        label: 'HKEX Hong Kong',
+        shortLabel: 'HKEX',
+        stateLabel: 'Open (AM)',
+        detail: 'Morning Session Active',
+        tone: 'open',
+        isLiveRunning: true,
+      };
+    }
+    if (hkg.totalMin >= 12 * 60 && hkg.totalMin < 13 * 60) {
+      return {
+        id: 'asia',
+        label: 'HKEX Hong Kong',
+        shortLabel: 'HKEX',
+        stateLabel: 'Lunch Break',
+        detail: 'Resumes 12:00 WIB',
+        tone: 'break',
+        isLiveRunning: false,
+      };
+    }
+    if (hkg.totalMin >= 13 * 60 && hkg.totalMin < 16 * 60) {
+      return {
+        id: 'asia',
+        label: 'HKEX Hong Kong',
+        shortLabel: 'HKEX',
+        stateLabel: 'Open (PM)',
+        detail: 'Afternoon Session · Closes 15:00 WIB',
+        tone: 'open',
+        isLiveRunning: true,
+      };
+    }
+    return {
+      id: 'asia',
+      label: 'HKEX Hong Kong',
+      shortLabel: 'HKEX',
+      stateLabel: 'Closed',
+      detail: 'Last Session Close · Opens 08:30 WIB',
+      tone: 'closed',
+      isLiveRunning: false,
+    };
+  }
 
-  // 4. Crypto & Global 24/7 Spot
+  if (assetId === 'TAIEX') {
+    const tw = getTzClock(now, 'Asia/Taipei');
+    const open = !tw.isWeekend && tw.totalMin >= 9 * 60 && tw.totalMin < 13 * 60 + 30;
+    return {
+      id: 'asia',
+      label: 'TWSE Taiwan',
+      shortLabel: 'TWSE',
+      stateLabel: open ? 'Open' : 'Closed',
+      detail: open ? 'Taipei Session Active · Closes 12:30 WIB' : 'Opens 08:00 WIB',
+      tone: open ? 'open' : 'closed',
+      isLiveRunning: open,
+    };
+  }
+
+  if (assetId === 'KOSPI') {
+    const kr = getTzClock(now, 'Asia/Seoul');
+    const open = !kr.isWeekend && kr.totalMin >= 9 * 60 && kr.totalMin < 15 * 60 + 30;
+    return {
+      id: 'asia',
+      label: 'KRX Korea',
+      shortLabel: 'KRX',
+      stateLabel: open ? 'Open' : 'Closed',
+      detail: open ? 'Seoul Session Active · Closes 13:30 WIB' : 'Opens 07:00 WIB',
+      tone: open ? 'open' : 'closed',
+      isLiveRunning: open,
+    };
+  }
+
+  if (assetId === 'SSEC') {
+    const cn = getTzClock(now, 'Asia/Shanghai');
+    if (!cn.isWeekend && cn.totalMin >= 9 * 60 + 30 && cn.totalMin < 11 * 60 + 30) {
+      return {
+        id: 'asia',
+        label: 'SSE Shanghai',
+        shortLabel: 'SSE',
+        stateLabel: 'Open (AM)',
+        detail: 'Morning Session · Break 10:30 WIB',
+        tone: 'open',
+        isLiveRunning: true,
+      };
+    }
+    if (!cn.isWeekend && cn.totalMin >= 11 * 60 + 30 && cn.totalMin < 13 * 60) {
+      return {
+        id: 'asia',
+        label: 'SSE Shanghai',
+        shortLabel: 'SSE',
+        stateLabel: 'Lunch Break',
+        detail: 'Resumes 12:00 WIB',
+        tone: 'break',
+        isLiveRunning: false,
+      };
+    }
+    if (!cn.isWeekend && cn.totalMin >= 13 * 60 && cn.totalMin < 15 * 60) {
+      return {
+        id: 'asia',
+        label: 'SSE Shanghai',
+        shortLabel: 'SSE',
+        stateLabel: 'Open (PM)',
+        detail: 'Afternoon Session · Closes 14:00 WIB',
+        tone: 'open',
+        isLiveRunning: true,
+      };
+    }
+    return {
+      id: 'asia',
+      label: 'SSE Shanghai',
+      shortLabel: 'SSE',
+      stateLabel: 'Closed',
+      detail: 'Opens 08:30 WIB',
+      tone: 'closed',
+      isLiveRunning: false,
+    };
+  }
+
+  if (assetId === 'NIFTY') {
+    const ist = getTzClock(now, 'Asia/Kolkata');
+    const open = !ist.isWeekend && ist.totalMin >= 9 * 60 + 15 && ist.totalMin < 15 * 60 + 30;
+    return {
+      id: 'asia',
+      label: 'NSE India',
+      shortLabel: 'NSE',
+      stateLabel: open ? 'Open' : 'Closed',
+      detail: open ? 'Mumbai Session Active · Closes 17:00 WIB' : 'Opens 10:45 WIB',
+      tone: open ? 'open' : 'closed',
+      isLiveRunning: open,
+    };
+  }
+
+  return null;
+}
+
+export function isIndexOpenSession(assetId: string, now: Date): boolean {
+  const s = getSingleIndexSession(assetId, now);
+  return s !== null && s.tone === 'open';
+}
+
+export function getAllMarketSessions(
+  now: Date
+): Record<'us' | 'idx' | 'asia' | 'crypto', MarketSessionStatus> {
+  const us = getSingleIndexSession('SPX', now)!;
+  const idx = getSingleIndexSession('IHSG', now)!;
+
+  const asiaOpenCount = ['HSI', 'TAIEX', 'KOSPI', 'SSEC', 'NIFTY'].filter((id) =>
+    isIndexOpenSession(id, now)
+  ).length;
+
+  const asia: MarketSessionStatus =
+    asiaOpenCount > 0
+      ? {
+          id: 'asia',
+          label: 'Asia-Pacific',
+          shortLabel: 'Asia',
+          stateLabel: `Open (${asiaOpenCount})`,
+          detail: 'Regional Exchanges Active',
+          tone: 'open',
+          isLiveRunning: true,
+        }
+      : {
+          id: 'asia',
+          label: 'Asia-Pacific',
+          shortLabel: 'Asia',
+          stateLabel: 'Closed',
+          detail: 'Regional Session Closed',
+          tone: 'closed',
+          isLiveRunning: false,
+        };
+
   const crypto: MarketSessionStatus = {
     id: 'crypto',
     label: 'Crypto & Spot FX',
@@ -189,25 +349,26 @@ export function getAssetSessionStatus(
   category: WatchlistCategory,
   now: Date
 ): MarketSessionStatus {
+  const indexSpecific = getSingleIndexSession(assetId, now);
+  if (indexSpecific) {
+    return indexSpecific;
+  }
   const sessions = getAllMarketSessions(now);
   if (assetId === 'BTCUSD' || assetId === 'ETHUSD') {
     return sessions.crypto;
   }
-  if (assetId === 'IHSG' || assetId === 'ID10Y') {
-    if (assetId === 'ID10Y') {
-      const jkt = getTzClock(now, 'Asia/Jakarta');
-      const open = !jkt.isWeekend && jkt.totalMin >= 9 * 60 && jkt.totalMin < 16 * 60 + 30;
-      return {
-        id: 'idx',
-        label: 'Indo SBN Bond Market',
-        shortLabel: 'ID Bond',
-        stateLabel: open ? 'Open' : 'Closed',
-        detail: open ? 'Jakarta Fixed Income Active' : 'Last PHEI/Interdealer Close',
-        tone: open ? 'open' : 'closed',
-        isLiveRunning: open,
-      };
-    }
-    return sessions.idx;
+  if (assetId === 'ID10Y') {
+    const jkt = getTzClock(now, 'Asia/Jakarta');
+    const open = !jkt.isWeekend && jkt.totalMin >= 9 * 60 && jkt.totalMin < 16 * 60 + 30;
+    return {
+      id: 'idx',
+      label: 'Indo SBN Bond Market',
+      shortLabel: 'ID Bond',
+      stateLabel: open ? 'Open' : 'Closed',
+      detail: open ? 'Jakarta Fixed Income Active' : 'Last PHEI/Interdealer Close',
+      tone: open ? 'open' : 'closed',
+      isLiveRunning: open,
+    };
   }
   if (category === 'us-indices') {
     return sessions.us;
@@ -215,7 +376,6 @@ export function getAssetSessionStatus(
   if (category === 'asia-indices') {
     return sessions.asia;
   }
-  // Commodities Futures, FX, US Treasury Bonds (trade ~23h Sun-Fri NY)
   const ny = getTzClock(now, 'America/New_York');
   const isWeekendClosed =
     (ny.weekday === 'Fri' && ny.totalMin >= 17 * 60) ||

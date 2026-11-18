@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BottomDock } from './components/BottomDock';
 import { EconomicCalendarView } from './components/EconomicCalendarView';
 import { ErrorBoundary } from './components/ErrorBoundary';
@@ -11,10 +11,11 @@ import { Header } from './components/Header';
 import { MarketDashboardView } from './components/MarketDashboardView';
 import { NewsFeedView } from './components/NewsFeedView';
 import { NewsModal } from './components/NewsModal';
+import { OfflineIndicator } from './components/OfflineIndicator';
 import { TopStocksView } from './components/TopStocksView';
 import { useLiveMarket } from './hooks/useLiveMarket';
 import { useTheme } from './hooks/useTheme';
-import { AppRoute, NewsStory } from './types/market';
+import { AppRoute, CalendarCatalyst, NewsStory } from './types/market';
 
 const VALID_ROUTES: AppRoute[] = ['dashboard', 'stocks', 'news', 'calendar'];
 
@@ -41,6 +42,7 @@ function StocksTerminalShell() {
     togglePulse,
     loadChartTimeframe,
     refreshStocks,
+    refreshAll,
   } = useLiveMarket();
 
   const [activeRoute, setActiveRoute] = useState<AppRoute>(getInitialRoute);
@@ -49,6 +51,7 @@ function StocksTerminalShell() {
   const [isPercentMode, setIsPercentMode] = useState<boolean>(true);
   const [activeStory, setActiveStory] = useState<NewsStory | null>(null);
   const [countdownSeconds, setCountdownSeconds] = useState<number>(3 * 3600 + 42 * 60 + 15);
+  const lastRollRefreshRef = useRef<number>(0);
 
   // Sync browser hash navigation (Back/Forward on Desktop, Android, and iOS Safari)
   useEffect(() => {
@@ -64,25 +67,64 @@ function StocksTerminalShell() {
     return () => window.removeEventListener('hashchange', handleHashChange);
   }, []);
 
-  // Sync live countdown to real nextCatalyst target timestamp
-  useEffect(() => {
-    if (nextCatalyst?.targetEpochMs) {
-      const diff = Math.max(0, Math.floor((nextCatalyst.targetEpochMs - Date.now()) / 1000));
-      setCountdownSeconds(diff);
+  // Automatically pick the next non-expired catalyst if nextCatalyst's timestamp has elapsed
+  const activeCatalyst = useMemo<CalendarCatalyst | null>(() => {
+    const now = Date.now();
+    if (nextCatalyst && nextCatalyst.targetEpochMs > now) {
+      return nextCatalyst;
     }
-  }, [nextCatalyst]);
+    const futureEvents = economicEvents
+      .map((ev) => ({
+        ev,
+        ts: ev.isoDate ? Date.parse(ev.isoDate) : NaN,
+      }))
+      .filter((x) => Number.isFinite(x.ts) && x.ts > now)
+      .sort((a, b) => a.ts - b.ts);
 
+    const picked =
+      futureEvents.find((x) => x.ev.impact === 'HIGH') ?? futureEvents[0];
+    if (picked) {
+      return {
+        title: picked.ev.title,
+        currency: picked.ev.currency,
+        timeWib: picked.ev.timeWib,
+        targetEpochMs: picked.ts,
+        description: picked.ev.description,
+      };
+    }
+    return nextCatalyst;
+  }, [nextCatalyst, economicEvents]);
+
+  const activeTargetEpochMs = activeCatalyst?.targetEpochMs ?? null;
+  const refreshAllRef = useRef(refreshAll);
+  refreshAllRef.current = refreshAll;
+
+  // Live countdown ticker with automatic reset/roll-forward when hitting 00h 00m 00s
   useEffect(() => {
-    const timer = window.setInterval(() => {
-      if (nextCatalyst?.targetEpochMs) {
-        const diff = Math.max(0, Math.floor((nextCatalyst.targetEpochMs - Date.now()) / 1000));
-        setCountdownSeconds(diff);
-      } else {
-        setCountdownSeconds((prev) => (prev > 0 ? prev - 1 : 0));
+    const updateCountdown = () => {
+      const now = Date.now();
+      if (activeTargetEpochMs && activeTargetEpochMs > now) {
+        const diff = Math.floor((activeTargetEpochMs - now) / 1000);
+        setCountdownSeconds((prev) => (prev === diff ? prev : diff));
+        return;
       }
-    }, 1000);
+
+      // If no future timestamped event is loaded yet, roll smoothly and refresh feeds
+      setCountdownSeconds((prev) => {
+        if (prev > 1) return prev - 1;
+        if (now - lastRollRefreshRef.current > 60_000) {
+          lastRollRefreshRef.current = now;
+          refreshAllRef.current();
+        }
+        // Reset to next 4-hour macro window limit so timer never stalls at 00:00:00
+        return 4 * 3600;
+      });
+    };
+
+    updateCountdown();
+    const timer = window.setInterval(updateCountdown, 1000);
     return () => window.clearInterval(timer);
-  }, [nextCatalyst]);
+  }, [activeTargetEpochMs]);
 
   const handleNavigate = useCallback((route: AppRoute) => {
     setActiveRoute(route);
@@ -114,6 +156,10 @@ function StocksTerminalShell() {
         onTogglePulse={togglePulse}
         tickerStories={newsStories}
         onOpenStory={setActiveStory}
+        assets={assets}
+        usMovers={usMovers}
+        idxMovers={idxMovers}
+        onSelectAsset={setSelectedAssetId}
       />
 
       <main className="flex-1 flex flex-col">
@@ -122,7 +168,7 @@ function StocksTerminalShell() {
             assets={assets}
             newsStories={newsStories}
             economicEvents={economicEvents}
-            nextCatalyst={nextCatalyst}
+            nextCatalyst={activeCatalyst}
             selectedAssetId={selectedAssetId}
             onSelectAsset={setSelectedAssetId}
             searchQuery={searchQuery}
@@ -157,7 +203,7 @@ function StocksTerminalShell() {
         {activeRoute === 'calendar' && (
           <EconomicCalendarView
             events={economicEvents}
-            nextCatalyst={nextCatalyst}
+            nextCatalyst={activeCatalyst}
             searchQuery={searchQuery}
             countdownSeconds={countdownSeconds}
           />
@@ -171,6 +217,7 @@ function StocksTerminalShell() {
         onToggleTheme={toggleTheme}
       />
 
+      <OfflineIndicator />
       <NewsModal story={activeStory} onClose={() => setActiveStory(null)} />
     </div>
   );
