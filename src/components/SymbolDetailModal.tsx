@@ -111,8 +111,14 @@ export const SymbolDetailModal: React.FC<SymbolDetailModalProps> = ({
     const width = 680;
     const height = 220;
     const padY = 18;
-    const refClose = timeframe === '1D' ? detail?.prevClose ?? pts[0] : pts[0];
-    const all = [...pts, refClose].filter((v) => Number.isFinite(v));
+    const parsedOpen = detail?.open ? parseFloat(String(detail.open).replace(/[^0-9.\-]/g, '')) : NaN;
+    const refBaseline =
+      timeframe === '1D'
+        ? Number.isFinite(parsedOpen) && parsedOpen > 0
+          ? parsedOpen
+          : detail?.prevClose ?? pts[0]
+        : pts[0];
+    const all = [...pts, refBaseline].filter((v) => Number.isFinite(v));
     const min = Math.min(...all);
     const max = Math.max(...all);
     const span = max - min || Math.max(max * 0.01, 1);
@@ -130,11 +136,13 @@ export const SymbolDetailModal: React.FC<SymbolDetailModalProps> = ({
     const line = coords
       .map((c, idx) => `${idx === 0 ? 'M' : 'L'}${c.x.toFixed(1)},${c.y.toFixed(1)}`)
       .join(' ');
+    const firstX = coords[0]?.x ?? 0;
     const lastX = coords[coords.length - 1]?.x ?? plotWidth;
-    const area = `${line} L${lastX.toFixed(1)},${height} L0,${height} Z`;
-    const prevY = Math.max(10, Math.min(height - 10, padY + ((max - refClose) / span) * (height - padY * 2)));
+    const prevY = Math.max(10, Math.min(height - 10, padY + ((max - refBaseline) / span) * (height - padY * 2)));
+    const area = `${line} L${lastX.toFixed(1)},${prevY.toFixed(1)} L${firstX.toFixed(1)},${prevY.toFixed(1)} Z`;
+    const splitPct = Math.max(0, Math.min(100, (prevY / height) * 100));
 
-    return { coords, line, area, prevY, refClose, width, height, min, max };
+    return { coords, line, area, prevY, refClose: refBaseline, splitPct, width, height, min, max };
   }, [detail, timeframe]);
 
   if (!yahooSymbol) return null;
@@ -172,16 +180,24 @@ export const SymbolDetailModal: React.FC<SymbolDetailModalProps> = ({
       ? detail.timestamps[hoverIdx]
       : detail?.updatedAtEpoch;
 
+  const lastVal = detail?.points?.[detail.points.length - 1] ?? detail?.price ?? 0;
+  const activeDotColor =
+    activePt
+      ? activePt.val >= (geom?.refClose ?? lastVal)
+        ? '#16A34A'
+        : '#DC2626'
+      : lastVal >= (geom?.refClose ?? lastVal)
+        ? '#16A34A'
+        : '#DC2626';
   const isGain = (detail?.changePercent ?? 0) >= 0;
-  const strokeColor = isGain ? '#30D158' : '#FF453A';
 
   return (
     <div
-      className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-3 sm:p-5"
+      className="fixed inset-0 z-50 bg-black/60 backdrop-blur-md flex items-center justify-center p-3 sm:p-5"
       onClick={onClose}
     >
       <div
-        className="w-full max-w-3xl rounded-3xl bg-white dark:bg-[#1C1C1E] border border-[#E5E5EA] dark:border-[#2C2C2E] shadow-2xl overflow-hidden flex flex-col max-h-[90dvh]"
+        className="liquid-glass-strong w-full max-w-3xl rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90dvh]"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Top Modal Header */}
@@ -303,7 +319,7 @@ export const SymbolDetailModal: React.FC<SymbolDetailModalProps> = ({
                       top: `clamp(8px, calc(${(geom.prevY / geom.height) * 100}% - 12px), calc(100% - 28px))`,
                     }}
                   >
-                    {timeframe === '1D' ? 'Prev close' : 'Start'}: {formatVal(geom.refClose)}
+                    {timeframe === '1D' ? 'Open' : 'Start'}: {formatVal(geom.refClose)}
                   </div>
 
                   <svg
@@ -316,27 +332,68 @@ export const SymbolDetailModal: React.FC<SymbolDetailModalProps> = ({
                     onPointerLeave={() => setHoverIdx(null)}
                   >
                     <defs>
-                      <linearGradient id={`symGrad-${uid}`} x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor={strokeColor} stopOpacity="0.35" />
-                        <stop offset="100%" stopColor={strokeColor} stopOpacity="0.02" />
+                      <linearGradient
+                        id={`symSplit-${uid}`}
+                        gradientUnits="userSpaceOnUse"
+                        x1="0"
+                        y1="0"
+                        x2="0"
+                        y2={String(geom.height)}
+                      >
+                        <stop offset="0%" stopColor="#22C55E" />
+                        <stop offset={`${geom.splitPct}%`} stopColor="#22C55E" />
+                        <stop offset={`${geom.splitPct}%`} stopColor="#EF4444" />
+                        <stop offset="100%" stopColor="#EF4444" />
                       </linearGradient>
+
+                      <linearGradient
+                        id={`symAbove-${uid}`}
+                        gradientUnits="userSpaceOnUse"
+                        x1="0"
+                        y1="0"
+                        x2="0"
+                        y2={String(Math.max(1, geom.prevY))}
+                      >
+                        <stop offset="0%" stopColor="#22C55E" stopOpacity="0.34" />
+                        <stop offset="100%" stopColor="#22C55E" stopOpacity="0.05" />
+                      </linearGradient>
+
+                      <linearGradient
+                        id={`symBelow-${uid}`}
+                        gradientUnits="userSpaceOnUse"
+                        x1="0"
+                        y1={String(geom.prevY)}
+                        x2="0"
+                        y2={String(geom.height)}
+                      >
+                        <stop offset="0%" stopColor="#EF4444" stopOpacity="0.05" />
+                        <stop offset="100%" stopColor="#EF4444" stopOpacity="0.34" />
+                      </linearGradient>
+
+                      <clipPath id={`symClipA-${uid}`}>
+                        <rect x="0" y="0" width={geom.width} height={geom.prevY} />
+                      </clipPath>
+                      <clipPath id={`symClipB-${uid}`}>
+                        <rect x="0" y={geom.prevY} width={geom.width} height={Math.max(0, geom.height - geom.prevY)} />
+                      </clipPath>
                     </defs>
                     <line
                       x1="0"
                       y1={geom.prevY}
                       x2={geom.width}
                       y2={geom.prevY}
-                      stroke="#8E8E93"
+                      stroke="#8E8E98"
                       strokeWidth="1.5"
                       strokeDasharray="2 5"
-                      opacity="0.7"
+                      opacity="0.75"
                     />
-                    <path d={geom.area} fill={`url(#symGrad-${uid})`} />
+                    <path d={geom.area} clipPath={`url(#symClipA-${uid})`} fill={`url(#symAbove-${uid})`} />
+                    <path d={geom.area} clipPath={`url(#symClipB-${uid})`} fill={`url(#symBelow-${uid})`} />
                     <path
                       d={geom.line}
                       fill="none"
-                      stroke={strokeColor}
-                      strokeWidth="2.2"
+                      stroke={`url(#symSplit-${uid})`}
+                      strokeWidth="2.4"
                       strokeLinecap="round"
                       strokeLinejoin="round"
                     />
@@ -356,7 +413,7 @@ export const SymbolDetailModal: React.FC<SymbolDetailModalProps> = ({
                           cy={activePt.y}
                           r="5"
                           fill="#FFFFFF"
-                          stroke={strokeColor}
+                          stroke={activeDotColor}
                           strokeWidth="2.5"
                         />
                       </>

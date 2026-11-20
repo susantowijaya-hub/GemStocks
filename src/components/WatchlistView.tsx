@@ -1,10 +1,13 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { motion } from 'motion/react';
 import {
   Activity,
   ChevronDown,
   ChevronRight,
   LineChart,
   Maximize2,
+  TrendingDown,
+  TrendingUp,
 } from 'lucide-react';
 import { CATEGORY_META } from '../data/marketData';
 import {
@@ -14,7 +17,9 @@ import {
 } from '../types/market';
 import { formatAssetPrice } from '../utils/formatters';
 import { getSessionProgressRatio } from '../utils/marketSessions';
+import { getAssetSignal, parseFormattedMarketNumber } from '../utils/marketSignals';
 import { GoogleFinanceDeltaPill, GoogleFinanceMiniChart } from './GoogleFinanceMiniChart';
+import { AssetCategoryMiniIcon, SignalBadge } from './MarketUiPrimitives';
 
 interface WatchlistViewProps {
   assets: MarketAsset[];
@@ -29,6 +34,7 @@ interface WatchlistViewProps {
 }
 
 type CategoryFilter = 'all' | WatchlistCategory;
+type SignalFilter = 'all' | 'bull' | 'bear';
 
 export const WatchlistView: React.FC<WatchlistViewProps> = ({
   assets,
@@ -42,6 +48,7 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
   flashMap,
 }) => {
   const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>('all');
+  const [signalFilter, setSignalFilter] = useState<SignalFilter>('all');
   const [openGroups, setOpenGroups] = useState<Record<WatchlistCategory, boolean>>({
     'us-indices': true,
     'asia-indices': true,
@@ -55,10 +62,26 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
     return () => window.clearInterval(id);
   }, []);
 
+  const signalCounts = useMemo(() => {
+    let bull = 0;
+    let bear = 0;
+    for (const a of assets) {
+      const sig = getAssetSignal(a);
+      if (sig.direction === 'bull') bull += 1;
+      else if (sig.direction === 'bear') bear += 1;
+    }
+    return { bull, bear };
+  }, [assets]);
+
   const filteredAssets = useMemo(() => {
     const q = searchQuery.toLowerCase().trim();
     return assets.filter((a) => {
       const matchCat = categoryFilter === 'all' || a.category === categoryFilter;
+      const sig = getAssetSignal(a);
+      const matchSignal =
+        signalFilter === 'all' ||
+        (signalFilter === 'bull' && sig.direction === 'bull') ||
+        (signalFilter === 'bear' && sig.direction === 'bear');
       const matchSearch =
         !q ||
         a.symbol.toLowerCase().includes(q) ||
@@ -66,9 +89,9 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
         a.shortName.toLowerCase().includes(q) ||
         a.id.toLowerCase().includes(q) ||
         a.categoryLabel.toLowerCase().includes(q);
-      return matchCat && matchSearch;
+      return matchCat && matchSignal && matchSearch;
     });
-  }, [assets, categoryFilter, searchQuery]);
+  }, [assets, categoryFilter, signalFilter, searchQuery]);
 
   const activeAsset = useMemo(
     () => assets.find((a) => a.id === selectedAssetId) ?? assets[0],
@@ -128,59 +151,100 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
           <button
             type="button"
             onClick={onToggleBadgeMode}
-            className="min-h-[36px] px-3.5 py-1.5 rounded-xl bg-white dark:bg-[#1C1C1E] border border-[#E5E5EA] dark:border-[#2C2C2E] text-xs font-semibold text-[#1C1C1E] dark:text-white hover:bg-[#E5E5EA]/60 dark:hover:bg-[#2C2C2E] transition-colors"
+            className="min-h-[36px] px-3.5 py-1.5 rounded-xl liquid-glass-pill text-xs font-semibold text-[#1C1C1E] dark:text-white hover:brightness-95 dark:hover:brightness-110 transition-all"
           >
             Delta: {isPercentMode ? '% Change' : 'Points'}
           </button>
           <button
             type="button"
             onClick={toggleAllGroups}
-            className="min-h-[36px] px-3.5 py-1.5 rounded-xl bg-white dark:bg-[#1C1C1E] border border-[#E5E5EA] dark:border-[#2C2C2E] text-xs font-semibold text-[#0071E3] dark:text-[#0A84FF] hover:bg-[#E5E5EA]/60 dark:hover:bg-[#2C2C2E] transition-colors"
+            className="min-h-[36px] px-3.5 py-1.5 rounded-xl liquid-glass-pill text-xs font-semibold text-[#0071E3] dark:text-[#3898FF] hover:brightness-95 dark:hover:brightness-110 transition-all"
           >
             {allCollapsed ? 'Expand All' : 'Collapse All'}
           </button>
         </div>
       </section>
 
-      {/* Category Strip */}
-      <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-0.5">
-        <button
-          type="button"
-          onClick={() => setCategoryFilter('all')}
-          className={`px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-colors border ${
-            categoryFilter === 'all'
-              ? 'bg-[#1C1C1E] dark:bg-[#2C2C2E] text-white border-[#1C1C1E] dark:border-[#3A3A3C]'
-              : 'bg-white/80 dark:bg-[#1C1C1E]/60 text-[#6C6C70] dark:text-[#AEAEB2] border-[#E5E5EA] dark:border-[#2C2C2E] hover:text-[#1C1C1E] dark:hover:text-white'
-          }`}
-        >
-          All Categories ({assets.length})
-        </button>
-        {CATEGORY_META.map((cat) => {
-          const active = categoryFilter === cat.id;
-          const count = assets.filter((a) => a.category === cat.id).length;
-          return (
-            <button
-              key={cat.id}
-              type="button"
-              onClick={() => setCategoryFilter(cat.id)}
-              className={`px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-colors border ${
-                active
-                  ? 'bg-[#1C1C1E] dark:bg-[#2C2C2E] text-white border-[#1C1C1E] dark:border-[#3A3A3C]'
-                  : 'bg-white/80 dark:bg-[#1C1C1E]/60 text-[#6C6C70] dark:text-[#AEAEB2] border-[#E5E5EA] dark:border-[#2C2C2E] hover:text-[#1C1C1E] dark:hover:text-white'
-              }`}
-            >
-              {cat.label} ({count})
-            </button>
-          );
-        })}
+      {/* Category & Bull/Bear Signal Filter Strip */}
+      <div className="flex flex-wrap items-center justify-between gap-2.5">
+        <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-0.5">
+          <button
+            type="button"
+            onClick={() => setCategoryFilter('all')}
+            className={`px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-colors border ${
+              categoryFilter === 'all'
+                ? 'bg-[#1C1C1E] dark:bg-white text-white dark:text-[#111318] border-transparent'
+                : 'liquid-glass-pill text-[#4A4D57] dark:text-[#C7CBD6] hover:text-[#1C1C1E] dark:hover:text-white'
+            }`}
+          >
+            All Categories ({assets.length})
+          </button>
+          {CATEGORY_META.map((cat) => {
+            const active = categoryFilter === cat.id;
+            const count = assets.filter((a) => a.category === cat.id).length;
+            return (
+              <button
+                key={cat.id}
+                type="button"
+                onClick={() => setCategoryFilter(cat.id)}
+                className={`px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-colors border ${
+                  active
+                    ? 'bg-[#1C1C1E] dark:bg-white text-white dark:text-[#111318] border-transparent'
+                    : 'liquid-glass-pill text-[#4A4D57] dark:text-[#C7CBD6] hover:text-[#1C1C1E] dark:hover:text-white'
+                }`}
+              >
+                {cat.label} ({count})
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Signal Filter Strip */}
+        <div className="inline-flex rounded-xl liquid-glass-pill p-1 shrink-0">
+          <button
+            type="button"
+            onClick={() => setSignalFilter('all')}
+            className={`px-2.5 py-1 rounded-lg text-xs font-semibold whitespace-nowrap transition-colors ${
+              signalFilter === 'all'
+                ? 'bg-white dark:bg-[#2C2C2E] text-[#1C1C1E] dark:text-white shadow-sm'
+                : 'text-[#4A4D57] dark:text-[#B4B8C4] hover:text-[#1C1C1E] dark:hover:text-white'
+            }`}
+          >
+            All Signals
+          </button>
+          <button
+            type="button"
+            onClick={() => setSignalFilter('bull')}
+            className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold whitespace-nowrap transition-colors ${
+              signalFilter === 'bull'
+                ? 'bg-[#0F7033] text-white shadow-sm'
+                : 'text-[#0F7033] dark:text-[#4ADE80] hover:bg-[#22C55E]/12'
+            }`}
+          >
+            <TrendingUp className="w-3 h-3" />
+            Bull ({signalCounts.bull})
+          </button>
+          <button
+            type="button"
+            onClick={() => setSignalFilter('bear')}
+            className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold whitespace-nowrap transition-colors ${
+              signalFilter === 'bear'
+                ? 'bg-[#C41C16] text-white shadow-sm'
+                : 'text-[#C41C16] dark:text-[#FF6B63] hover:bg-[#EF4444]/12'
+            }`}
+          >
+            <TrendingDown className="w-3 h-3" />
+            Bear ({signalCounts.bear})
+          </button>
+        </div>
       </div>
 
-      {/* Grouped Watchlist Card (preserved directly from Market Section Watchlist style) */}
-      <section className="rounded-2xl bg-white dark:bg-[#1C1C1E] border border-[#E5E5EA] dark:border-[#2C2C2E] overflow-hidden">
-        <div className="px-4 py-3.5 border-b border-[#E5E5EA] dark:border-[#2C2C2E] flex items-center justify-between bg-white/95 dark:bg-[#1C1C1E]">
+      {/* Grouped Watchlist Card */}
+      <section className="rounded-2xl liquid-glass-card overflow-hidden">
+        <div className="px-4 py-3.5 border-b border-black/8 dark:border-white/10 flex items-center justify-between">
           <div>
             <h2 className="text-base font-bold text-[#1C1C1E] dark:text-white">Watchlist</h2>
-            <p className="text-xs text-[#6C6C70] dark:text-[#8E8E93]">
+            <p className="text-xs text-[#4A4D57] dark:text-[#B4B8C4]">
               {filteredAssets.length} tracked assets · Tap row to open in Markets chart
             </p>
           </div>
@@ -200,7 +264,7 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
           {visibleCategories.map((cat) => {
             const rows = filteredAssets.filter((a) => a.category === cat.id);
             if (rows.length === 0) return null;
-            const isOpen = searchQuery.trim() ? true : openGroups[cat.id];
+            const isOpen = searchQuery.trim() || signalFilter !== 'all' ? true : openGroups[cat.id];
 
             return (
               <div key={cat.id}>
@@ -228,9 +292,14 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
                       const isActive = asset.id === activeAsset?.id;
                       const isGain = asset.changePercent >= 0;
                       const flash = flashMap[asset.id];
+                      const signal = getAssetSignal(asset);
+
                       return (
-                        <div
+                        <motion.div
                           key={asset.id}
+                          initial={{ opacity: 0.85 }}
+                          animate={{ opacity: 1 }}
+                          transition={{ duration: 0.18 }}
                           role="button"
                           tabIndex={0}
                           onClick={() => handleOpenChart(asset.id)}
@@ -240,7 +309,7 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
                               handleOpenChart(asset.id);
                             }
                           }}
-                          className={`cursor-pointer px-4 py-3 flex items-center justify-between gap-3 transition-colors min-h-[60px] ${
+                          className={`cursor-pointer px-4 py-3 flex items-center justify-between gap-2.5 sm:gap-3 transition-colors min-h-[60px] ${
                             isActive
                               ? 'bg-[#0071E3]/10 dark:bg-[#2C2C2E]/70'
                               : 'hover:bg-[#E5E5EA]/50 dark:hover:bg-[#2C2C2E]/40'
@@ -248,11 +317,13 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
                         >
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center gap-2.5">
-                              <span className="w-7 h-7 rounded-full bg-[#E5E5EA]/70 dark:bg-[#2C2C2E] flex items-center justify-center text-[10px] font-extrabold text-[#1C1C1E] dark:text-white shrink-0">
-                                {asset.symbol.slice(0, 2)}
-                              </span>
+                              <AssetCategoryMiniIcon
+                                category={asset.category}
+                                idOrSymbol={asset.id}
+                                size="md"
+                              />
                               <div className="min-w-0">
-                                <div className="flex items-center gap-1.5">
+                                <div className="flex items-center gap-1.5 flex-wrap">
                                   <p className="font-bold text-sm text-[#1C1C1E] dark:text-white truncate">
                                     {asset.symbol}
                                   </p>
@@ -268,6 +339,7 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
                                         : 'Session Closed'
                                     }
                                   />
+                                  <SignalBadge signal={signal} compact />
                                   {isActive && (
                                     <span className="text-[10px] font-bold text-[#0071E3] dark:text-[#0A84FF]">
                                       · Selected
@@ -281,15 +353,16 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
                             </div>
                           </div>
 
-                          <div className="hidden sm:block text-right text-[11px] text-[#6C6C70] dark:text-[#8E8E93] font-mono tabular-nums shrink-0">
+                          <div className="hidden lg:block text-right text-[11px] text-[#6C6C70] dark:text-[#8E8E93] font-mono tabular-nums shrink-0">
                             <div>H {asset.dayHigh}</div>
                             <div>L {asset.dayLow}</div>
                           </div>
 
-                          <div className="w-20 sm:w-24 h-8 shrink-0">
+                          <div className="hidden sm:block w-20 sm:w-24 h-8 shrink-0">
                             <GoogleFinanceMiniChart
                               points={asset.chartSeries['1D'] ?? asset.sparklinePoints}
                               prevClose={asset.prevClose}
+                              openPrice={parseFormattedMarketNumber(asset.open)}
                               isGain={isGain}
                               progressRatio={
                                 asset.sessionProgressRatio ??
@@ -301,7 +374,7 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
                             />
                           </div>
 
-                          <div className="text-right shrink-0 min-w-[92px]">
+                          <div className="text-right shrink-0 min-w-[88px]">
                             <p
                               className={`text-xs sm:text-sm font-bold tabular-nums font-mono transition-colors ${
                                 flash === 'gain'
@@ -350,7 +423,7 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
                               <Maximize2 className="w-3.5 h-3.5" />
                             </button>
                           )}
-                        </div>
+                        </motion.div>
                       );
                     })}
                   </div>
@@ -360,8 +433,21 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
           })}
 
           {filteredAssets.length === 0 && (
-            <div className="p-8 text-center text-xs text-[#6C6C70] dark:text-[#8E8E93]">
-              No watchlist assets match "{searchQuery}".
+            <div className="p-8 text-center text-xs text-[#6C6C70] dark:text-[#8E8E93] flex flex-col items-center gap-2">
+              <span>
+                {searchQuery.trim()
+                  ? `No watchlist assets match "${searchQuery}".`
+                  : 'No watchlist assets match the selected signal filter.'}
+              </span>
+              {signalFilter !== 'all' && (
+                <button
+                  type="button"
+                  onClick={() => setSignalFilter('all')}
+                  className="text-[#0071E3] dark:text-[#0A84FF] font-semibold hover:underline"
+                >
+                  Show All Signals
+                </button>
+              )}
             </div>
           )}
         </div>

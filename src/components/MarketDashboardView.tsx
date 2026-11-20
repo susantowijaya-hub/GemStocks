@@ -1,8 +1,10 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { motion } from 'motion/react';
 import {
   ArrowRight,
   Bookmark,
   CalendarClock,
+  Clock,
   LineChart,
   Moon,
   Newspaper,
@@ -12,6 +14,8 @@ import {
 import {
   AppRoute,
   MarketAsset,
+  MarketIntelligenceResponse,
+  ThemeMode,
   Timeframe,
 } from '../types/market';
 import {
@@ -21,12 +25,14 @@ import {
 } from '../utils/formatters';
 import {
   DashboardRegionTab,
-  getAssetSessionStatus,
+  getAllMarketSessions,
   getRegionStatusSummary,
-  getSessionProgressRatio,
 } from '../utils/marketSessions';
-import { GoogleFinanceDeltaPill, GoogleFinanceMiniChart } from './GoogleFinanceMiniChart';
+import { getAssetSignal } from '../utils/marketSignals';
+import { GoogleFinanceDeltaPill } from './GoogleFinanceMiniChart';
 import { InteractiveChart } from './InteractiveChart';
+import { MarketIntelligencePanel } from './MarketIntelligencePanel';
+import { AssetCategoryMiniIcon, SignalBadge } from './MarketUiPrimitives';
 
 interface MarketDashboardViewProps {
   assets: MarketAsset[];
@@ -36,6 +42,10 @@ interface MarketDashboardViewProps {
   flashMap: Record<string, 'gain' | 'loss'>;
   onNavigate: (route: AppRoute) => void;
   onLoadTimeframe?: (assetId: string, tf: Timeframe) => void;
+  themeMode: ThemeMode;
+  marketIntelligence?: MarketIntelligenceResponse | null;
+  intelligenceLoading?: boolean;
+  onRefreshIntelligence?: () => void;
 }
 
 const REGION_TABS: { id: DashboardRegionTab; label: string }[] = [
@@ -54,6 +64,9 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
   flashMap,
   onNavigate,
   onLoadTimeframe,
+  marketIntelligence = null,
+  intelligenceLoading = false,
+  onRefreshIntelligence,
 }) => {
   const [timeframe, setTimeframe] = useState<Timeframe>('1D');
   const [regionTab, setRegionTab] = useState<DashboardRegionTab>('all');
@@ -65,7 +78,7 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
     return () => window.clearInterval(id);
   }, []);
 
-  // Sticky card compaction on scroll with hysteresis to prevent boundary flicker
+  // Sticky card compaction on scroll with hysteresis
   useEffect(() => {
     let rafId = 0;
     const updateScrollState = () => {
@@ -96,10 +109,8 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
     [assets, selectedAssetId]
   );
 
-  const activeSession = useMemo(
-    () => getAssetSessionStatus(activeAsset.id, activeAsset.category, now),
-    [activeAsset.id, activeAsset.category, now]
-  );
+  const sessions = useMemo(() => getAllMarketSessions(now), [now]);
+  const sessionList = [sessions.us, sessions.idx, sessions.asia, sessions.crypto];
 
   const yieldCurveInfo = useMemo(() => {
     const us10y = assets.find((a) => a.id === 'US10Y');
@@ -160,17 +171,35 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
 
   const isGain = activeAsset.changePercent >= 0;
   const flash = flashMap[activeAsset.id];
+  const activeSignal = useMemo(() => getAssetSignal(activeAsset), [activeAsset]);
+
+  // Clean secondary Key Statistics excluding removed Intraday Spread / 52W Position / 52W Midpoint / Venue
+  const extraStats = useMemo(() => {
+    const blocked = new Set(['Intraday Spread', '52W Position', '52W Midpoint', 'Venue']);
+    const items: { label: string; value: string }[] = [];
+    const candidates = [
+      { label: activeAsset.avgVolLabel, value: activeAsset.avgVol },
+      { label: activeAsset.peLabel, value: activeAsset.peValue },
+      { label: activeAsset.capLabel, value: activeAsset.capValue },
+    ];
+    for (const c of candidates) {
+      if (c.label && c.value && !blocked.has(c.label)) {
+        items.push({ label: c.label, value: c.value });
+      }
+    }
+    return items;
+  }, [activeAsset]);
 
   return (
     <div className="flex flex-col flex-1">
-      {/* Sticky Google Finance Region Tabs + Market Status + Animated Simplifying Ticker Cards */}
+      {/* Sticky Region Tabs + Sessions Shown Above Cards Only + Simple No-Chart Ticker Cards */}
       <section
-        style={{ top: 'var(--app-header-height, 148px)' }}
-        className={`sticky z-30 border-b border-[#E5E5EA] dark:border-[#2C2C2E] bg-[#F2F2F7]/95 dark:bg-black/95 backdrop-blur-xl shadow-sm px-4 lg:px-6 transition-all duration-300 ease-out flex flex-col ${
+        style={{ top: 'var(--app-header-height, 108px)' }}
+        className={`sticky z-30 liquid-glass-strong !border-x-0 !border-t-0 px-4 lg:px-6 transition-all duration-300 ease-out flex flex-col ${
           isCompactCards ? 'pt-2 pb-2 gap-1.5' : 'pt-2.5 pb-3 gap-2'
         }`}
       >
-        {/* Region Filter Strip & Live Market Status Line */}
+        {/* Region Filter Strip & Summary */}
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar">
             {REGION_TABS.map((tab) => {
@@ -184,8 +213,8 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
                     isCompactCards ? 'py-1' : 'py-1.5'
                   } ${
                     active
-                      ? 'bg-[#1C1C1E] dark:bg-[#2C2C2E] text-white border-[#1C1C1E] dark:border-[#3A3A3C]'
-                      : 'bg-white/80 dark:bg-[#1C1C1E]/60 text-[#6C6C70] dark:text-[#AEAEB2] border-[#E5E5EA] dark:border-[#2C2C2E] hover:text-[#1C1C1E] dark:hover:text-white'
+                      ? 'bg-[#1C1C1E] dark:bg-white text-white dark:text-[#111318] border-transparent shadow-sm'
+                      : 'liquid-glass-pill text-[#4A4D57] dark:text-[#C7CBD6] hover:text-[#1C1C1E] dark:hover:text-white'
                   }`}
                 >
                   {tab.label}
@@ -194,54 +223,102 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
             })}
           </div>
 
-          <div className="inline-flex items-center gap-1.5 text-xs text-[#6C6C70] dark:text-[#AEAEB2]">
+          <div className="inline-flex items-center gap-1.5 text-xs text-[#4A4D57] dark:text-[#C7CBD6]">
             {regionBanner.isOpen ? (
               <Sun className="w-3.5 h-3.5 text-[#D97706] dark:text-[#FBBF24]" />
             ) : (
               <Moon className="w-3.5 h-3.5 text-[#6366F1] dark:text-[#A78BFA]" />
             )}
-            <span className="font-medium">{regionBanner.text}</span>
+            <span className="font-semibold">{regionBanner.text}</span>
           </div>
         </div>
 
-        {/* Google Finance-style Ticker Cards -> Animates smoothly into Simplified No-Graph Cards on Scroll */}
+        {/* Market Sessions Shown Strictly Above Ticker Cards */}
+        <div className="flex items-center gap-2 overflow-x-auto no-scrollbar text-[11px]">
+          <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-[#4A4D57] dark:text-[#B4B8C4] shrink-0">
+            <Clock className="w-3 h-3" />
+            Sessions
+          </span>
+          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+            {sessionList.map((s) => {
+              const dotColor =
+                s.tone === 'open'
+                  ? 'bg-[#22C55E] dark:bg-[#4ADE80]'
+                  : s.tone === 'extended' || s.tone === 'break'
+                    ? 'bg-[#FF9F0A]'
+                    : 'bg-[#8E8E93]';
+              const badgeText =
+                s.tone === 'open'
+                  ? 'text-[#0F7033] dark:text-[#4ADE80]'
+                  : s.tone === 'extended' || s.tone === 'break'
+                    ? 'text-[#9A4E00] dark:text-[#FFB340]'
+                    : 'text-[#4A4D57] dark:text-[#B4B8C4]';
+
+              return (
+                <div
+                  key={s.id}
+                  title={`${s.label}: ${s.stateLabel} (${s.detail})`}
+                  className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full liquid-glass-pill whitespace-nowrap"
+                >
+                  <span className={`w-1.5 h-1.5 rounded-full ${dotColor}`} />
+                  <span className="font-semibold text-[#1C1C1E] dark:text-white">{s.shortLabel}:</span>
+                  <span className={`font-bold ${badgeText}`}>{s.stateLabel}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Simple Ticker Cards (Chart Removed Completely per User Request) */}
         <div className="flex xl:grid xl:grid-cols-6 gap-2.5 lg:gap-3 overflow-x-auto no-scrollbar pb-0.5">
           {snapshotAssets.map((tile) => {
-            const tileGain = tile.changePercent >= 0;
             const isSelected = tile.id === activeAsset.id;
             const tileFlash = flashMap[tile.id];
-            const tileSeries = tile.chartSeries['1D'] ?? tile.sparklinePoints;
-            const progress =
-              tile.sessionProgressRatio ?? getSessionProgressRatio(tile.id, now);
+
+            const tileSignal = getAssetSignal(tile);
+            const signalTextClass =
+              tileSignal.direction === 'bull'
+                ? 'text-[#0F7033] dark:text-[#4ADE80]'
+                : tileSignal.direction === 'bear'
+                  ? 'text-[#C41C16] dark:text-[#FF6B63]'
+                  : 'text-[#4A4D57] dark:text-[#B4B8C4]';
 
             return (
               <button
                 key={tile.id}
                 type="button"
                 onClick={() => onSelectAsset(tile.id)}
-                className={`text-left shrink-0 xl:min-w-0 border overflow-hidden transition-all duration-300 ease-out flex flex-col justify-between ${
+                className={`text-left shrink-0 xl:min-w-0 liquid-glass-card overflow-hidden transition-all duration-200 ease-out flex flex-col justify-between ${
                   isCompactCards
-                    ? 'min-w-[148px] rounded-xl'
-                    : 'min-w-[166px] rounded-2xl'
+                    ? 'min-w-[148px] rounded-xl px-3 py-2'
+                    : 'min-w-[162px] rounded-2xl px-3.5 py-2.5'
                 } ${
                   isSelected
-                    ? 'bg-white dark:bg-[#1C1C1E] border-[#0071E3] dark:border-[#0A84FF] shadow-sm'
-                    : 'bg-white dark:bg-[#1C1C1E]/90 hover:bg-white dark:hover:bg-[#1C1C1E] border-[#E5E5EA] dark:border-[#2C2C2E]'
+                    ? '!border-[#0071E3] dark:!border-[#3898FF] ring-1 ring-[#0071E3]/25 dark:ring-[#3898FF]/30 shadow-md'
+                    : 'hover:brightness-[0.98] dark:hover:brightness-110'
                 }`}
               >
-                <div
-                  className={`transition-all duration-300 ease-out ${
-                    isCompactCards ? 'px-3 py-2' : 'px-3.5 pt-3 pb-1.5'
-                  }`}
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <span
-                      className={`font-medium text-[#6C6C70] dark:text-[#D1D1D6] truncate transition-all duration-200 ${
-                        isCompactCards ? 'text-[11px]' : 'text-xs'
-                      }`}
-                    >
-                      {tile.shortName}
-                    </span>
+                <div className="flex items-center justify-between gap-2 w-full">
+                  <span
+                    className={`font-medium text-[#6C6C70] dark:text-[#D1D1D6] truncate ${
+                      isCompactCards ? 'text-[11px]' : 'text-xs'
+                    }`}
+                  >
+                    {tile.shortName}
+                  </span>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    {!isCompactCards && (
+                      <span
+                        className={`text-[9px] font-bold uppercase tracking-tight whitespace-nowrap ${signalTextClass}`}
+                        title={tileSignal.reason}
+                      >
+                        {tileSignal.direction === 'bull'
+                          ? 'Bull'
+                          : tileSignal.direction === 'bear'
+                            ? 'Bear'
+                            : 'Flat'}
+                      </span>
+                    )}
                     <span
                       className={`w-1.5 h-1.5 rounded-full shrink-0 ${
                         tile.marketSessionOpen ? 'bg-[#30D158]' : 'bg-[#8E8E93]/60'
@@ -253,55 +330,31 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
                       }
                     />
                   </div>
-
-                  {/* Simplified inline layout when scrolled down, stacked prominent layout at top */}
-                  <div
-                    className={`transition-all duration-300 ease-out ${
-                      isCompactCards
-                        ? 'mt-1 flex items-center justify-between gap-2'
-                        : 'mt-1 flex flex-col items-start'
-                    }`}
-                  >
-                    <div
-                      className={`font-bold tabular-nums font-mono tracking-tight transition-all duration-300 ${
-                        isCompactCards
-                          ? 'text-xs sm:text-sm'
-                          : 'text-lg sm:text-xl'
-                      } ${
-                        tileFlash === 'gain'
-                          ? 'text-[#16803C] dark:text-[#30D158]'
-                          : tileFlash === 'loss'
-                            ? 'text-[#D7261C] dark:text-[#FF453A]'
-                            : 'text-[#1C1C1E] dark:text-white'
-                      }`}
-                    >
-                      {formatAssetPrice(tile)}
-                    </div>
-                    <div className={isCompactCards ? '' : 'mt-1'}>
-                      <GoogleFinanceDeltaPill
-                        changePercent={tile.changePercent}
-                        compact={isCompactCards}
-                      />
-                    </div>
-                  </div>
                 </div>
 
-                {/* Animated Sparkline Container: Collapses cleanly without graph line when scrolled */}
                 <div
-                  aria-hidden={isCompactCards}
-                  className={`w-full overflow-hidden transition-all duration-300 ease-out ${
+                  className={`w-full ${
                     isCompactCards
-                      ? 'max-h-0 opacity-0 mt-0 pointer-events-none'
-                      : 'max-h-12 opacity-100 mt-1'
+                      ? 'mt-1 flex items-center justify-between gap-2'
+                      : 'mt-1.5 flex items-baseline justify-between gap-2'
                   }`}
                 >
-                  <GoogleFinanceMiniChart
-                    points={tileSeries}
-                    prevClose={tile.prevClose}
-                    isGain={tileGain}
-                    progressRatio={progress}
-                    className="w-full h-11"
-                    strokeWidth={1.7}
+                  <div
+                    className={`font-bold tabular-nums font-mono tracking-tight ${
+                      isCompactCards ? 'text-xs sm:text-sm' : 'text-base sm:text-lg'
+                    } ${
+                      tileFlash === 'gain'
+                        ? 'text-[#16803C] dark:text-[#30D158]'
+                        : tileFlash === 'loss'
+                          ? 'text-[#D7261C] dark:text-[#FF453A]'
+                          : 'text-[#1C1C1E] dark:text-white'
+                    }`}
+                  >
+                    {formatAssetPrice(tile)}
+                  </div>
+                  <GoogleFinanceDeltaPill
+                    changePercent={tile.changePercent}
+                    compact
                   />
                 </div>
               </button>
@@ -313,15 +366,27 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
       {/* Focused Markets Chart & Analysis Stage */}
       <div className="max-w-6xl w-full mx-auto px-4 lg:px-6 py-5 pb-28 flex flex-col gap-5">
         {/* Asset Header */}
-        <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-3 pb-4 border-b border-[#E5E5EA] dark:border-[#2C2C2E]">
+        <motion.div
+          key={activeAsset.id}
+          initial={{ opacity: 0.7, y: 4 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+          className="flex flex-col sm:flex-row sm:items-end justify-between gap-3 pb-4 border-b border-[#E5E5EA] dark:border-[#2C2C2E]"
+        >
           <div>
             <div className="flex flex-wrap items-center gap-2.5">
+              <AssetCategoryMiniIcon
+                category={activeAsset.category}
+                idOrSymbol={activeAsset.id}
+                size="md"
+              />
               <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight text-[#1C1C1E] dark:text-white">
                 {activeAsset.symbol}
               </h1>
               <span className="text-xs font-medium text-[#6C6C70] dark:text-[#8E8E93]">
                 {activeAsset.exchange}
               </span>
+              <SignalBadge signal={activeSignal} showScore />
               {activeAsset.liveStreamable && (
                 <span className="inline-flex items-center gap-1 text-[11px] font-bold text-[#16803C] dark:text-[#30D158]">
                   <span className="w-1.5 h-1.5 rounded-full bg-[#30D158] animate-pulse" />
@@ -356,30 +421,9 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
               >
                 {formatFullDelta(activeAsset)}
               </span>
-              <span
-                title={activeSession.detail}
-                className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-semibold ${
-                  activeSession.tone === 'open'
-                    ? 'bg-[#30D158]/15 text-[#16803C] dark:text-[#30D158]'
-                    : activeSession.tone === 'extended' || activeSession.tone === 'break'
-                      ? 'bg-[#FF9F0A]/15 text-[#B25E09] dark:text-[#FF9F0A]'
-                      : 'bg-[#E5E5EA] dark:bg-[#2C2C2E] text-[#6C6C70] dark:text-[#8E8E93]'
-                }`}
-              >
-                <span
-                  className={`w-1.5 h-1.5 rounded-full ${
-                    activeSession.tone === 'open'
-                      ? 'bg-[#30D158]'
-                      : activeSession.tone === 'extended' || activeSession.tone === 'break'
-                        ? 'bg-[#FF9F0A]'
-                        : 'bg-[#8E8E93]'
-                  }`}
-                />
-                {activeSession.shortLabel}: {activeSession.stateLabel}
-              </span>
             </div>
           </div>
-        </div>
+        </motion.div>
 
         {/* Interactive Chart */}
         <InteractiveChart
@@ -390,9 +434,9 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
 
         {/* Key Statistics & Market Analysis Side-by-Side on Desktop */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-          {/* Key Statistics Grid */}
-          <div className="rounded-2xl bg-white dark:bg-[#1C1C1E] border border-[#E5E5EA] dark:border-[#2C2C2E] p-4 sm:p-5 flex flex-col gap-4">
-            <div className="flex items-center justify-between border-b border-[#E5E5EA] dark:border-[#2C2C2E]/70 pb-2.5">
+          {/* Key Statistics Grid (Intraday Spread, 52W Position, 52W Midpoint removed) */}
+          <div className="rounded-2xl liquid-glass-card p-4 sm:p-5 flex flex-col gap-4">
+            <div className="flex items-center justify-between border-b border-black/8 dark:border-white/10 pb-2.5">
               <h2 className="text-base font-bold text-[#1C1C1E] dark:text-white">
                 Key Statistics
               </h2>
@@ -409,7 +453,7 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
               </span>
             </div>
 
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs">
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 text-xs">
               <div>
                 <span className="text-[#6C6C70] dark:text-[#8E8E93]">Open</span>
                 <p className="font-bold text-sm text-[#1C1C1E] dark:text-white tabular-nums font-mono mt-0.5">
@@ -440,26 +484,14 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
                   {activeAsset.volume}
                 </p>
               </div>
-              <div>
-                <span className="text-[#6C6C70] dark:text-[#8E8E93]">
-                  {activeAsset.avgVolLabel || 'Intraday Spread'}
-                </span>
-                <p className="font-bold text-sm text-[#1C1C1E] dark:text-white tabular-nums font-mono mt-0.5">
-                  {activeAsset.avgVol}
-                </p>
-              </div>
-              <div>
-                <span className="text-[#6C6C70] dark:text-[#8E8E93]">{activeAsset.peLabel}</span>
-                <p className="font-bold text-sm text-[#1C1C1E] dark:text-white tabular-nums font-mono mt-0.5">
-                  {activeAsset.peValue}
-                </p>
-              </div>
-              <div>
-                <span className="text-[#6C6C70] dark:text-[#8E8E93]">{activeAsset.capLabel}</span>
-                <p className="font-bold text-sm text-[#1C1C1E] dark:text-white tabular-nums font-mono mt-0.5">
-                  {activeAsset.capValue}
-                </p>
-              </div>
+              {extraStats.map((stat) => (
+                <div key={stat.label}>
+                  <span className="text-[#6C6C70] dark:text-[#8E8E93]">{stat.label}</span>
+                  <p className="font-bold text-sm text-[#1C1C1E] dark:text-white tabular-nums font-mono mt-0.5 truncate">
+                    {stat.value}
+                  </p>
+                </div>
+              ))}
             </div>
 
             {/* 52-Week Range Progress Bar */}
@@ -486,7 +518,7 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
           </div>
 
           {/* Market Analysis & Technicals */}
-          <article className="rounded-2xl bg-white dark:bg-[#1C1C1E] border border-[#E5E5EA] dark:border-[#2C2C2E] p-4 sm:p-5 flex flex-col gap-4">
+          <article className="rounded-2xl liquid-glass-card p-4 sm:p-5 flex flex-col gap-4">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2">
                 <LineChart className="w-4 h-4 text-[#0071E3] dark:text-[#0A84FF]" />
@@ -494,17 +526,20 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
                   Market Analysis &amp; Technicals
                 </h2>
               </div>
-              <span
-                className={`px-3 py-1 rounded-full text-xs font-bold ${
-                  activeAsset.sentiment === 'Bullish'
-                    ? 'bg-[#30D158]/15 text-[#16803C] dark:text-[#30D158]'
-                    : activeAsset.sentiment === 'Bearish'
-                      ? 'bg-[#FF453A]/15 text-[#D7261C] dark:text-[#FF453A]'
-                      : 'bg-[#E5E5EA] dark:bg-[#2C2C2E] text-[#6C6C70] dark:text-[#8E8E93]'
-                }`}
-              >
-                {activeAsset.sentiment}
-              </span>
+              <div className="flex items-center gap-2">
+                <SignalBadge signal={activeSignal} />
+                <span
+                  className={`px-2.5 py-0.5 rounded-full text-[11px] font-bold ${
+                    activeAsset.sentiment === 'Bullish'
+                      ? 'bg-[#30D158]/15 text-[#16803C] dark:text-[#30D158]'
+                      : activeAsset.sentiment === 'Bearish'
+                        ? 'bg-[#FF453A]/15 text-[#D7261C] dark:text-[#FF453A]'
+                        : 'bg-[#E5E5EA] dark:bg-[#2C2C2E] text-[#6C6C70] dark:text-[#8E8E93]'
+                  }`}
+                >
+                  {activeAsset.sentiment}
+                </span>
+              </div>
             </div>
 
             <div className="grid grid-cols-2 gap-4 py-3 border-y border-[#E5E5EA] dark:border-[#2C2C2E]/70">
@@ -588,57 +623,68 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
           </article>
         </div>
 
+        {/* Connected 3-Phase Index Session Briefings & Multi-Source Market/Stocks Intelligence */}
+        <MarketIntelligencePanel
+          intelligence={marketIntelligence}
+          loading={intelligenceLoading}
+          selectedAssetId={activeAsset.id}
+          assets={assets}
+          onSelectAsset={onSelectAsset}
+          onNavigate={onNavigate}
+          onRefresh={onRefreshIntelligence}
+        />
+
         {/* Clean Tab Shortcuts to Watchlist, Breaking News & Macro Calendar */}
         <section className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <button
             type="button"
             onClick={() => onNavigate('watchlist')}
-            className="p-4 rounded-2xl bg-white dark:bg-[#1C1C1E] hover:bg-[#E5E5EA]/50 dark:hover:bg-[#2C2C2E] border border-[#E5E5EA] dark:border-[#2C2C2E] flex items-center justify-between gap-3 text-left transition-colors"
+            className="p-4 rounded-2xl liquid-glass-card hover:brightness-[0.98] dark:hover:brightness-110 flex items-center justify-between gap-3 text-left transition-all"
           >
             <div className="flex items-center gap-3">
-              <Bookmark className="w-4 h-4 text-[#0071E3] dark:text-[#0A84FF] shrink-0" />
+              <Bookmark className="w-4 h-4 text-[#0071E3] dark:text-[#3898FF] shrink-0" />
               <div>
                 <p className="text-xs font-bold text-[#1C1C1E] dark:text-white">Full Watchlist</p>
-                <p className="text-[11px] text-[#6C6C70] dark:text-[#8E8E93]">
+                <p className="text-[11px] text-[#4A4D57] dark:text-[#B4B8C4]">
                   Browse all {assets.length} tracked assets
                 </p>
               </div>
             </div>
-            <ArrowRight className="w-4 h-4 text-[#6C6C70] dark:text-[#8E8E93] shrink-0" />
+            <ArrowRight className="w-4 h-4 text-[#4A4D57] dark:text-[#B4B8C4] shrink-0" />
           </button>
 
           <button
             type="button"
             onClick={() => onNavigate('news')}
-            className="p-4 rounded-2xl bg-white dark:bg-[#1C1C1E] hover:bg-[#E5E5EA]/50 dark:hover:bg-[#2C2C2E] border border-[#E5E5EA] dark:border-[#2C2C2E] flex items-center justify-between gap-3 text-left transition-colors"
+            className="p-4 rounded-2xl liquid-glass-card hover:brightness-[0.98] dark:hover:brightness-110 flex items-center justify-between gap-3 text-left transition-all"
           >
             <div className="flex items-center gap-3">
-              <Newspaper className="w-4 h-4 text-[#D7261C] dark:text-[#FF453A] shrink-0" />
+              <Newspaper className="w-4 h-4 text-[#C41C16] dark:text-[#FF6B63] shrink-0" />
               <div>
                 <p className="text-xs font-bold text-[#1C1C1E] dark:text-white">Breaking News &amp; Summary</p>
-                <p className="text-[11px] text-[#6C6C70] dark:text-[#8E8E93]">
+                <p className="text-[11px] text-[#4A4D57] dark:text-[#B4B8C4]">
                   24h recap &amp; live headlines
                 </p>
               </div>
             </div>
-            <ArrowRight className="w-4 h-4 text-[#6C6C70] dark:text-[#8E8E93] shrink-0" />
+            <ArrowRight className="w-4 h-4 text-[#4A4D57] dark:text-[#B4B8C4] shrink-0" />
           </button>
 
           <button
             type="button"
             onClick={() => onNavigate('calendar')}
-            className="p-4 rounded-2xl bg-white dark:bg-[#1C1C1E] hover:bg-[#E5E5EA]/50 dark:hover:bg-[#2C2C2E] border border-[#E5E5EA] dark:border-[#2C2C2E] flex items-center justify-between gap-3 text-left transition-colors"
+            className="p-4 rounded-2xl liquid-glass-card hover:brightness-[0.98] dark:hover:brightness-110 flex items-center justify-between gap-3 text-left transition-all"
           >
             <div className="flex items-center gap-3">
-              <CalendarClock className="w-4 h-4 text-[#16803C] dark:text-[#30D158] shrink-0" />
+              <CalendarClock className="w-4 h-4 text-[#0F7033] dark:text-[#4ADE80] shrink-0" />
               <div>
                 <p className="text-xs font-bold text-[#1C1C1E] dark:text-white">Macro Calendar</p>
-                <p className="text-[11px] text-[#6C6C70] dark:text-[#8E8E93]">
+                <p className="text-[11px] text-[#4A4D57] dark:text-[#B4B8C4]">
                   Market-moving economic releases
                 </p>
               </div>
             </div>
-            <ArrowRight className="w-4 h-4 text-[#6C6C70] dark:text-[#8E8E93] shrink-0" />
+            <ArrowRight className="w-4 h-4 text-[#4A4D57] dark:text-[#B4B8C4] shrink-0" />
           </button>
         </section>
       </div>

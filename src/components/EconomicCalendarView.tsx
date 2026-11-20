@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react';
-import { Bell, BellRing, CalendarClock, Download } from 'lucide-react';
+import { motion } from 'motion/react';
+import { Bell, BellRing, CalendarClock, Download, Flame, Gauge } from 'lucide-react';
 import { CalendarCatalyst, EconomicEvent } from '../types/market';
 
 interface EconomicCalendarViewProps {
@@ -10,6 +11,7 @@ interface EconomicCalendarViewProps {
 }
 
 type DayFilter = 'all' | 'today' | 'tomorrow' | 'week';
+type ImpactFilter = 'ALL' | 'HIGH' | 'MED';
 type CurrencyFilter = 'ALL' | 'USD' | 'IDR' | 'CNY' | 'EUR' | 'JPY';
 
 function formatCountdown(totalSec: number): string {
@@ -26,6 +28,7 @@ export const EconomicCalendarView: React.FC<EconomicCalendarViewProps> = ({
   countdownSeconds,
 }) => {
   const [dayFilter, setDayFilter] = useState<DayFilter>('all');
+  const [impactFilter, setImpactFilter] = useState<ImpactFilter>('ALL');
   const [currencyFilter, setCurrencyFilter] = useState<CurrencyFilter>('ALL');
   const [exportNotice, setExportNotice] = useState(false);
   const [alertSet, setAlertSet] = useState<boolean>(() => {
@@ -67,25 +70,35 @@ export const EconomicCalendarView: React.FC<EconomicCalendarViewProps> = ({
     []
   );
 
-  // Strictly display market-moving high-impact macroeconomic releases only
+  // Include both High and Mid-impact macroeconomic releases
   const marketImpactEvents = useMemo(
-    () => events.filter((ev) => ev.impact === 'HIGH'),
+    () => events.filter((ev) => ev.impact === 'HIGH' || ev.impact === 'MED'),
     [events]
+  );
+
+  const impactCounts = useMemo(
+    () => ({
+      all: marketImpactEvents.length,
+      high: marketImpactEvents.filter((e) => e.impact === 'HIGH').length,
+      med: marketImpactEvents.filter((e) => e.impact === 'MED').length,
+    }),
+    [marketImpactEvents]
   );
 
   const filteredEvents = useMemo(() => {
     const q = searchQuery.toLowerCase().trim();
     return marketImpactEvents.filter((ev) => {
       const matchDay = dayFilter === 'all' || dayFilter === 'week' ? true : ev.day === dayFilter;
+      const matchImpact = impactFilter === 'ALL' || ev.impact === impactFilter;
       const matchCur = currencyFilter === 'ALL' || ev.currency === currencyFilter;
       const matchSearch =
         !q ||
         ev.title.toLowerCase().includes(q) ||
         ev.description.toLowerCase().includes(q) ||
         ev.currency.toLowerCase().includes(q);
-      return matchDay && matchCur && matchSearch;
+      return matchDay && matchImpact && matchCur && matchSearch;
     });
-  }, [marketImpactEvents, dayFilter, currencyFilter, searchQuery]);
+  }, [marketImpactEvents, dayFilter, impactFilter, currencyFilter, searchQuery]);
 
   const handleExportCsv = () => {
     const header = 'TimeWIB,Currency,Impact,Event,Actual,Forecast,Previous,Deviation\n';
@@ -114,21 +127,21 @@ export const EconomicCalendarView: React.FC<EconomicCalendarViewProps> = ({
           <div className="flex items-center gap-2">
             <CalendarClock className="w-4 h-4 text-[#16803C] dark:text-[#30D158]" />
             <span className="text-xs font-bold text-[#16803C] dark:text-[#30D158] uppercase tracking-wider">
-              Market-Moving Macro Releases Only
+              High &amp; Mid-Impact Macro Releases
             </span>
           </div>
           <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight text-[#1C1C1E] dark:text-white mt-1">
             Forex &amp; Macro Calendar
           </h1>
           <p className="text-xs sm:text-sm text-[#6C6C70] dark:text-[#8E8E93] mt-0.5">
-            High-impact macroeconomic data releases timed in WIB (Asia/Jakarta UTC+7)
+            High &amp; mid-impact macroeconomic data releases timed in WIB (Asia/Jakarta UTC+7)
           </p>
         </div>
 
         <button
           type="button"
           onClick={handleExportCsv}
-          className="min-h-[38px] px-4 py-1.5 rounded-xl bg-white dark:bg-[#1C1C1E] hover:bg-[#E5E5EA] dark:hover:bg-[#2C2C2E] border border-[#D1D1D6] dark:border-[#2C2C2E] text-xs font-semibold text-[#1C1C1E] dark:text-white transition-colors flex items-center gap-1.5"
+          className="min-h-[38px] px-4 py-1.5 rounded-xl liquid-glass-pill hover:brightness-95 dark:hover:brightness-110 text-xs font-semibold text-[#1C1C1E] dark:text-white transition-all flex items-center gap-1.5"
         >
           <Download className="w-3.5 h-3.5" />
           <span>{exportNotice ? 'CSV Exported' : 'Export CSV'}</span>
@@ -136,20 +149,20 @@ export const EconomicCalendarView: React.FC<EconomicCalendarViewProps> = ({
       </div>
 
       {/* Market-Section Style High Impact Countdown Banner */}
-      <section className="p-4 sm:p-5 rounded-2xl bg-[#0071E3]/10 dark:bg-[#0A84FF]/10 border border-[#0071E3]/25 dark:border-[#0A84FF]/30 flex flex-col md:flex-row md:items-center justify-between gap-4">
+      <section className="p-4 sm:p-5 rounded-2xl liquid-glass-card !border-[#0071E3]/30 dark:!border-[#3898FF]/35 flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div className="min-w-0">
           <span className="text-[10px] uppercase font-bold tracking-wider text-[#0071E3] dark:text-[#0A84FF] block">
-            Next High Impact Release
+            Next Market-Moving Macro Catalyst
           </span>
           <h2 className="text-base sm:text-xl font-extrabold text-[#1C1C1E] dark:text-white mt-0.5">
             {nextCatalyst
               ? `${nextCatalyst.currency} · ${nextCatalyst.title}`
-              : 'Upcoming High-Impact Macro Release'}
+              : 'Upcoming Macro Data Release'}
           </h2>
           <p className="text-xs text-[#6C6C70] dark:text-[#8E8E93] mt-0.5">
             {nextCatalyst
               ? `${nextCatalyst.description} · ${nextCatalyst.timeWib} WIB`
-              : 'Live High-Impact Economic Calendar Feed · Timed in Asia/Jakarta (WIB)'}
+              : 'Live High & Mid-Impact Economic Calendar Feed · Timed in Asia/Jakarta (WIB)'}
           </p>
         </div>
 
@@ -184,28 +197,62 @@ export const EconomicCalendarView: React.FC<EconomicCalendarViewProps> = ({
 
       {/* Filter Bar matching Market section controls */}
       <div className="flex flex-wrap items-center justify-between gap-3 text-xs">
-        <div className="inline-flex rounded-xl bg-[#E5E5EA]/80 dark:bg-[#1C1C1E] p-1 border border-[#D1D1D6] dark:border-[#2C2C2E] overflow-x-auto no-scrollbar max-w-full">
-          {(
-            [
-              { id: 'all', label: 'All Days' },
-              { id: 'today', label: `Today (${todayLabel})` },
-              { id: 'tomorrow', label: `Tomorrow (${tomorrowLabel})` },
-              { id: 'week', label: 'This Week' },
-            ] as const
-          ).map((t) => (
-            <button
-              key={t.id}
-              type="button"
-              onClick={() => setDayFilter(t.id)}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-colors ${
-                dayFilter === t.id
-                  ? 'bg-white dark:bg-[#2C2C2E] text-[#1C1C1E] dark:text-white shadow-sm'
-                  : 'text-[#6C6C70] dark:text-[#8E8E93] hover:text-[#1C1C1E] dark:hover:text-white'
-              }`}
-            >
-              {t.label}
-            </button>
-          ))}
+        <div className="flex flex-wrap items-center gap-2 max-w-full">
+          <div className="inline-flex rounded-xl liquid-glass-pill p-1 overflow-x-auto no-scrollbar max-w-full">
+            {(
+              [
+                { id: 'all', label: 'All Days' },
+                { id: 'today', label: `Today (${todayLabel})` },
+                { id: 'tomorrow', label: `Tomorrow (${tomorrowLabel})` },
+                { id: 'week', label: 'This Week' },
+              ] as const
+            ).map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                onClick={() => setDayFilter(t.id)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-colors ${
+                  dayFilter === t.id
+                    ? 'bg-white dark:bg-[#2C2C2E] text-[#1C1C1E] dark:text-white shadow-sm'
+                    : 'text-[#4A4D57] dark:text-[#B4B8C4] hover:text-[#1C1C1E] dark:hover:text-white'
+                }`}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+
+          <div className="inline-flex rounded-xl liquid-glass-pill p-1">
+            {(
+              [
+                { id: 'ALL', label: `All Impact (${impactCounts.all})`, icon: null },
+                { id: 'HIGH', label: `High (${impactCounts.high})`, icon: Flame },
+                { id: 'MED', label: `Mid (${impactCounts.med})`, icon: Gauge },
+              ] as const
+            ).map((imp) => {
+              const Icon = imp.icon;
+              const active = impactFilter === imp.id;
+              return (
+                <button
+                  key={imp.id}
+                  type="button"
+                  onClick={() => setImpactFilter(imp.id)}
+                  className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-colors ${
+                    active
+                      ? imp.id === 'HIGH'
+                        ? 'bg-[#D7261C] text-white shadow-sm'
+                        : imp.id === 'MED'
+                          ? 'bg-[#B25E09] text-white shadow-sm'
+                          : 'bg-white dark:bg-[#2C2C2E] text-[#1C1C1E] dark:text-white shadow-sm'
+                      : 'text-[#6C6C70] dark:text-[#8E8E93] hover:text-[#1C1C1E] dark:hover:text-white'
+                  }`}
+                >
+                  {Icon && <Icon className="w-3 h-3 shrink-0" />}
+                  <span>{imp.label}</span>
+                </button>
+              );
+            })}
+          </div>
         </div>
 
         <div className="flex items-center gap-2">
@@ -228,83 +275,97 @@ export const EconomicCalendarView: React.FC<EconomicCalendarViewProps> = ({
 
       {/* Market-Section Style Compact Macro Release Cards Grid (Mobile + Tablet) */}
       <section className="grid grid-cols-1 md:grid-cols-2 lg:hidden gap-3">
-        {filteredEvents.map((ev) => (
-          <article
-            key={ev.id}
-            className="p-4 rounded-2xl bg-white dark:bg-[#1C1C1E] border border-[#E5E5EA] dark:border-[#2C2C2E] flex flex-col gap-2.5"
-          >
-            <div className="flex items-center justify-between text-xs">
-              <div className="flex items-center gap-2 text-[#6C6C70] dark:text-[#8E8E93]">
-                <span className="font-bold text-[#1C1C1E] dark:text-white">{ev.currency}</span>
-                <span aria-hidden="true">·</span>
-                <span className="tabular-nums font-mono">{ev.timeWib}</span>
-                <span aria-hidden="true">·</span>
-                <span className="font-semibold text-[#D7261C] dark:text-[#FF453A]">
-                  High Impact
-                </span>
-              </div>
-              <span
-                className={`text-[11px] font-semibold ${
-                  ev.deviationType === 'beat'
-                    ? 'text-[#16803C] dark:text-[#30D158]'
-                    : ev.deviationType === 'miss'
-                      ? 'text-[#D7261C] dark:text-[#FF453A]'
-                      : 'text-[#6C6C70] dark:text-[#8E8E93]'
-                }`}
-              >
-                {ev.deviationLabel}
-              </span>
-            </div>
-
-            <div>
-              <h3 className="text-sm font-bold text-[#1C1C1E] dark:text-white">{ev.title}</h3>
-              <p className="text-xs text-[#6C6C70] dark:text-[#8E8E93] mt-0.5">
-                {ev.description}
-              </p>
-            </div>
-
-            <div className="grid grid-cols-3 gap-2 pt-2.5 border-t border-[#E5E5EA] dark:border-[#2C2C2E]/60 text-xs text-center font-mono tabular-nums">
-              <div>
-                <span className="text-[9px] text-[#6C6C70] dark:text-[#8E8E93] block font-sans uppercase">
-                  Actual
-                </span>
+        {filteredEvents.map((ev, idx) => {
+          const isHigh = ev.impact === 'HIGH';
+          return (
+            <motion.article
+              key={ev.id}
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.2, delay: Math.min(idx * 0.02, 0.2) }}
+              className="p-4 rounded-2xl liquid-glass-card flex flex-col gap-2.5"
+            >
+              <div className="flex items-center justify-between text-xs">
+                <div className="flex items-center gap-2 text-[#6C6C70] dark:text-[#8E8E93]">
+                  <span className="font-bold text-[#1C1C1E] dark:text-white">{ev.currency}</span>
+                  <span aria-hidden="true">·</span>
+                  <span className="tabular-nums font-mono">{ev.timeWib}</span>
+                  <span aria-hidden="true">·</span>
+                  <span
+                    className={`inline-flex items-center gap-1 font-semibold ${
+                      isHigh
+                        ? 'text-[#D7261C] dark:text-[#FF453A]'
+                        : 'text-[#B25E09] dark:text-[#FF9F0A]'
+                    }`}
+                  >
+                    {isHigh ? <Flame className="w-3 h-3" /> : <Gauge className="w-3 h-3" />}
+                    {isHigh ? 'High Impact' : 'Mid Impact'}
+                  </span>
+                </div>
                 <span
-                  className={`font-bold ${
+                  className={`text-[11px] font-semibold ${
                     ev.deviationType === 'beat'
                       ? 'text-[#16803C] dark:text-[#30D158]'
                       : ev.deviationType === 'miss'
                         ? 'text-[#D7261C] dark:text-[#FF453A]'
-                        : 'text-[#1C1C1E] dark:text-white'
+                        : 'text-[#6C6C70] dark:text-[#8E8E93]'
                   }`}
                 >
-                  {ev.actual}
+                  {ev.deviationLabel}
                 </span>
               </div>
+
               <div>
-                <span className="text-[9px] text-[#6C6C70] dark:text-[#8E8E93] block font-sans uppercase">
-                  Forecast
-                </span>
-                <span className="font-semibold text-[#1C1C1E] dark:text-[#E5E5EA]">
-                  {ev.forecast}
-                </span>
+                <h3 className="text-sm font-bold text-[#1C1C1E] dark:text-white">{ev.title}</h3>
+                <p className="text-xs text-[#6C6C70] dark:text-[#8E8E93] mt-0.5">
+                  {ev.description}
+                </p>
               </div>
-              <div>
-                <span className="text-[9px] text-[#6C6C70] dark:text-[#8E8E93] block font-sans uppercase">
-                  Prev
-                </span>
-                <span className="text-[#6C6C70] dark:text-[#8E8E93]">{ev.previous}</span>
+
+              <div className="grid grid-cols-3 gap-2 pt-2.5 border-t border-[#E5E5EA] dark:border-[#2C2C2E]/60 text-xs text-center font-mono tabular-nums">
+                <div>
+                  <span className="text-[9px] text-[#6C6C70] dark:text-[#8E8E93] block font-sans uppercase">
+                    Actual
+                  </span>
+                  <span
+                    className={`font-bold ${
+                      ev.deviationType === 'beat'
+                        ? 'text-[#16803C] dark:text-[#30D158]'
+                        : ev.deviationType === 'miss'
+                          ? 'text-[#D7261C] dark:text-[#FF453A]'
+                          : 'text-[#1C1C1E] dark:text-white'
+                    }`}
+                  >
+                    {ev.actual}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-[9px] text-[#6C6C70] dark:text-[#8E8E93] block font-sans uppercase">
+                    Forecast
+                  </span>
+                  <span className="font-semibold text-[#1C1C1E] dark:text-[#E5E5EA]">
+                    {ev.forecast}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-[9px] text-[#6C6C70] dark:text-[#8E8E93] block font-sans uppercase">
+                    Prev
+                  </span>
+                  <span className="text-[#6C6C70] dark:text-[#8E8E93]">{ev.previous}</span>
+                </div>
               </div>
-            </div>
-          </article>
-        ))}
+            </motion.article>
+          );
+        })}
 
         {filteredEvents.length === 0 && (
           <div className="md:col-span-2 p-6 rounded-2xl bg-white dark:bg-[#1C1C1E] border border-[#E5E5EA] dark:border-[#2C2C2E] text-center text-xs text-[#6C6C70] dark:text-[#8E8E93] flex flex-col items-center gap-2">
-            <span>No high-impact macro releases match this filter window.</span>
+            <span>No high or mid-impact macro releases match this filter window.</span>
             <button
               type="button"
               onClick={() => {
                 setDayFilter('all');
+                setImpactFilter('ALL');
                 setCurrencyFilter('ALL');
               }}
               className="text-[#0071E3] dark:text-[#0A84FF] font-semibold hover:underline"
@@ -315,9 +376,9 @@ export const EconomicCalendarView: React.FC<EconomicCalendarViewProps> = ({
         )}
       </section>
 
-      {/* Desktop High-Impact Macro Table (lg+) */}
-      <section className="hidden lg:flex rounded-2xl bg-white dark:bg-[#1C1C1E] border border-[#E5E5EA] dark:border-[#2C2C2E] overflow-hidden flex-col">
-        <div className="p-4 border-b border-[#E5E5EA] dark:border-[#2C2C2E] flex items-center justify-between">
+      {/* Desktop High & Mid-Impact Macro Table (lg+) */}
+      <section className="hidden lg:flex rounded-2xl liquid-glass-card overflow-hidden flex-col">
+        <div className="p-4 border-b border-black/8 dark:border-white/10 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <CalendarClock className="w-4 h-4 text-[#16803C] dark:text-[#30D158]" />
             <div>
@@ -325,12 +386,12 @@ export const EconomicCalendarView: React.FC<EconomicCalendarViewProps> = ({
                 Market-Moving Macroeconomic Releases
               </h2>
               <p className="text-xs text-[#6C6C70] dark:text-[#8E8E93]">
-                Filtered strictly to high-impact data releases · Timed in WIB (UTC+7)
+                High &amp; Mid-impact macro data releases · Timed in WIB (UTC+7)
               </p>
             </div>
           </div>
           <span className="text-xs text-[#6C6C70] dark:text-[#8E8E93] font-medium tabular-nums">
-            {filteredEvents.length} High-Impact Releases
+            {filteredEvents.length} Macro Releases
           </span>
         </div>
 
@@ -349,73 +410,84 @@ export const EconomicCalendarView: React.FC<EconomicCalendarViewProps> = ({
               </tr>
             </thead>
             <tbody className="divide-y divide-[#E5E5EA] dark:divide-[#2C2C2E]/40">
-              {filteredEvents.map((ev) => (
-                <tr
-                  key={ev.id}
-                  className="hover:bg-[#E5E5EA]/40 dark:hover:bg-[#2C2C2E]/40 transition-colors"
-                >
-                  <td className="py-3.5 px-4 font-semibold text-[#1C1C1E] dark:text-white tabular-nums font-mono">
-                    {ev.timeWib}
-                  </td>
-                  <td className="py-3.5 px-3 font-bold text-[#1C1C1E] dark:text-white">
-                    {ev.currency}
-                  </td>
-                  <td className="py-3.5 px-3">
-                    <span className="font-bold text-[#D7261C] dark:text-[#FF453A]">
-                      High
-                    </span>
-                  </td>
-                  <td className="py-3.5 px-4">
-                    <p className="font-bold text-[#1C1C1E] dark:text-white text-sm">
-                      {ev.title}
-                    </p>
-                    <p className="text-[11px] text-[#6C6C70] dark:text-[#8E8E93]">
-                      {ev.description}
-                    </p>
-                  </td>
-                  <td
-                    className={`py-3.5 px-4 text-right font-bold tabular-nums font-mono text-sm ${
-                      ev.deviationType === 'beat'
-                        ? 'text-[#16803C] dark:text-[#30D158]'
-                        : ev.deviationType === 'miss'
-                          ? 'text-[#D7261C] dark:text-[#FF453A]'
-                          : 'text-[#1C1C1E] dark:text-white'
-                    }`}
+              {filteredEvents.map((ev) => {
+                const isHigh = ev.impact === 'HIGH';
+                return (
+                  <tr
+                    key={ev.id}
+                    className="hover:bg-[#E5E5EA]/40 dark:hover:bg-[#2C2C2E]/40 transition-colors"
                   >
-                    {ev.actual}
-                  </td>
-                  <td className="py-3.5 px-4 text-right font-medium text-[#1C1C1E] dark:text-[#E5E5EA] tabular-nums font-mono">
-                    {ev.forecast}
-                  </td>
-                  <td className="py-3.5 px-4 text-right text-[#6C6C70] dark:text-[#8E8E93] tabular-nums font-mono">
-                    {ev.previous}
-                  </td>
-                  <td className="py-3.5 px-4 text-center">
-                    <span
-                      className={`px-2.5 py-0.5 rounded-full text-[11px] font-bold ${
-                        ev.deviationType === 'beat'
-                          ? 'bg-[#30D158]/15 text-[#16803C] dark:text-[#30D158]'
-                          : ev.deviationType === 'miss'
+                    <td className="py-3.5 px-4 font-semibold text-[#1C1C1E] dark:text-white tabular-nums font-mono">
+                      {ev.timeWib}
+                    </td>
+                    <td className="py-3.5 px-3 font-bold text-[#1C1C1E] dark:text-white">
+                      {ev.currency}
+                    </td>
+                    <td className="py-3.5 px-3">
+                      <span
+                        className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-bold ${
+                          isHigh
                             ? 'bg-[#FF453A]/15 text-[#D7261C] dark:text-[#FF453A]'
-                            : 'bg-[#E5E5EA] dark:bg-[#2C2C2E] text-[#6C6C70] dark:text-[#8E8E93]'
+                            : 'bg-[#FF9F0A]/15 text-[#B25E09] dark:text-[#FF9F0A]'
+                        }`}
+                      >
+                        {isHigh ? <Flame className="w-3 h-3" /> : <Gauge className="w-3 h-3" />}
+                        {isHigh ? 'High' : 'Mid'}
+                      </span>
+                    </td>
+                    <td className="py-3.5 px-4">
+                      <p className="font-bold text-[#1C1C1E] dark:text-white text-sm">
+                        {ev.title}
+                      </p>
+                      <p className="text-[11px] text-[#6C6C70] dark:text-[#8E8E93]">
+                        {ev.description}
+                      </p>
+                    </td>
+                    <td
+                      className={`py-3.5 px-4 text-right font-bold tabular-nums font-mono text-sm ${
+                        ev.deviationType === 'beat'
+                          ? 'text-[#16803C] dark:text-[#30D158]'
+                          : ev.deviationType === 'miss'
+                            ? 'text-[#D7261C] dark:text-[#FF453A]'
+                            : 'text-[#1C1C1E] dark:text-white'
                       }`}
                     >
-                      {ev.deviationLabel}
-                    </span>
-                  </td>
-                </tr>
-              ))}
+                      {ev.actual}
+                    </td>
+                    <td className="py-3.5 px-4 text-right font-medium text-[#1C1C1E] dark:text-[#E5E5EA] tabular-nums font-mono">
+                      {ev.forecast}
+                    </td>
+                    <td className="py-3.5 px-4 text-right text-[#6C6C70] dark:text-[#8E8E93] tabular-nums font-mono">
+                      {ev.previous}
+                    </td>
+                    <td className="py-3.5 px-4 text-center">
+                      <span
+                        className={`px-2.5 py-0.5 rounded-full text-[11px] font-bold ${
+                          ev.deviationType === 'beat'
+                            ? 'bg-[#30D158]/15 text-[#16803C] dark:text-[#30D158]'
+                            : ev.deviationType === 'miss'
+                              ? 'bg-[#FF453A]/15 text-[#D7261C] dark:text-[#FF453A]'
+                              : 'bg-[#E5E5EA] dark:bg-[#2C2C2E] text-[#6C6C70] dark:text-[#8E8E93]'
+                        }`}
+                      >
+                        {ev.deviationLabel}
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
 
         {filteredEvents.length === 0 && (
           <div className="p-8 text-center text-xs text-[#6C6C70] dark:text-[#8E8E93] flex flex-col items-center gap-2">
-            <span>No high-impact macroeconomic releases match the selected filters.</span>
+            <span>No high or mid-impact macroeconomic releases match the selected filters.</span>
             <button
               type="button"
               onClick={() => {
                 setDayFilter('all');
+                setImpactFilter('ALL');
                 setCurrencyFilter('ALL');
               }}
               className="text-[#0071E3] dark:text-[#0A84FF] font-semibold hover:underline"

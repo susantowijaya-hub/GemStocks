@@ -15,6 +15,8 @@ import {
   fetchLiveFxRates,
   fetchLiveNews,
   fetchLiveQuotes,
+  fetchMarketHeatmap,
+  fetchMarketIntelligence,
   fetchPortfolioMoversBrief,
   fetchPortfolioQuotes,
   fetchPortfolioSymbolSeries,
@@ -93,6 +95,28 @@ async function startServer() {
     } catch (err) {
       console.error('Failed to fetch daily market summary:', err);
       res.status(502).json({ error: 'Unable to fetch daily market summary.' });
+    }
+  });
+
+  // Compiled Multi-Source Market & Stocks Intelligence + 3-Phase Index Session Summaries
+  app.get('/api/market/intelligence', async (_req: Request, res: Response) => {
+    try {
+      const intel = await fetchMarketIntelligence();
+      res.json(intel);
+    } catch (err) {
+      console.error('Failed to fetch market intelligence:', err);
+      res.status(502).json({ error: 'Unable to fetch market intelligence.' });
+    }
+  });
+
+  // Market Cap & Sector Heatmap Data (US & Indonesia IDX)
+  app.get('/api/market/heatmap', async (_req: Request, res: Response) => {
+    try {
+      const heatmap = await fetchMarketHeatmap();
+      res.json(heatmap);
+    } catch (err) {
+      console.error('Failed to fetch market heatmap:', err);
+      res.status(502).json({ error: 'Unable to fetch market heatmap.' });
     }
   });
 

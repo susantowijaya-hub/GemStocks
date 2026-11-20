@@ -3,25 +3,54 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Loader2 } from 'lucide-react';
 import { BottomDock } from './components/BottomDock';
-import { EconomicCalendarView } from './components/EconomicCalendarView';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { Header } from './components/Header';
 import { MarketDashboardView } from './components/MarketDashboardView';
-import { NewsFeedView } from './components/NewsFeedView';
-import { NewsModal } from './components/NewsModal';
 import { OfflineIndicator } from './components/OfflineIndicator';
-import { PortfolioView } from './components/PortfolioView';
-import { SymbolDetailModal } from './components/SymbolDetailModal';
-import { TopStocksView } from './components/TopStocksView';
-import { WatchlistView } from './components/WatchlistView';
 import { AuthProvider } from './contexts/AuthContext';
 import { useLiveMarket } from './hooks/useLiveMarket';
 import { useTheme } from './hooks/useTheme';
 import { AppRoute, CalendarCatalyst, NewsStory } from './types/market';
 
-const VALID_ROUTES: AppRoute[] = ['dashboard', 'watchlist', 'portfolio', 'stocks', 'news', 'calendar'];
+const WatchlistView = lazy(() =>
+  import('./components/WatchlistView').then((m) => ({ default: m.WatchlistView }))
+);
+const PortfolioView = lazy(() =>
+  import('./components/PortfolioView').then((m) => ({ default: m.PortfolioView }))
+);
+const TopStocksView = lazy(() =>
+  import('./components/TopStocksView').then((m) => ({ default: m.TopStocksView }))
+);
+const MarketHeatmapView = lazy(() =>
+  import('./components/MarketHeatmapView').then((m) => ({ default: m.MarketHeatmapView }))
+);
+const NewsFeedView = lazy(() =>
+  import('./components/NewsFeedView').then((m) => ({ default: m.NewsFeedView }))
+);
+const EconomicCalendarView = lazy(() =>
+  import('./components/EconomicCalendarView').then((m) => ({ default: m.EconomicCalendarView }))
+);
+const MarketExtractShareView = lazy(() =>
+  import('./components/MarketExtractShareView').then((m) => ({ default: m.MarketExtractShareView }))
+);
+const NewsModal = lazy(() =>
+  import('./components/NewsModal').then((m) => ({ default: m.NewsModal }))
+);
+const SymbolDetailModal = lazy(() =>
+  import('./components/SymbolDetailModal').then((m) => ({ default: m.SymbolDetailModal }))
+);
+
+const RouteLoadingFallback = () => (
+  <div className="flex-1 flex items-center justify-center py-20 text-xs font-semibold text-[#4A4D57] dark:text-[#B4B8C4] gap-2">
+    <Loader2 className="w-4 h-4 animate-spin text-[#0071E3] dark:text-[#3898FF]" />
+    <span>Loading terminal view...</span>
+  </div>
+);
+
+const VALID_ROUTES: AppRoute[] = ['dashboard', 'watchlist', 'portfolio', 'stocks', 'heatmap', 'news', 'calendar', 'extract'];
 
 function getInitialRoute(): AppRoute {
   if (typeof window === 'undefined') return 'dashboard';
@@ -42,9 +71,16 @@ function StocksTerminalShell() {
     usMoversBucket,
     idxMoversBucket,
     stocksUpdatedAt,
+    stocksLoading,
+    heatmapData,
+    heatmapLoading,
+    refreshHeatmap,
     dailySummary,
     dailySummaryLoading,
     refreshDailySummary,
+    marketIntelligence,
+    intelligenceLoading,
+    refreshMarketIntelligence,
     isPulseActive,
     wsConnected,
     feedsLive,
@@ -164,7 +200,7 @@ function StocksTerminalShell() {
   );
 
   return (
-    <div className="min-h-dvh flex flex-col bg-[#F2F2F7] dark:bg-black text-[#1C1C1E] dark:text-white transition-colors selection:bg-[#0071E3]/20 dark:selection:bg-[#0A84FF]/30">
+    <div className="min-h-dvh flex flex-col text-[#1C1C1E] dark:text-white transition-colors selection:bg-[#0071E3]/20 dark:selection:bg-[#0A84FF]/30">
       <Header
         activeRoute={activeRoute}
         onNavigate={handleNavigate}
@@ -185,6 +221,7 @@ function StocksTerminalShell() {
       />
 
       <main className="flex-1 flex flex-col">
+        <Suspense fallback={<RouteLoadingFallback />}>
         {activeRoute === 'dashboard' && (
           <MarketDashboardView
             assets={assets}
@@ -194,6 +231,10 @@ function StocksTerminalShell() {
             flashMap={flashMap}
             onNavigate={handleNavigate}
             onLoadTimeframe={loadChartTimeframe}
+            themeMode={themeMode}
+            marketIntelligence={marketIntelligence}
+            intelligenceLoading={intelligenceLoading}
+            onRefreshIntelligence={refreshMarketIntelligence}
           />
         )}
 
@@ -225,8 +266,23 @@ function StocksTerminalShell() {
             usBucket={usMoversBucket}
             idxBucket={idxMoversBucket}
             stocksUpdatedAt={stocksUpdatedAt}
+            stocksLoading={stocksLoading}
+            marketIntelligence={marketIntelligence}
             searchQuery={searchQuery}
             onRefresh={refreshStocks}
+            onInspectSymbol={(sym) => handleInspectSymbol(sym)}
+            onNavigate={handleNavigate}
+            onClearSearch={() => setSearchQuery('')}
+          />
+        )}
+
+        {activeRoute === 'heatmap' && (
+          <MarketHeatmapView
+            heatmapData={heatmapData}
+            loading={heatmapLoading}
+            searchQuery={searchQuery}
+            themeMode={themeMode}
+            onRefresh={refreshHeatmap}
             onInspectSymbol={(sym) => handleInspectSymbol(sym)}
           />
         )}
@@ -239,6 +295,7 @@ function StocksTerminalShell() {
             dailySummary={dailySummary}
             dailySummaryLoading={dailySummaryLoading}
             onRefreshDailySummary={refreshDailySummary}
+            marketIntelligence={marketIntelligence}
             assets={assets}
             economicEvents={economicEvents}
             usBucket={usMoversBucket}
@@ -257,6 +314,17 @@ function StocksTerminalShell() {
             countdownSeconds={countdownSeconds}
           />
         )}
+
+        {activeRoute === 'extract' && (
+          <MarketExtractShareView
+            assets={assets}
+            marketIntelligence={marketIntelligence}
+            usBucket={usMoversBucket}
+            idxBucket={idxMoversBucket}
+            onRefreshIntelligence={refreshMarketIntelligence}
+          />
+        )}
+        </Suspense>
       </main>
 
       <BottomDock
@@ -267,11 +335,17 @@ function StocksTerminalShell() {
       />
 
       <OfflineIndicator />
-      <NewsModal story={activeStory} onClose={() => setActiveStory(null)} />
-      <SymbolDetailModal
-        yahooSymbol={inspectedSymbol}
-        onClose={() => setInspectedSymbol(null)}
-      />
+      <Suspense fallback={null}>
+        {activeStory && (
+          <NewsModal story={activeStory} onClose={() => setActiveStory(null)} />
+        )}
+        {inspectedSymbol && (
+          <SymbolDetailModal
+            yahooSymbol={inspectedSymbol}
+            onClose={() => setInspectedSymbol(null)}
+          />
+        )}
+      </Suspense>
     </div>
   );
 }

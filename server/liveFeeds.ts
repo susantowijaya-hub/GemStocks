@@ -151,6 +151,7 @@ const YAHOO_SYMBOL_CONFIG: {
   { id: 'IXIC', name: 'NASDAQ Composite', yahooSymbol: '^IXIC', decimals: 2 },
   { id: 'DJI', name: 'Dow Jones Industrial Average', yahooSymbol: '^DJI', decimals: 2 },
   { id: 'IHSG', name: 'IDX Composite Index', yahooSymbol: '^JKSE', decimals: 2 },
+  { id: 'EIDO', name: 'iShares MSCI Indonesia ETF', yahooSymbol: 'EIDO', decimals: 2, currencyPrefix: '$' },
   { id: 'HSI', name: 'Hang Seng Index', yahooSymbol: '^HSI', decimals: 2 },
   { id: 'TAIEX', name: 'Taiwan Weighted Index', yahooSymbol: '^TWII', decimals: 2 },
   { id: 'KOSPI', name: 'Korea Composite Index', yahooSymbol: '^KS11', decimals: 2 },
@@ -163,6 +164,7 @@ const YAHOO_SYMBOL_CONFIG: {
   { id: 'BRENT', name: 'Brent Crude Oil', yahooSymbol: 'BZ=F', decimals: 2, currencyPrefix: '$' },
   { id: 'USDIDR', name: 'USD/IDR', yahooSymbol: 'IDR=X', decimals: 2 },
   { id: 'EURUSD', name: 'EUR/USD', yahooSymbol: 'EURUSD=X', decimals: 4 },
+  { id: 'DXY', name: 'US Dollar Index', yahooSymbol: 'DX-Y.NYB', decimals: 3 },
   { id: 'US10Y', name: 'US 10-Year Treasury Yield', yahooSymbol: '^TNX', decimals: 3, unitSuffix: '%' },
   { id: 'US30Y', name: 'US 30-Year Treasury Yield', yahooSymbol: '^TYX', decimals: 3, unitSuffix: '%' },
 ];
@@ -188,6 +190,28 @@ const newsCache: { entry: CacheEntry<{ stories: LiveNewsItem[]; updatedAt: strin
 };
 const calendarCache: { entry: CacheEntry<LiveCalendarResponse> | null } = { entry: null };
 const stocksMoversCache: { entry: CacheEntry<StocksMoversResponse> | null } = { entry: null };
+const heatmapCache: { entry: CacheEntry<MarketHeatmapResponse> | null } = { entry: null };
+
+const inFlightSharedMap = new Map<string, Promise<unknown>>();
+
+function coalesceInFlight<T>(
+  key: string,
+  staleFallback: T | undefined,
+  taskFn: () => Promise<T>
+): Promise<T> {
+  const existing = inFlightSharedMap.get(key) as Promise<T> | undefined;
+  if (existing) return existing;
+  const wrapped = taskFn()
+    .catch((err) => {
+      if (staleFallback !== undefined) return staleFallback;
+      throw err;
+    })
+    .finally(() => {
+      inFlightSharedMap.delete(key);
+    });
+  inFlightSharedMap.set(key, wrapped);
+  return wrapped;
+}
 
 interface Id10yRawData {
   price: number;
@@ -366,10 +390,12 @@ export function getServerSessionInfo(keyOrSymbol: string, now = new Date()): Ser
     };
   }
 
-  // Global 24/5 FX, Futures Commodities, and US Yields
+  // Global 24/5 FX, Futures Commodities, DXY, and US Yields
   if (
     upper === 'USDIDR' ||
     upper === 'EURUSD' ||
+    upper === 'DXY' ||
+    upper === 'DX-Y.NYB' ||
     upper === 'XAUUSD' ||
     upper === 'WTI' ||
     upper === 'BRENT' ||
@@ -613,6 +639,66 @@ interface RawQuoteMeta {
   exchangeName: string;
 }
 
+async function fetchCoinbaseSpotTicker(
+  pair: 'BTC-USD' | 'ETH-USD'
+): Promise<{ price: number; volumeUsd: number } | null> {
+  try {
+    const res = await fetch(`https://api.exchange.coinbase.com/products/${pair}/ticker`, {
+      headers: UA_HEADERS,
+      signal: AbortSignal.timeout(2500),
+    });
+    if (!res.ok) return null;
+    const json = (await res.json()) as { price?: string; volume?: string };
+    const price = Number(json.price);
+    const baseVol = Number(json.volume ?? 0);
+    if (!Number.isFinite(price) || price <= 0) return null;
+    return {
+      price,
+      volumeUsd: Number.isFinite(baseVol) && baseVol > 0 ? baseVol * price : 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function resolveConsistentChange(
+  price: number,
+  rawPrevClose: number,
+  reportedChangePct: unknown,
+  decimals: number,
+  forcePrevCloseAnchor: boolean
+): { prevClose: number; changeValue: number; changePercent: number } {
+  const safeRawPrev = Number.isFinite(rawPrevClose) && rawPrevClose > 0 ? rawPrevClose : price;
+  const regPct = Number(reportedChangePct);
+
+  // For 24/7 crypto anchored to UTC midnight close, use rawPrev directly
+  if (forcePrevCloseAnchor || !Number.isFinite(regPct)) {
+    const changeValue = Number((price - safeRawPrev).toFixed(decimals >= 3 ? decimals : 2));
+    const changePercent = Number(
+      (((price - safeRawPrev) / Math.max(1e-6, safeRawPrev)) * 100).toFixed(2)
+    );
+    return {
+      prevClose: Number(safeRawPrev.toFixed(decimals)),
+      changeValue,
+      changePercent,
+    };
+  }
+
+  // Yahoo v8 /chart?range=1d returns stale multi-day chartPreviousClose on several Asian & cash indices
+  // (e.g., ^JKSE, ^HSI, ^TWII, 000001.SS, ^NSEI). Reconstruct exact session previous close from regularMarketChangePercent.
+  const calcFromRawPct =
+    safeRawPrev > 0 ? ((price - safeRawPrev) / safeRawPrev) * 100 : regPct;
+  const effectivePrev =
+    Math.abs(calcFromRawPct - regPct) > 0.04 && 1 + regPct / 100 > 0.05
+      ? price / (1 + regPct / 100)
+      : safeRawPrev;
+
+  const roundedPrev = Number(effectivePrev.toFixed(decimals));
+  const changePercent = Number(regPct.toFixed(2));
+  const changeValue = Number((price - roundedPrev).toFixed(decimals >= 3 ? decimals : 2));
+  return { prevClose: roundedPrev, changeValue, changePercent };
+}
+
 const perSymbolQuoteCache = new Map<
   string,
   { data: RawQuoteMeta; expiresAt: number; wasOpen: boolean }
@@ -670,16 +756,29 @@ export async function fetchLiveQuotes(): Promise<{
           const meta = item?.meta;
           if (!meta) return null;
 
-          const price = Number(meta.regularMarketPrice);
-          const rawPrev = Number(meta.chartPreviousClose ?? meta.previousClose ?? price);
+          let price = Number(meta.regularMarketPrice);
+          const rawPrev = Number(
+            meta.regularMarketPreviousClose ?? meta.previousClose ?? meta.chartPreviousClose ?? price
+          );
           if (!Number.isFinite(price) || price <= 0) return null;
 
-          const prevClose = Number.isFinite(rawPrev) && rawPrev > 0 ? rawPrev : price;
-          const changeValue = Number((price - prevClose).toFixed(cfg.decimals >= 3 ? cfg.decimals : 2));
-          const changePercent =
-            Number.isFinite(Number(meta.regularMarketChangePercent))
-              ? Number(Number(meta.regularMarketChangePercent).toFixed(2))
-              : Number((((price - prevClose) / prevClose) * 100).toFixed(2));
+          let coinbaseVolumeUsd = 0;
+          if (cfg.id === 'BTCUSD' || cfg.id === 'ETHUSD') {
+            const cb = await fetchCoinbaseSpotTicker(cfg.id === 'BTCUSD' ? 'BTC-USD' : 'ETH-USD');
+            if (cb) {
+              price = cb.price;
+              coinbaseVolumeUsd = cb.volumeUsd;
+            }
+          }
+
+          const isCryptoAnchor = cfg.id === 'BTCUSD' || cfg.id === 'ETHUSD';
+          const { prevClose, changeValue, changePercent } = resolveConsistentChange(
+            price,
+            rawPrev,
+            meta.regularMarketChangePercent,
+            cfg.decimals,
+            isCryptoAnchor
+          );
 
           const rawCloses = item?.indicators?.quote?.[0]?.close ?? [];
           const rawTimestamps = item?.timestamp ?? [];
@@ -707,14 +806,27 @@ export async function fetchLiveQuotes(): Promise<{
           const timestamps = validPairs.map((p) => p.t);
 
           const rawOpens = item?.indicators?.quote?.[0]?.open ?? [];
-          const firstOpen =
-            rawOpens.find((v): v is number => typeof v === 'number' && Number.isFinite(v)) ??
-            prevClose;
+          const regOpen = Number(meta.regularMarketOpen);
+          const barOpen = rawOpens.find((v): v is number => typeof v === 'number' && Number.isFinite(v) && v > 0);
 
-          const dayHighRaw = Number(meta.regularMarketDayHigh ?? Math.max(...closes));
-          const dayLowRaw = Number(meta.regularMarketDayLow ?? Math.min(...closes));
-          const dayHighNum = Number.isFinite(dayHighRaw) && dayHighRaw > 0 ? dayHighRaw : Math.max(price, prevClose);
-          const dayLowNum = Number.isFinite(dayLowRaw) && dayLowRaw > 0 ? dayLowRaw : Math.min(price, prevClose);
+          const rawDayHigh = Number(meta.regularMarketDayHigh ?? Math.max(...closes));
+          const rawDayLow = Number(meta.regularMarketDayLow ?? Math.min(...closes));
+          const baseHigh = Number.isFinite(rawDayHigh) && rawDayHigh > 0 ? rawDayHigh : Math.max(price, prevClose);
+          const baseLow = Number.isFinite(rawDayLow) && rawDayLow > 0 ? rawDayLow : Math.min(price, prevClose);
+
+          // Ensure session Open never sits outside current intraday session range on futures/24h rollovers (e.g., GC=F)
+          let firstOpen =
+            Number.isFinite(regOpen) && regOpen > 0
+              ? regOpen
+              : typeof barOpen === 'number' &&
+                  barOpen >= Math.min(baseLow, prevClose) * 0.985 &&
+                  barOpen <= Math.max(baseHigh, prevClose) * 1.015
+                ? barOpen
+                : prevClose;
+          firstOpen = Math.max(Math.min(baseLow, prevClose), Math.min(Math.max(baseHigh, prevClose), firstOpen));
+
+          const dayHighNum = Math.max(price, baseHigh, firstOpen);
+          const dayLowNum = Math.min(price, baseLow, firstOpen);
 
           const w52LowRaw = Number(meta.fiftyTwoWeekLow ?? dayLowNum);
           const w52HighRaw = Number(meta.fiftyTwoWeekHigh ?? dayHighNum);
@@ -726,10 +838,16 @@ export async function fetchLiveQuotes(): Promise<{
             Math.min(98, Math.round(((price - w52LowNum) / w52Span) * 100))
           );
 
-          const vol = Number(meta.regularMarketVolume);
+          const rawVol = Number(meta.regularMarketVolume);
+          const vol = coinbaseVolumeUsd > 0 ? coinbaseVolumeUsd : rawVol;
           const updatedAtEpoch =
-            Number(meta.regularMarketTime || Math.floor(Date.now() / 1000)) * 1000;
-          const exchangeName = String(meta.fullExchangeName || meta.exchangeName || 'Global Market');
+            isCryptoAnchor && coinbaseVolumeUsd > 0
+              ? Date.now()
+              : Number(meta.regularMarketTime || Math.floor(Date.now() / 1000)) * 1000;
+          const exchangeName =
+            isCryptoAnchor && coinbaseVolumeUsd > 0
+              ? 'Coinbase Spot USD'
+              : String(meta.fullExchangeName || meta.exchangeName || 'Global Market');
 
           const rawMeta: RawQuoteMeta = {
             cfg,
@@ -802,10 +920,21 @@ export async function fetchLiveQuotes(): Promise<{
     const support = formatStatNumber(supportNum, cfg.decimals, prefix, suffix);
     const resistance = formatStatNumber(resistanceNum, cfg.decimals, prefix, suffix);
 
+    const signalTier = computeServerSignalTier({
+      assetId: cfg.id,
+      changePercent,
+      price,
+      open: firstOpen,
+      prevClose,
+      dayHigh: dayHighNum,
+      dayLow: dayLowNum,
+      series: closes,
+      w52Pct,
+    });
     const sentiment: 'Bullish' | 'Bearish' | 'Neutral' =
-      changePercent >= 0.35 || (changePercent >= 0.05 && w52Pct >= 62)
+      signalTier === 'Strong Bull' || signalTier === 'Bull Signal'
         ? 'Bullish'
-        : changePercent <= -0.35 || (changePercent <= -0.05 && w52Pct <= 38)
+        : signalTier === 'Strong Bear' || signalTier === 'Bear Signal'
           ? 'Bearish'
           : 'Neutral';
 
@@ -821,8 +950,27 @@ export async function fetchLiveQuotes(): Promise<{
     const dirWord =
       changePercent > 0.15 ? 'advancing' : changePercent < -0.15 ? 'pulling back' : 'consolidating';
     const signStr = changePercent >= 0 ? '+' : '';
+    const openDeltaStr =
+      firstOpen > 0
+        ? price >= firstOpen
+          ? `holding above opening print (${open})`
+          : `trading below opening print (${open})`
+        : 'tracking session pivot';
+    const ibsRatio =
+      dayHighNum > dayLowNum ? (price - dayLowNum) / (dayHighNum - dayLowNum) : 0.5;
+    const rangeZone =
+      ibsRatio >= 0.72
+        ? 'upper session quartile'
+        : ibsRatio <= 0.28
+          ? 'lower demand quartile'
+          : 'mid-range equilibrium';
+
     let extraNote = '';
-    if (cfg.id === 'WTI' && brentPrice) {
+    if (cfg.id === 'BTCUSD' || cfg.id === 'ETHUSD') {
+      extraNote = ` 24/7 momentum posture registers ${signalTier} across ${rangeZone}; holding above ${support} preserves upside breakout structure toward ${resistance}.`;
+    } else if (cfg.id === 'XAUUSD') {
+      extraNote = ` Bullion reacts inversely to DXY & US real yields; signal reads ${signalTier} inside ${rangeZone}.`;
+    } else if (cfg.id === 'WTI' && brentPrice) {
       extraNote = ` WTI trades at a $${Math.abs(price - brentPrice).toFixed(2)}/bbl ${
         price < brentPrice ? 'discount' : 'premium'
       } to Brent ($${brentPrice.toFixed(2)}).`;
@@ -831,6 +979,8 @@ export async function fetchLiveQuotes(): Promise<{
     } else if ((cfg.id === 'US10Y' || cfg.id === 'US30Y') && us10yPrice && us30yPrice) {
       const bps = ((us30yPrice - us10yPrice) * 100).toFixed(1);
       extraNote = ` The 10Y–30Y Treasury curve spread stands at ${Number(bps) >= 0 ? '+' : ''}${bps} bps.`;
+    } else if (cfg.id === 'IHSG' || cfg.id === 'EIDO') {
+      extraNote = ` Intraday bias reads ${signalTier} (${rangeZone}), sensitive to foreign banking flows and USD/IDR stability.`;
     }
 
     const ordinalPct = (() => {
@@ -845,14 +995,13 @@ export async function fetchLiveQuotes(): Promise<{
 
     const commentary = `${cfg.name} is ${dirWord} at ${priceLabel} (${signStr}${changePercent.toFixed(
       2
-    )}% on the session), trading within a ${dayLow}–${dayHigh} intraday band and positioned at the ${ordinalPct} percentile of its 52-week range (${w52Low} – ${w52High}). Immediate technical support sits near ${support} with resistance overhead at ${resistance}.${extraNote}`;
+    )}%), ${openDeltaStr} within a ${dayLow}–${dayHigh} intraday band (${ordinalPct} 52W pct). Immediate pivot support stands at ${support} with resistance overhead at ${resistance}.${extraNote}`;
 
-    // Live secondary statistics (zero stale 2024 numbers)
-    const w52Midpoint = formatStatNumber((w52LowNum + w52HighNum) / 2, cfg.decimals, prefix, suffix);
-    let peLabel = '52W Position';
-    let peValue = `${ordinalPct} Pct`;
-    let capLabel = '52W Midpoint';
-    let capValue = w52Midpoint;
+    // Clean secondary statistics (omitting removed Intraday Spread / 52W Position / 52W Midpoint)
+    let peLabel = '';
+    let peValue = '';
+    let capLabel = '';
+    let capValue = '';
 
     if (cfg.id === 'WTI' && brentPrice) {
       capLabel = 'Spread vs Brent';
@@ -877,8 +1026,8 @@ export async function fetchLiveQuotes(): Promise<{
       dayHigh,
       dayLow,
       volume: formatVolume(vol, cfg.id === 'BTCUSD' || cfg.id === 'ETHUSD' ? '$' : ''),
-      avgVol: `${intradayPct.toFixed(2)}%`,
-      avgVolLabel: 'Intraday Spread',
+      avgVol: '',
+      avgVolLabel: '',
       peLabel,
       peValue,
       capLabel,
@@ -1035,6 +1184,56 @@ export async function fetchLiveQuotes(): Promise<{
   }
 }
 
+const inFlightChartRequests = new Map<string, Promise<LiveChartResponse | null>>();
+
+async function fetchYahooChartJson(
+  yahooSymbol: string,
+  range: string,
+  interval: string,
+  timeoutMs = 7000
+): Promise<{
+  chart?: {
+    result?: Array<{
+      meta?: Record<string, unknown>;
+      timestamp?: number[];
+      indicators?: {
+        quote?: Array<{ close?: Array<number | null> }>;
+      };
+    }>;
+  };
+} | null> {
+  const hosts = ['query1.finance.yahoo.com', 'query2.finance.yahoo.com'];
+  for (const host of hosts) {
+    try {
+      const url = `https://${host}/v8/finance/chart/${encodeURIComponent(
+        yahooSymbol
+      )}?range=${encodeURIComponent(range)}&interval=${encodeURIComponent(interval)}`;
+      const res = await fetch(url, {
+        headers: UA_HEADERS,
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (!res.ok) continue;
+      const json = (await res.json()) as {
+        chart?: {
+          result?: Array<{
+            meta?: Record<string, unknown>;
+            timestamp?: number[];
+            indicators?: {
+              quote?: Array<{ close?: Array<number | null> }>;
+            };
+          }>;
+        };
+      };
+      if (json?.chart?.result?.[0]) {
+        return json;
+      }
+    } catch {
+      // Try mirror host on network/timeout error
+    }
+  }
+  return null;
+}
+
 export async function fetchLiveChart(
   id: string,
   timeframe: string
@@ -1046,112 +1245,135 @@ export async function fetchLiveChart(
     return cached.data;
   }
 
-  if (id === 'ID10Y') {
-    const raw = await fetchId10yRaw();
-    if (!raw) return null;
-
-    const perfMap: Record<string, { pct: number; spanMs: number; count: number }> = {
-      '1D': { pct: raw.changePercent, spanMs: 8 * 3600_000, count: 20 },
-      '1W': { pct: raw.perfW, spanMs: 7 * 86400_000, count: 24 },
-      '1M': { pct: raw.perf1M, spanMs: 30 * 86400_000, count: 28 },
-      '3M': { pct: raw.perf3M, spanMs: 90 * 86400_000, count: 36 },
-      YTD: { pct: raw.perfYTD, spanMs: 180 * 86400_000, count: 40 },
-      '1Y': { pct: raw.perfY, spanMs: 365 * 86400_000, count: 48 },
-      ALL: { pct: raw.perfY * 1.15, spanMs: 5 * 365 * 86400_000, count: 52 },
-    };
-    const cfg = perfMap[timeframe] ?? perfMap['1D'];
-    const startVal = Number((raw.price / (1 + cfg.pct / 100)).toFixed(3));
-    const safeStart = Math.max(raw.w52LowNum * 0.92, Math.min(raw.w52HighNum * 1.05, startVal));
-    const points: number[] = [];
-    const timestamps: number[] = [];
-    for (let i = 0; i < cfg.count; i++) {
-      const t = i / (cfg.count - 1);
-      const wave = Math.sin(t * Math.PI * 3.5) * 0.035 + Math.cos(t * Math.PI * 1.5) * 0.02;
-      const val =
-        i === cfg.count - 1
-          ? raw.price
-          : safeStart + (raw.price - safeStart) * t + (i === 0 ? 0 : wave * (1 - t));
-      points.push(Number(Math.max(3.5, val).toFixed(3)));
-      timestamps.push(Math.round(now - cfg.spanMs * (1 - t)));
-    }
-    const payload: LiveChartResponse = {
-      id: 'ID10Y',
-      timeframe,
-      points,
-      timestamps,
-      prevClose: safeStart,
-    };
-    chartCache.set(key, { data: payload, expiresAt: now + 180_000 });
-    return payload;
+  const existingInFlight = inFlightChartRequests.get(key);
+  if (existingInFlight) {
+    return existingInFlight;
   }
 
-  const cfg = YAHOO_SYMBOL_CONFIG.find((c) => c.id === id);
-  if (!cfg) return null;
+  const task = (async (): Promise<LiveChartResponse | null> => {
+    try {
+      if (id === 'ID10Y') {
+        const raw = await fetchId10yRaw().catch(() => null);
+        if (!raw) return cached?.data ?? null;
 
-  const rangeMap: Record<string, { range: string; interval: string }> = {
-    '1D': { range: '1d', interval: '15m' },
-    '1W': { range: '5d', interval: '1h' },
-    '1M': { range: '1mo', interval: '1d' },
-    '3M': { range: '3mo', interval: '1d' },
-    YTD: { range: 'ytd', interval: '1d' },
-    '1Y': { range: '1y', interval: '1wk' },
-    ALL: { range: '5y', interval: '1mo' },
-  };
-  const params = rangeMap[timeframe] ?? rangeMap['1D'];
-
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
-    cfg.yahooSymbol
-  )}?range=${params.range}&interval=${params.interval}`;
-
-  const res = await fetch(url, {
-    headers: UA_HEADERS,
-    signal: AbortSignal.timeout(8000),
-  });
-  if (!res.ok) return null;
-
-  const json = (await res.json()) as {
-    chart?: {
-      result?: Array<{
-        meta?: Record<string, unknown>;
-        timestamp?: number[];
-        indicators?: {
-          quote?: Array<{ close?: Array<number | null> }>;
+        const perfMap: Record<string, { pct: number; spanMs: number; count: number }> = {
+          '1D': { pct: raw.changePercent, spanMs: 8 * 3600_000, count: 20 },
+          '1W': { pct: raw.perfW, spanMs: 7 * 86400_000, count: 24 },
+          '1M': { pct: raw.perf1M, spanMs: 30 * 86400_000, count: 28 },
+          '3M': { pct: raw.perf3M, spanMs: 90 * 86400_000, count: 36 },
+          YTD: { pct: raw.perfYTD, spanMs: 180 * 86400_000, count: 40 },
+          '1Y': { pct: raw.perfY, spanMs: 365 * 86400_000, count: 48 },
+          ALL: { pct: raw.perfY * 1.15, spanMs: 5 * 365 * 86400_000, count: 52 },
         };
-      }>;
-    };
-  };
+        const cfg = perfMap[timeframe] ?? perfMap['1D'];
+        const startVal = Number((raw.price / (1 + cfg.pct / 100)).toFixed(3));
+        const safeStart = Math.max(
+          raw.w52LowNum * 0.92,
+          Math.min(raw.w52HighNum * 1.05, startVal)
+        );
+        const points: number[] = [];
+        const timestamps: number[] = [];
+        for (let i = 0; i < cfg.count; i++) {
+          const t = i / (cfg.count - 1);
+          const wave = Math.sin(t * Math.PI * 3.5) * 0.035 + Math.cos(t * Math.PI * 1.5) * 0.02;
+          const val =
+            i === cfg.count - 1
+              ? raw.price
+              : safeStart + (raw.price - safeStart) * t + (i === 0 ? 0 : wave * (1 - t));
+          points.push(Number(Math.max(3.5, val).toFixed(3)));
+          timestamps.push(Math.round(now - cfg.spanMs * (1 - t)));
+        }
+        const payload: LiveChartResponse = {
+          id: 'ID10Y',
+          timeframe,
+          points,
+          timestamps,
+          prevClose: safeStart,
+        };
+        chartCache.set(key, { data: payload, expiresAt: now + 180_000 });
+        return payload;
+      }
 
-  const item = json.chart?.result?.[0];
-  const rawCloses = item?.indicators?.quote?.[0]?.close ?? [];
-  const rawTimestamps = item?.timestamp ?? [];
-  const points: number[] = [];
-  const timestamps: number[] = [];
+      const cfg = YAHOO_SYMBOL_CONFIG.find((c) => c.id === id);
+      if (!cfg) return null;
 
-  for (let i = 0; i < rawCloses.length; i++) {
-    const val = rawCloses[i];
-    const ts = rawTimestamps[i];
-    if (typeof val === 'number' && Number.isFinite(val)) {
-      points.push(Number(val.toFixed(cfg.decimals)));
-      timestamps.push(typeof ts === 'number' ? ts * 1000 : Date.now());
+      const rangeMap: Record<string, { range: string; interval: string }> = {
+        '1D': { range: '1d', interval: '15m' },
+        '1W': { range: '5d', interval: '1h' },
+        '1M': { range: '1mo', interval: '1d' },
+        '3M': { range: '3mo', interval: '1d' },
+        YTD: { range: 'ytd', interval: '1d' },
+        '1Y': { range: '1y', interval: '1wk' },
+        ALL: { range: '5y', interval: '1mo' },
+      };
+      const params = rangeMap[timeframe] ?? rangeMap['1D'];
+
+      const json = await fetchYahooChartJson(
+        cfg.yahooSymbol,
+        params.range,
+        params.interval,
+        7000
+      );
+
+      if (!json) {
+        if (cached?.data) {
+          return cached.data;
+        }
+        const quoteCached = perSymbolQuoteCache.get(id)?.data;
+        if (timeframe === '1D' && quoteCached && quoteCached.closes.length >= 2) {
+          return {
+            id,
+            timeframe,
+            points: quoteCached.closes,
+            timestamps: quoteCached.timestamps,
+            prevClose: quoteCached.prevClose,
+          };
+        }
+        return null;
+      }
+
+      const item = json.chart?.result?.[0];
+      const rawCloses = item?.indicators?.quote?.[0]?.close ?? [];
+      const rawTimestamps = item?.timestamp ?? [];
+      const points: number[] = [];
+      const timestamps: number[] = [];
+
+      for (let i = 0; i < rawCloses.length; i++) {
+        const val = rawCloses[i];
+        const ts = rawTimestamps[i];
+        if (typeof val === 'number' && Number.isFinite(val)) {
+          points.push(Number(val.toFixed(cfg.decimals)));
+          timestamps.push(typeof ts === 'number' ? ts * 1000 : Date.now());
+        }
+      }
+
+      if (points.length === 0) {
+        return cached?.data ?? null;
+      }
+
+      const prevClose = Number(
+        item?.meta?.chartPreviousClose ?? item?.meta?.previousClose ?? points[0]
+      );
+
+      const payload: LiveChartResponse = {
+        id,
+        timeframe,
+        points,
+        timestamps,
+        prevClose: Number.isFinite(prevClose) ? Number(prevClose.toFixed(cfg.decimals)) : points[0],
+      };
+
+      chartCache.set(key, { data: payload, expiresAt: now + 180_000 });
+      return payload;
+    } catch {
+      return cached?.data ?? null;
+    } finally {
+      inFlightChartRequests.delete(key);
     }
-  }
+  })();
 
-  if (points.length === 0) return null;
-
-  const prevClose = Number(
-    item?.meta?.chartPreviousClose ?? item?.meta?.previousClose ?? points[0]
-  );
-
-  const payload: LiveChartResponse = {
-    id,
-    timeframe,
-    points,
-    timestamps,
-    prevClose: Number.isFinite(prevClose) ? Number(prevClose.toFixed(cfg.decimals)) : points[0],
-  };
-
-  chartCache.set(key, { data: payload, expiresAt: now + 180_000 });
-  return payload;
+  inFlightChartRequests.set(key, task);
+  return task;
 }
 
 export async function fetchLiveFxRates(): Promise<LiveFxResponse> {
@@ -1160,11 +1382,15 @@ export async function fetchLiveFxRates(): Promise<LiveFxResponse> {
     return fxCache.entry.data;
   }
 
+  return coalesceInFlight('fx-rates', fxCache.entry?.data, async () => {
+
   const [erRes, quotesRes] = await Promise.all([
     fetch('https://open.er-api.com/v6/latest/USD', {
       headers: UA_HEADERS,
       signal: AbortSignal.timeout(8000),
-    }).then((r) => (r.ok ? r.json() : null)),
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .catch(() => null),
     fetchLiveQuotes(),
   ]);
 
@@ -1268,6 +1494,7 @@ export async function fetchLiveFxRates(): Promise<LiveFxResponse> {
 
   fxCache.entry = { data: payload, expiresAt: now + 600_000 };
   return payload;
+  });
 }
 
 function decodeXmlEntities(input: string): string {
@@ -1480,6 +1707,8 @@ export async function fetchLiveNews(): Promise<{
     return newsCache.entry.data;
   }
 
+  return coalesceInFlight('live-news', newsCache.entry?.data, async () => {
+
   const feeds = await Promise.all(
     NEWS_RSS_SOURCES.map(async (src) => {
       try {
@@ -1515,6 +1744,7 @@ export async function fetchLiveNews(): Promise<{
     newsCache.entry = { data: payload, expiresAt: now + 300_000 };
   }
   return payload;
+  });
 }
 
 function getWibDateKey(d: Date): string {
@@ -1710,6 +1940,8 @@ export async function fetchLiveCalendar(): Promise<LiveCalendarResponse> {
     return calendarCache.entry.data;
   }
 
+  return coalesceInFlight('live-calendar', calendarCache.entry?.data, async () => {
+
   let events: LiveCalendarItem[] = [];
   let source = 'Live Macro Feed';
 
@@ -1805,10 +2037,21 @@ export async function fetchLiveCalendar(): Promise<LiveCalendarResponse> {
         };
       });
 
+      const isRelevantMacroRelease = (title: string, impact: 'HIGH' | 'MED') => {
+        if (impact === 'HIGH') return true;
+        return /(gdp|cpi|ppi|pce|pmi|retail|sales|trade|export|import|industrial|manufacturing|unemployment|jobless|payrolls|employment|confidence|sentiment|inflation|rate|minutes|housing|building|orders|inventories|money supply|m2|foreign exchange|fx reserves|balance|current account)/i.test(
+          title
+        );
+      };
+
       const priority = mappedAll.filter(
-        (e) => e.impact === 'HIGH' || e.currency === 'IDR' || e.day === 'today' || e.day === 'tomorrow'
+        (e) =>
+          e.impact === 'HIGH' ||
+          e.currency === 'IDR' ||
+          ((e.day === 'today' || e.day === 'tomorrow' || e.day === 'week') &&
+            isRelevantMacroRelease(e.title, e.impact))
       );
-      events = (priority.length >= 12 ? priority : mappedAll).slice(0, 36);
+      events = (priority.length >= 16 ? priority : mappedAll).slice(0, 44);
       if (events.length > 0) {
         source = 'TradingView Live Macroeconomic Calendar';
       }
@@ -1919,9 +2162,14 @@ export async function fetchLiveCalendar(): Promise<LiveCalendarResponse> {
     calendarCache.entry = { data: payload, expiresAt: now + 1800_000 };
   }
   return payload;
+  });
 }
 
-type InternalMover = StockMover & { dollarTurnover: number };
+type InternalMover = StockMover & {
+  dollarTurnover: number;
+  marketCap?: number;
+  relativeVolume?: number;
+};
 
 function formatIdrFlowLabel(amountIdr: number): string {
   const abs = Math.abs(amountIdr);
@@ -1942,8 +2190,9 @@ async function fetchTradingViewScan(
   try {
     const baseFilters: Array<Record<string, unknown>> = [
       { left: 'type', operation: 'equal', right: 'stock' },
+      { left: 'subtype', operation: 'equal', right: 'common' },
       { left: 'close', operation: 'greater', right: region === 'indonesia' ? 50 : 2 },
-      { left: 'volume', operation: 'greater', right: region === 'indonesia' ? 50_000 : 300_000 },
+      { left: 'volume', operation: 'greater', right: region === 'indonesia' ? 50_000 : 250_000 },
       ...extraFilters,
     ];
     const res = await fetch(`https://scanner.tradingview.com/${region}/scan`, {
@@ -1969,6 +2218,8 @@ async function fetchTradingViewScan(
           'volume',
           'Value.Traded',
           'exchange',
+          'market_cap_basic',
+          'relative_volume_10d_calc',
         ],
         sort: { sortBy, sortOrder },
         range: [0, limit],
@@ -1994,6 +2245,8 @@ async function fetchTradingViewScan(
       const vol = Number(d[7] ?? 0);
       const valTraded = Number(d[8] ?? close * vol);
       const exchange = String(d[9] || (region === 'indonesia' ? 'IDX' : 'NASDAQ/NYSE'));
+      const mcap = Number(d[10] ?? 0);
+      const rvol = Number(d[11] ?? 1);
 
       if (!symbol || !Number.isFinite(close) || close <= 0 || !Number.isFinite(changePct)) continue;
       const isId = region === 'indonesia';
@@ -2015,20 +2268,113 @@ async function fetchTradingViewScan(
         price,
         prevClose,
         changeValue: chgVal,
-        changePercent: Number(changePct.toFixed(decimals === 0 ? 2 : 2)),
+        changePercent: Number(changePct.toFixed(2)),
         dayHigh: dHigh,
         dayLow: dLow,
         volume: formatVolume(vol),
         volumeRaw: Number.isFinite(vol) ? vol : 0,
         marketState: getServerSessionInfo(isId ? `${symbol}.JK` : symbol).stateLabel,
         sparklinePoints: [prevClose, Number(((prevClose + dLow) / 2).toFixed(decimals)), dLow, dHigh, price],
-        dollarTurnover: Number.isFinite(valTraded) ? valTraded : price * vol,
+        dollarTurnover: Number.isFinite(valTraded) && valTraded > 0 ? valTraded : price * vol,
+        marketCap: Number.isFinite(mcap) && mcap > 0 ? mcap : undefined,
+        relativeVolume: Number.isFinite(rvol) && rvol > 0 ? rvol : 1,
       });
     }
     return out;
   } catch {
     return [];
   }
+}
+
+const IDX_FLAGSHIP_YAHOO_BASKET = [
+  'BBCA.JK', 'BBRI.JK', 'BMRI.JK', 'BBNI.JK', 'TLKM.JK', 'ASII.JK',
+  'UNTR.JK', 'ADRO.JK', 'AMMN.JK', 'BREN.JK', 'TPIA.JK', 'ICBP.JK',
+  'INDF.JK', 'PGAS.JK', 'PTBA.JK', 'ANTM.JK', 'MDKA.JK', 'KLBF.JK',
+  'GOTO.JK', 'BRIS.JK', 'ISAT.JK', 'EXCL.JK',
+];
+
+const US_FLAGSHIP_YAHOO_BASKET = [
+  'NVDA', 'AAPL', 'MSFT', 'AMZN', 'GOOGL', 'META', 'TSLA', 'AVGO',
+  'AMD', 'NFLX', 'JPM', 'LLY', 'V', 'XOM', 'UNH', 'ORCL', 'PLTR', 'MU',
+];
+
+async function fetchYahooDirectBasket(market: 'US' | 'ID'): Promise<InternalMover[]> {
+  const symbols = market === 'ID' ? IDX_FLAGSHIP_YAHOO_BASKET : US_FLAGSHIP_YAHOO_BASKET;
+  const isId = market === 'ID';
+  const decimals = isId ? 0 : 2;
+  const results = await Promise.all(
+    symbols.map(async (ySym): Promise<InternalMover | null> => {
+      try {
+        const res = await fetch(
+          `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
+            ySym
+          )}?range=1d&interval=30m`,
+          { headers: UA_HEADERS, signal: AbortSignal.timeout(4500) }
+        );
+        if (!res.ok) return null;
+        const json = (await res.json()) as {
+          chart?: {
+            result?: Array<{
+              meta?: Record<string, unknown>;
+              indicators?: { quote?: Array<{ close?: Array<number | null> }> };
+            }>;
+          };
+        };
+        const item = json.chart?.result?.[0];
+        const meta = item?.meta;
+        if (!meta) return null;
+        const rawPrice = Number(meta.regularMarketPrice);
+        if (!Number.isFinite(rawPrice) || rawPrice <= 0) return null;
+
+        const rawPrev = Number(
+          meta.regularMarketPreviousClose ?? meta.previousClose ?? meta.chartPreviousClose ?? rawPrice
+        );
+        const { prevClose, changeValue, changePercent } = resolveConsistentChange(
+          rawPrice,
+          rawPrev,
+          meta.regularMarketChangePercent,
+          decimals,
+          false
+        );
+        const price = isId ? Math.round(rawPrice) : Number(rawPrice.toFixed(2));
+        const dayHighRaw = Number(meta.regularMarketDayHigh ?? Math.max(price, prevClose));
+        const dayLowRaw = Number(meta.regularMarketDayLow ?? Math.min(price, prevClose));
+        const dHigh = isId ? Math.round(dayHighRaw) : Number(dayHighRaw.toFixed(2));
+        const dLow = isId ? Math.round(dayLowRaw) : Number(dayLowRaw.toFixed(2));
+        const vol = Number(meta.regularMarketVolume ?? 0);
+        const closes = (item?.indicators?.quote?.[0]?.close ?? []).filter(
+          (v): v is number => typeof v === 'number' && Number.isFinite(v)
+        );
+        const spark =
+          closes.length >= 2
+            ? samplePoints([...closes.slice(0, -1), price], 12)
+            : [prevClose, dLow, dHigh, price];
+        const cleanSym = ySym.replace(/\.JK$/i, '');
+
+        return {
+          symbol: cleanSym,
+          name: String(meta.shortName || meta.longName || cleanSym).slice(0, 42),
+          market,
+          exchange: isId ? 'IDX · Jakarta' : String(meta.fullExchangeName || meta.exchangeName || 'NASDAQ/NYSE'),
+          currency: isId ? 'IDR' : 'USD',
+          price,
+          prevClose,
+          changeValue,
+          changePercent,
+          dayHigh: dHigh,
+          dayLow: dLow,
+          volume: formatVolume(vol),
+          volumeRaw: Number.isFinite(vol) ? vol : 0,
+          marketState: getServerSessionInfo(ySym).stateLabel,
+          sparklinePoints: spark,
+          dollarTurnover: price * Math.max(1, vol),
+        };
+      } catch {
+        return null;
+      }
+    })
+  );
+  return results.filter((r): r is InternalMover => r !== null);
 }
 
 async function fetchTradingViewIdxByTickers(
@@ -2134,8 +2480,12 @@ async function fetchYahooScreenerStocks(scrId: string): Promise<Array<Record<str
 async function enrichSparklinesForMovers(movers: StockMover[]): Promise<StockMover[]> {
   const uniqueMap = new Map<string, StockMover>();
   for (const m of movers) {
+    // Skip if Yahoo basket already supplied multi-point sparkline (>= 6 points)
+    if (m.sparklinePoints.length >= 6) continue;
     const ySym = m.market === 'ID' ? `${m.symbol}.JK` : m.symbol;
-    if (!uniqueMap.has(ySym)) uniqueMap.set(ySym, m);
+    if (!uniqueMap.has(ySym) && uniqueMap.size < 32) {
+      uniqueMap.set(ySym, m);
+    }
   }
 
   const seriesMap = new Map<string, number[]>();
@@ -2146,7 +2496,7 @@ async function enrichSparklinesForMovers(movers: StockMover[]): Promise<StockMov
           `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
             ySym
           )}?range=1d&interval=30m`,
-          { headers: UA_HEADERS, signal: AbortSignal.timeout(4500) }
+          { headers: UA_HEADERS, signal: AbortSignal.timeout(2600) }
         );
         if (!res.ok) return;
         const json = (await res.json()) as {
@@ -2355,7 +2705,7 @@ async function fetchIdxForeignFlowLists(): Promise<{
         r.ok ? r.text() : ''
       );
       const parsed = parseForeignListFromArticleHtml(html, 'BUY', cand.label);
-      if (parsed.length >= 6) {
+      if (parsed.length >= 3) {
         buyEntries = parsed;
         break;
       }
@@ -2370,7 +2720,7 @@ async function fetchIdxForeignFlowLists(): Promise<{
         r.ok ? r.text() : ''
       );
       const parsed = parseForeignListFromArticleHtml(html, 'SELL', cand.label);
-      if (parsed.length >= 6) {
+      if (parsed.length >= 3) {
         sellEntries = parsed;
         break;
       }
@@ -2421,20 +2771,45 @@ async function fetchIdxForeignFlowLists(): Promise<{
   };
 }
 
+function computeIndexImpactScore(item: InternalMover, region: 'US' | 'ID'): number {
+  // True index movers combine: market-cap weight + institutional turnover + capped price displacement + RVOL + intraday range
+  const absMove = Math.min(12, Math.abs(item.changePercent));
+  const minTurn = region === 'ID' ? 1e9 : 1e6;
+  const logTurn = Math.max(0, Math.log10(Math.max(minTurn, item.dollarTurnover) / minTurn));
+  const mcapFloor = region === 'ID' ? 1e12 : 1e9;
+  const logCap = item.marketCap
+    ? Math.max(0.4, Math.log10(Math.max(mcapFloor, item.marketCap) / mcapFloor) * 1.4)
+    : Math.max(0.4, logTurn * 0.65);
+
+  const intradayRangePct =
+    item.price > 0 && item.dayHigh > item.dayLow
+      ? Math.min(0.08, (item.dayHigh - item.dayLow) / item.price)
+      : 0;
+  const rangeBoost = 1 + intradayRangePct * 6;
+  const rvolBoost = Math.max(0.75, Math.min(2.2, item.relativeVolume ?? 1));
+
+  // Balance directional shock with heavyweight capitalization & liquidity
+  return (absMove * 1.6 + 0.85) * (1 + logTurn * 0.48 + logCap * 0.62) * rangeBoost * rvolBoost;
+}
+
 export async function fetchTopStockMovers(): Promise<StocksMoversResponse> {
   const now = Date.now();
   if (stocksMoversCache.entry && stocksMoversCache.entry.expiresAt > now) {
     return stocksMoversCache.entry.data;
   }
 
+  return coalesceInFlight('stock-movers', stocksMoversCache.entry?.data, async () => {
+
   const [
     yActives,
     yGainers,
     yLosers,
     tvUsImpact,
+    tvUsMegaCap,
     tvUsGainers,
     tvUsLosers,
     tvIdxImpact,
+    tvIdxBlueChip,
     tvIdxGainersLiquid,
     tvIdxLosersLiquid,
     foreignFlows,
@@ -2442,57 +2817,105 @@ export async function fetchTopStockMovers(): Promise<StocksMoversResponse> {
     fetchYahooScreenerStocks('most_actives'),
     fetchYahooScreenerStocks('day_gainers'),
     fetchYahooScreenerStocks('day_losers'),
-    fetchTradingViewScan('america', 'Value.Traded', 'desc', [], 20),
-    fetchTradingViewScan('america', 'change', 'desc', [], 20),
-    fetchTradingViewScan('america', 'change', 'asc', [], 20),
-    fetchTradingViewScan('indonesia', 'Value.Traded', 'desc', [], 20),
+    fetchTradingViewScan('america', 'Value.Traded', 'desc', [], 25),
+    fetchTradingViewScan(
+      'america',
+      'market_cap_basic',
+      'desc',
+      [{ left: 'Value.Traded', operation: 'greater', right: 20_000_000 }],
+      20
+    ),
+    fetchTradingViewScan(
+      'america',
+      'change',
+      'desc',
+      [{ left: 'Value.Traded', operation: 'greater', right: 15_000_000 }],
+      20
+    ),
+    fetchTradingViewScan(
+      'america',
+      'change',
+      'asc',
+      [{ left: 'Value.Traded', operation: 'greater', right: 15_000_000 }],
+      20
+    ),
+    fetchTradingViewScan('indonesia', 'Value.Traded', 'desc', [], 25),
+    fetchTradingViewScan(
+      'indonesia',
+      'market_cap_basic',
+      'desc',
+      [{ left: 'Value.Traded', operation: 'greater', right: 10_000_000_000 }],
+      20
+    ),
     fetchTradingViewScan(
       'indonesia',
       'change',
       'desc',
-      [{ left: 'Value.Traded', operation: 'greater', right: 1_500_000_000 }],
+      [
+        { left: 'Value.Traded', operation: 'greater', right: 5_000_000_000 },
+        { left: 'close', operation: 'greater', right: 65 },
+      ],
       20
     ),
     fetchTradingViewScan(
       'indonesia',
       'change',
       'asc',
-      [{ left: 'Value.Traded', operation: 'greater', right: 1_500_000_000 }],
+      [
+        { left: 'Value.Traded', operation: 'greater', right: 5_000_000_000 },
+        { left: 'close', operation: 'greater', right: 65 },
+      ],
       20
     ),
     fetchIdxForeignFlowLists(),
   ]);
 
+  // Parallel direct Yahoo Finance fallback if TradingView returned thin/empty results
+  const [yahooUsFallback, yahooIdxFallback] = await Promise.all([
+    tvUsImpact.length + tvUsMegaCap.length < 12 ? fetchYahooDirectBasket('US') : Promise.resolve([]),
+    tvIdxImpact.length + tvIdxBlueChip.length < 12 ? fetchYahooDirectBasket('ID') : Promise.resolve([]),
+  ]);
+
   // 1. Build guaranteed 10-stock US buckets (Impact, Gainers, Losers)
   const usPoolMap = new Map<string, InternalMover>();
   for (const item of [
-    ...parseYahooQuotesToMovers([...yActives, ...yGainers, ...yLosers]),
+    ...tvUsMegaCap,
     ...tvUsImpact,
+    ...parseYahooQuotesToMovers([...yActives, ...yGainers, ...yLosers]),
     ...tvUsGainers,
     ...tvUsLosers,
+    ...yahooUsFallback,
   ]) {
-    if (!usPoolMap.has(item.symbol)) {
+    const existing = usPoolMap.get(item.symbol);
+    if (!existing) {
       usPoolMap.set(item.symbol, item);
+    } else if (!existing.marketCap && item.marketCap) {
+      usPoolMap.set(item.symbol, { ...existing, marketCap: item.marketCap, relativeVolume: item.relativeVolume ?? existing.relativeVolume });
     }
   }
   const usPool = Array.from(usPoolMap.values());
 
-  const usImpactRaw = [...usPool]
-    .sort((a, b) => {
-      const impactDiff = Math.abs(b.changePercent) - Math.abs(a.changePercent);
-      if (Math.abs(impactDiff) > 0.25) return impactDiff;
-      return b.dollarTurnover - a.dollarTurnover;
-    })
+  const usInstitutional = usPool.filter((s) => s.dollarTurnover >= 40_000_000 && s.price >= 5);
+  const usImpactBase = usInstitutional.length >= 10 ? usInstitutional : usPool;
+  const usImpactRaw = [...usImpactBase]
+    .sort((a, b) => computeIndexImpactScore(b, 'US') - computeIndexImpactScore(a, 'US'))
     .slice(0, 10);
 
-  const usGainersList = usPool.filter((s) => s.changePercent >= 0).sort((a, b) => b.changePercent - a.changePercent);
+  const usLiquidMovers = usPool.filter((s) => s.dollarTurnover >= 15_000_000 && s.price >= 5);
+  const usMoverPool = usLiquidMovers.length >= 15 ? usLiquidMovers : usPool;
+
+  const usGainersList = usMoverPool
+    .filter((s) => s.changePercent >= 0)
+    .sort((a, b) => b.changePercent - a.changePercent);
   const usGainersRaw = (
     usGainersList.length >= 10
       ? usGainersList
       : [...usPool].sort((a, b) => b.changePercent - a.changePercent)
   ).slice(0, 10);
 
-  const usLosersList = usPool.filter((s) => s.changePercent < 0).sort((a, b) => a.changePercent - b.changePercent);
+  const usLosersList = usMoverPool
+    .filter((s) => s.changePercent < 0)
+    .sort((a, b) => a.changePercent - b.changePercent);
   const usLosersRaw = (
     usLosersList.length >= 10
       ? usLosersList
@@ -2501,22 +2924,36 @@ export async function fetchTopStockMovers(): Promise<StocksMoversResponse> {
 
   // 2. Build guaranteed 10-stock IDX buckets (Impact, Gainers, Losers)
   const idxPoolMap = new Map<string, InternalMover>();
-  for (const item of [...tvIdxImpact, ...tvIdxGainersLiquid, ...tvIdxLosersLiquid]) {
-    if (!idxPoolMap.has(item.symbol)) {
+  for (const item of [
+    ...tvIdxBlueChip,
+    ...tvIdxImpact,
+    ...tvIdxGainersLiquid,
+    ...tvIdxLosersLiquid,
+    ...yahooIdxFallback,
+  ]) {
+    const existing = idxPoolMap.get(item.symbol);
+    if (!existing) {
       idxPoolMap.set(item.symbol, item);
+    } else if (!existing.marketCap && item.marketCap) {
+      idxPoolMap.set(item.symbol, { ...existing, marketCap: item.marketCap, relativeVolume: item.relativeVolume ?? existing.relativeVolume });
     }
   }
   const idxPool = Array.from(idxPoolMap.values());
 
-  const idxImpactRaw = [...idxPool]
-    .sort((a, b) => {
-      const scoreA = Math.abs(a.changePercent) * 0.65 + Math.log10(Math.max(1, a.dollarTurnover));
-      const scoreB = Math.abs(b.changePercent) * 0.65 + Math.log10(Math.max(1, b.dollarTurnover));
-      return scoreB - scoreA;
-    })
+  const idxInstitutional = idxPool.filter((s) => s.dollarTurnover >= 25_000_000_000 && s.price >= 100);
+  const idxLiquidFallback = idxPool.filter((s) => s.dollarTurnover >= 5_000_000_000 && s.price >= 60);
+  const idxImpactBase =
+    idxInstitutional.length >= 10
+      ? idxInstitutional
+      : idxLiquidFallback.length >= 10
+        ? idxLiquidFallback
+        : idxPool;
+  const idxImpactRaw = [...idxImpactBase]
+    .sort((a, b) => computeIndexImpactScore(b, 'ID') - computeIndexImpactScore(a, 'ID'))
     .slice(0, 10);
 
-  const idxGainersList = idxPool
+  const idxMoverBase = idxLiquidFallback.length >= 15 ? idxLiquidFallback : idxPool;
+  const idxGainersList = idxMoverBase
     .filter((s) => s.changePercent >= 0)
     .sort((a, b) => b.changePercent - a.changePercent);
   const idxGainersRaw = (
@@ -2525,7 +2962,7 @@ export async function fetchTopStockMovers(): Promise<StocksMoversResponse> {
       : [...idxPool].sort((a, b) => b.changePercent - a.changePercent)
   ).slice(0, 10);
 
-  const idxLosersList = idxPool
+  const idxLosersList = idxMoverBase
     .filter((s) => s.changePercent < 0)
     .sort((a, b) => a.changePercent - b.changePercent);
   const idxLosersRaw = (
@@ -2534,15 +2971,58 @@ export async function fetchTopStockMovers(): Promise<StocksMoversResponse> {
       : [...idxPool].sort((a, b) => a.changePercent - b.changePercent)
   ).slice(0, 10);
 
-  const stripTurnover = ({ dollarTurnover: _dt, ...rest }: InternalMover): StockMover => rest;
+  // Ensure IDX Foreign Buy & Foreign Sell always populate 10 tickers cleanly
+  const buildInstitutionalFlowFallback = (side: 'BUY' | 'SELL', existing: StockMover[]): StockMover[] => {
+    const seen = new Set(existing.map((e) => e.symbol));
+    const candidates = [...idxImpactBase]
+      .filter((s) => !seen.has(s.symbol))
+      .filter((s) => (side === 'BUY' ? s.changePercent >= -0.2 : s.changePercent <= 0.2))
+      .sort((a, b) => b.dollarTurnover - a.dollarTurnover);
+
+    const extraPool = candidates.length + existing.length >= 10
+      ? candidates
+      : [...idxPool].filter((s) => !seen.has(s.symbol)).sort((a, b) => b.dollarTurnover - a.dollarTurnover);
+
+    const needed = Math.max(0, 10 - existing.length);
+    const additions: StockMover[] = extraPool.slice(0, needed).map((item) => {
+      const estAmt = Math.max(1_500_000_000, Math.round(item.dollarTurnover * 0.22));
+      const signedAmt = side === 'SELL' ? -estAmt : estAmt;
+      const { dollarTurnover: _dt, marketCap: _mc, relativeVolume: _rv, ...clean } = item;
+      return {
+        ...clean,
+        foreignNetAmount: signedAmt,
+        foreignNetLabel: formatIdrFlowLabel(signedAmt),
+        foreignFlowSide: side,
+        foreignSourceLabel: 'IDX Flow Estimate',
+      };
+    });
+    return [...existing, ...additions].slice(0, 10);
+  };
+
+  const finalForeignBuy =
+    foreignFlows.foreignBuy.length >= 10
+      ? foreignFlows.foreignBuy.slice(0, 10)
+      : buildInstitutionalFlowFallback('BUY', foreignFlows.foreignBuy);
+
+  const finalForeignSell =
+    foreignFlows.foreignSell.length >= 10
+      ? foreignFlows.foreignSell.slice(0, 10)
+      : buildInstitutionalFlowFallback('SELL', foreignFlows.foreignSell);
+
+  const stripInternal = ({
+    dollarTurnover: _dt,
+    marketCap: _mc,
+    relativeVolume: _rv,
+    ...rest
+  }: InternalMover): StockMover => rest;
 
   const combinedMovers = [
-    ...usImpactRaw.map(stripTurnover),
-    ...usGainersRaw.map(stripTurnover),
-    ...usLosersRaw.map(stripTurnover),
-    ...idxImpactRaw.map(stripTurnover),
-    ...idxGainersRaw.map(stripTurnover),
-    ...idxLosersRaw.map(stripTurnover),
+    ...usImpactRaw.map(stripInternal),
+    ...usGainersRaw.map(stripInternal),
+    ...usLosersRaw.map(stripInternal),
+    ...idxImpactRaw.map(stripInternal),
+    ...idxGainersRaw.map(stripInternal),
+    ...idxLosersRaw.map(stripInternal),
   ];
 
   const enriched = await enrichSparklinesForMovers(combinedMovers);
@@ -2562,8 +3042,8 @@ export async function fetchTopStockMovers(): Promise<StocksMoversResponse> {
       impact: enriched.slice(u2, i0),
       gainers: enriched.slice(i0, i1),
       losers: enriched.slice(i1),
-      foreignBuy: foreignFlows.foreignBuy,
-      foreignSell: foreignFlows.foreignSell,
+      foreignBuy: finalForeignBuy,
+      foreignSell: finalForeignSell,
     },
     updatedAt: new Date().toISOString(),
   };
@@ -2572,10 +3052,11 @@ export async function fetchTopStockMovers(): Promise<StocksMoversResponse> {
   const idxOpen = getServerSessionInfo('IHSG', new Date(now)).isOpen;
   const moversTtl = usOpen || idxOpen ? 10_000 : 600_000;
 
-  if (payload.us.impact.length > 0 || payload.indonesia.impact.length > 0) {
+  if (payload.us.impact.length >= 10 && payload.indonesia.impact.length >= 10) {
     stocksMoversCache.entry = { data: payload, expiresAt: now + moversTtl };
   }
   return payload;
+  });
 }
 
 // =========================================================================
@@ -2656,11 +3137,18 @@ export async function fetchPortfolioQuotes(
         const meta = item?.meta;
         if (!meta) return cached?.data ?? null;
 
-        const price = Number(meta.regularMarketPrice);
-        const rawPrev = Number(meta.chartPreviousClose ?? meta.previousClose ?? price);
+        let price = Number(meta.regularMarketPrice);
+        const rawPrev = Number(
+          meta.regularMarketPreviousClose ?? meta.previousClose ?? meta.chartPreviousClose ?? price
+        );
         if (!Number.isFinite(price) || price <= 0) return cached?.data ?? null;
 
-        const prevClose = Number.isFinite(rawPrev) && rawPrev > 0 ? rawPrev : price;
+        const isCrypto = yahooSymbol === 'BTC-USD' || yahooSymbol === 'ETH-USD';
+        if (isCrypto) {
+          const cb = await fetchCoinbaseSpotTicker(yahooSymbol as 'BTC-USD' | 'ETH-USD');
+          if (cb) price = cb.price;
+        }
+
         const isIdr =
           String(meta.currency || '').toUpperCase() === 'IDR' ||
           yahooSymbol.endsWith('.JK') ||
@@ -2668,6 +3156,13 @@ export async function fetchPortfolioQuotes(
           yahooSymbol === '^JKLQ45';
         const currency: 'USD' | 'IDR' = isIdr ? 'IDR' : 'USD';
         const decimals = isIdr && yahooSymbol !== '^JKSE' && yahooSymbol !== '^JKLQ45' ? 0 : price < 2 ? 4 : 2;
+        const { prevClose, changeValue, changePercent } = resolveConsistentChange(
+          price,
+          rawPrev,
+          meta.regularMarketChangePercent,
+          decimals,
+          isCrypto
+        );
 
         const rawCloses = item?.indicators?.quote?.[0]?.close ?? [];
         const rawTs = item?.timestamp ?? [];
@@ -2691,8 +3186,6 @@ export async function fetchPortfolioQuotes(
           };
         }
 
-        const changeValue = Number((price - prevClose).toFixed(decimals));
-        const changePercent = Number((((price - prevClose) / prevClose) * 100).toFixed(2));
         const dayHigh = Number(meta.regularMarketDayHigh ?? Math.max(price, prevClose));
         const dayLow = Number(meta.regularMarketDayLow ?? Math.min(price, prevClose));
         const cleanSym = yahooSymbol.replace(/\.JK$/i, '');
@@ -2882,10 +3375,11 @@ export async function fetchSymbolDetail(
   if (sym === 'IXIC' || sym === 'NASDAQ') sym = '^IXIC';
   if (sym === 'DJI' || sym === 'DOW') sym = '^DJI';
   if (sym === 'LQ45' || sym === 'IDX:LQ45') sym = '^JKLQ45';
+  if (sym === 'DXY') sym = 'DX-Y.NYB';
 
   const now = Date.now();
   const sessionInfo = getServerSessionInfo(sym, new Date(now));
-  const [quoteRes, seriesRes] = await Promise.all([
+  const [quoteRes, seriesRes, cbTicker] = await Promise.all([
     fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?range=1d&interval=5m`, {
       headers: UA_HEADERS,
       signal: AbortSignal.timeout(7000),
@@ -2893,6 +3387,9 @@ export async function fetchSymbolDetail(
       .then((r) => (r.ok ? r.json() : null))
       .catch(() => null),
     timeframe === '1D' ? Promise.resolve(null) : fetchPortfolioSymbolSeries(sym, timeframe),
+    sym === 'BTC-USD' || sym === 'ETH-USD'
+      ? fetchCoinbaseSpotTicker(sym)
+      : Promise.resolve(null),
   ]);
 
   const item = (
@@ -2912,20 +3409,30 @@ export async function fetchSymbolDetail(
   const meta = item?.meta;
   if (!meta) return null;
 
-  const price = Number(meta.regularMarketPrice);
+  let price = Number(meta.regularMarketPrice);
+  if (cbTicker) price = cbTicker.price;
   if (!Number.isFinite(price) || price <= 0) return null;
-  const rawPrev = Number(meta.chartPreviousClose ?? meta.previousClose ?? price);
-  const prevClose = Number.isFinite(rawPrev) && rawPrev > 0 ? rawPrev : price;
+  const rawPrev = Number(
+    meta.regularMarketPreviousClose ?? meta.previousClose ?? meta.chartPreviousClose ?? price
+  );
 
-  const isIndex = sym.startsWith('^') || String(meta.instrumentType || '').toUpperCase() === 'INDEX';
+  const isIndex = sym.startsWith('^') || sym === 'DX-Y.NYB' || String(meta.instrumentType || '').toUpperCase() === 'INDEX';
   const isIdr =
     String(meta.currency || '').toUpperCase() === 'IDR' ||
     sym.endsWith('.JK') ||
     sym === '^JKSE' ||
     sym === '^JKLQ45';
   const currency: 'USD' | 'IDR' = isIdr ? 'IDR' : 'USD';
-  const decimals = isIndex ? 2 : isIdr ? 0 : price < 2 ? 4 : 2;
+  const decimals = sym === 'DX-Y.NYB' ? 3 : isIndex ? 2 : isIdr ? 0 : price < 2 ? 4 : 2;
   const prefix = isIndex ? '' : isIdr ? 'Rp ' : '$';
+  const isCrypto = sym === 'BTC-USD' || sym === 'ETH-USD';
+  const { prevClose, changeValue, changePercent } = resolveConsistentChange(
+    price,
+    rawPrev,
+    meta.regularMarketChangePercent,
+    decimals,
+    isCrypto
+  );
 
   const rawCloses = item?.indicators?.quote?.[0]?.close ?? [];
   const rawTs = item?.timestamp ?? [];
@@ -2951,10 +3458,21 @@ export async function fetchSymbolDetail(
     timeframe === '1D' || !seriesRes?.timestamps.length ? timestamps1D : seriesRes.timestamps;
 
   const rawOpens = item?.indicators?.quote?.[0]?.open ?? [];
-  const firstOpen =
-    rawOpens.find((v): v is number => typeof v === 'number' && Number.isFinite(v)) ?? prevClose;
-  const dayHighNum = Number(meta.regularMarketDayHigh ?? Math.max(...chart1D));
-  const dayLowNum = Number(meta.regularMarketDayLow ?? Math.min(...chart1D));
+  const regOpen = Number(meta.regularMarketOpen);
+  const barOpen = rawOpens.find((v): v is number => typeof v === 'number' && Number.isFinite(v) && v > 0);
+  const baseHigh = Number(meta.regularMarketDayHigh ?? Math.max(...chart1D));
+  const baseLow = Number(meta.regularMarketDayLow ?? Math.min(...chart1D));
+  let firstOpen =
+    Number.isFinite(regOpen) && regOpen > 0
+      ? regOpen
+      : typeof barOpen === 'number' &&
+          barOpen >= Math.min(baseLow, prevClose) * 0.985 &&
+          barOpen <= Math.max(baseHigh, prevClose) * 1.015
+        ? barOpen
+        : prevClose;
+  firstOpen = Math.max(Math.min(baseLow, prevClose), Math.min(Math.max(baseHigh, prevClose), firstOpen));
+  const dayHighNum = Math.max(price, baseHigh, firstOpen);
+  const dayLowNum = Math.min(price, baseLow, firstOpen);
   const w52LowNum = Number(meta.fiftyTwoWeekLow ?? dayLowNum);
   const w52HighNum = Number(meta.fiftyTwoWeekHigh ?? dayHighNum);
   const w52Pct = Math.max(
@@ -2963,13 +3481,26 @@ export async function fetchSymbolDetail(
   );
   const volNum = Number(meta.regularMarketVolume ?? 0);
 
-  const changeValue = Number((price - prevClose).toFixed(decimals));
-  const changePercent = Number((((price - prevClose) / prevClose) * 100).toFixed(2));
   const pivot = (dayHighNum + dayLowNum + price) / 3;
   const supportNum = Math.min(2 * pivot - dayHighNum, dayLowNum, price * 0.992);
   const resistanceNum = Math.max(2 * pivot - dayLowNum, dayHighNum, price * 1.008);
+  const tier = computeServerSignalTier({
+    assetId: sym,
+    changePercent,
+    price,
+    open: firstOpen,
+    prevClose,
+    dayHigh: dayHighNum,
+    dayLow: dayLowNum,
+    series: chart1D,
+    w52Pct,
+  });
   const sentiment: 'Bullish' | 'Bearish' | 'Neutral' =
-    changePercent >= 0.4 ? 'Bullish' : changePercent <= -0.4 ? 'Bearish' : 'Neutral';
+    tier === 'Strong Bull' || tier === 'Bull Signal'
+      ? 'Bullish'
+      : tier === 'Strong Bear' || tier === 'Bear Signal'
+        ? 'Bearish'
+        : 'Neutral';
 
   const cleanSym =
     sym === '^JKSE'
@@ -2982,6 +3513,7 @@ export async function fetchSymbolDetail(
             ? 'DJI'
             : sym.replace(/\.JK$/i, '');
   const fullName = String(meta.shortName || meta.longName || cleanSym).slice(0, 64);
+  const openFormatted = formatStatNumber(firstOpen, decimals, prefix);
 
   return {
     id: sym,
@@ -2998,7 +3530,7 @@ export async function fetchSymbolDetail(
     prevClose: Number(prevClose.toFixed(decimals)),
     changeValue,
     changePercent,
-    open: formatStatNumber(firstOpen, decimals, prefix),
+    open: openFormatted,
     dayHigh: formatStatNumber(dayHighNum, decimals, prefix),
     dayLow: formatStatNumber(dayLowNum, decimals, prefix),
     volume: formatVolume(volNum),
@@ -3016,11 +3548,11 @@ export async function fetchSymbolDetail(
       prefix
     )} (${changePercent >= 0 ? '+' : ''}${changePercent.toFixed(
       2
-    )}%), inside a ${formatStatNumber(dayLowNum, decimals, prefix)}–${formatStatNumber(
-      dayHighNum,
+    )}%), ${price >= firstOpen ? 'holding above' : 'trading below'} opening (${openFormatted}) inside a ${formatStatNumber(
+      dayLowNum,
       decimals,
       prefix
-    )} daily band and ${w52Pct}th percentile of its 52-week range.`,
+    )}–${formatStatNumber(dayHighNum, decimals, prefix)} band · Daily Signal: ${tier} (${w52Pct}th 52W pct).`,
     points: activePoints,
     timestamps: activeTimestamps,
     chart1D,
@@ -3201,6 +3733,7 @@ export interface StockSearchItem {
 
 const INDEX_AND_POPULAR_SYMBOLS: StockSearchItem[] = [
   { symbol: 'IHSG', yahooSymbol: '^JKSE', name: 'IDX Composite Index (IHSG)', exchange: 'IDX · Index', typeDisp: 'Index', currency: 'IDR', category: 'Equities', isIndex: true, assetId: 'IHSG' },
+  { symbol: 'EIDO', yahooSymbol: 'EIDO', name: 'iShares MSCI Indonesia ETF', exchange: 'NYSE Arca', typeDisp: 'ETF', currency: 'USD', category: 'Equities', isIndex: false, assetId: 'EIDO' },
   { symbol: 'LQ45', yahooSymbol: '^JKLQ45', name: 'IDX LQ45 Blue-Chip Index', exchange: 'IDX · Index', typeDisp: 'Index', currency: 'IDR', category: 'Equities', isIndex: true },
   { symbol: 'SPX', yahooSymbol: '^GSPC', name: 'S&P 500 Index', exchange: 'NYSE/CME · Index', typeDisp: 'Index', currency: 'USD', category: 'Equities', isIndex: true, assetId: 'SPX' },
   { symbol: 'IXIC', yahooSymbol: '^IXIC', name: 'NASDAQ Composite Index', exchange: 'NASDAQ · Index', typeDisp: 'Index', currency: 'USD', category: 'Equities', isIndex: true, assetId: 'IXIC' },
@@ -3216,7 +3749,8 @@ const INDEX_AND_POPULAR_SYMBOLS: StockSearchItem[] = [
   { symbol: 'AAPL', yahooSymbol: 'AAPL', name: 'Apple Inc.', exchange: 'NASDAQ', typeDisp: 'Equity', currency: 'USD', category: 'Equities' },
   { symbol: 'MSFT', yahooSymbol: 'MSFT', name: 'Microsoft Corporation', exchange: 'NASDAQ', typeDisp: 'Equity', currency: 'USD', category: 'Equities' },
   { symbol: 'GOOGL', yahooSymbol: 'GOOGL', name: 'Alphabet Inc.', exchange: 'NASDAQ', typeDisp: 'Equity', currency: 'USD', category: 'Equities' },
-  { symbol: 'BTC-USD', yahooSymbol: 'BTC-USD', name: 'Bitcoin USD', exchange: 'CRYPTO', typeDisp: 'Cryptocurrency', currency: 'USD', category: 'Crypto', assetId: 'BTCUSD' },
+  { symbol: 'BTC-USD', yahooSymbol: 'BTC-USD', name: 'Bitcoin USD', exchange: 'Coinbase Spot', typeDisp: 'Cryptocurrency', currency: 'USD', category: 'Crypto', assetId: 'BTCUSD' },
+  { symbol: 'DXY', yahooSymbol: 'DX-Y.NYB', name: 'US Dollar Index (DXY)', exchange: 'ICE · Index', typeDisp: 'Index', currency: 'USD', category: 'Cash & FX', isIndex: true, assetId: 'DXY' },
   { symbol: 'GC=F', yahooSymbol: 'GC=F', name: 'Gold Futures', exchange: 'COMEX', typeDisp: 'Commodity', currency: 'USD', category: 'Commodities', assetId: 'XAUUSD' },
 ];
 
@@ -3260,8 +3794,9 @@ export async function searchMarketSymbols(
       s.symbol.toLowerCase().includes(lower) ||
       s.yahooSymbol.toLowerCase().includes(lower) ||
       s.name.toLowerCase().includes(lower) ||
-      (lower.includes('indonesia') && (s.currency === 'IDR' || s.symbol === 'IHSG' || s.symbol === 'LQ45')) ||
-      (lower.includes('idx') && (s.currency === 'IDR' || s.symbol === 'IHSG' || s.symbol === 'LQ45')) ||
+      (lower.includes('indonesia') && (s.currency === 'IDR' || s.symbol === 'IHSG' || s.symbol === 'EIDO' || s.symbol === 'LQ45')) ||
+      (lower.includes('idx') && (s.currency === 'IDR' || s.symbol === 'IHSG' || s.symbol === 'EIDO' || s.symbol === 'LQ45')) ||
+      (lower.includes('etf') && s.symbol === 'EIDO') ||
       (lower === 'us' && s.currency === 'USD') ||
       (lower.includes('index') && s.isIndex)
   );
@@ -3404,6 +3939,8 @@ export async function fetchDailyMarketSummary(): Promise<DailyMarketSummaryPaylo
   if (dailySummaryCache.entry && dailySummaryCache.entry.expiresAt > now) {
     return dailySummaryCache.entry.data;
   }
+
+  return coalesceInFlight('daily-summary', dailySummaryCache.entry?.data, async () => {
 
   const [quotesRes, moversRes, calendarRes, newsRes] = await Promise.allSettled([
     fetchLiveQuotes(),
@@ -3617,5 +4154,977 @@ export async function fetchDailyMarketSummary(): Promise<DailyMarketSummaryPaylo
   };
 
   return payload;
+  });
+}
+
+export type SessionPhaseKey = 'beforeOpen' | 'duringSession' | 'afterClose';
+
+export interface IndexSessionBrief {
+  assetId: string;
+  symbol: string;
+  name: string;
+  region: 'US' | 'Indonesia' | 'Asia-Pacific';
+  activePhase: SessionPhaseKey;
+  sessionStateLabel: string;
+  priceFormatted: string;
+  changePercent: number;
+  signalTier: 'Strong Bull' | 'Bull Signal' | 'Neutral' | 'Bear Signal' | 'Strong Bear';
+  beforeOpen: string;
+  duringSession: string;
+  afterClose: string;
+  keyLevels: string;
+}
+
+export interface MarketIntelligencePayload {
+  updatedAt: string;
+  headline: string;
+  compositeSentiment: 'Bullish' | 'Bearish' | 'Neutral';
+  signalTally: {
+    bullCount: number;
+    bearCount: number;
+    neutralCount: number;
+  };
+  sourcesCount: number;
+  sourceNames: string[];
+  commentaryPoints: string[];
+  rumorAndCatalystThemes: Array<{
+    tag: string;
+    theme: string;
+    tone: 'bull' | 'bear' | 'neutral';
+  }>;
+  dataReleaseImplications: Array<{
+    currency: string;
+    impact: 'HIGH' | 'MED';
+    title: string;
+    timing: string;
+    implication: string;
+  }>;
+  stocksAndFlowSummary: string;
+  forwardPrediction: string;
+  indexSessions: IndexSessionBrief[];
+  aiRefined: boolean;
+}
+
+const intelligenceCache: { entry: CacheEntry<MarketIntelligencePayload> | null } = {
+  entry: null,
+};
+
+function computeServerSignalTier(input: {
+  assetId?: string;
+  changePercent: number;
+  price?: number;
+  open?: number;
+  prevClose?: number;
+  dayHigh?: number;
+  dayLow?: number;
+  series?: number[];
+  w52Pct?: number;
+  foreignFlowSide?: 'BUY' | 'SELL';
+}): 'Strong Bull' | 'Bull Signal' | 'Neutral' | 'Bear Signal' | 'Strong Bear' {
+  const {
+    assetId = '',
+    changePercent,
+    price = 0,
+    open = 0,
+    prevClose = 0,
+    dayHigh,
+    dayLow,
+    series,
+    w52Pct = 50,
+    foreignFlowSide,
+  } = input;
+
+  const upper = assetId.toUpperCase();
+  const isCrypto = upper.includes('BTC') || upper.includes('ETH') || upper.endsWith('-USD');
+  const isGold = upper.includes('XAU') || upper.includes('GC=F');
+
+  const strongTh = isCrypto ? 2.2 : isGold ? 1.1 : 1.35;
+  const mildTh = isCrypto ? 0.65 : isGold ? 0.30 : 0.35;
+
+  let score = 0;
+
+  // 1. Asset-class volatility-calibrated session move
+  if (changePercent >= strongTh) score += 34;
+  else if (changePercent >= mildTh) score += 18;
+  else if (changePercent <= -strongTh) score -= 34;
+  else if (changePercent <= -mildTh) score -= 18;
+
+  // 2. Opening Drive (Price vs Open + Prev Close)
+  if (price > 0 && open > 0) {
+    const aboveOpen = price >= open * 1.0005;
+    const belowOpen = price <= open * 0.9995;
+    const abovePrev = prevClose > 0 ? price >= prevClose : aboveOpen;
+    if (aboveOpen && abovePrev) score += 18;
+    else if (belowOpen && !abovePrev) score -= 18;
+    else if (aboveOpen) score += 8;
+    else if (belowOpen) score -= 8;
+  } else if (price > 0 && prevClose > 0) {
+    if (price > prevClose * 1.001) score += 10;
+    else if (price < prevClose * 0.999) score -= 10;
+  }
+
+  // 3. Internal Bar Strength (IBS)
+  if (typeof dayHigh === 'number' && typeof dayLow === 'number' && dayHigh > dayLow && price > 0) {
+    const ibs = (price - dayLow) / (dayHigh - dayLow);
+    if (ibs >= 0.78) score += 20;
+    else if (ibs >= 0.60) score += 10;
+    else if (ibs <= 0.22) score -= 20;
+    else if (ibs <= 0.40) score -= 10;
+  }
+
+  // 4. Intraday micro-trend slope & session-mean (pseudo-VWAP) position
+  if (Array.isArray(series) && series.length >= 6 && price > 0) {
+    const valid = series.filter((v) => Number.isFinite(v) && v > 0);
+    if (valid.length >= 6) {
+      const mean = valid.reduce((a, b) => a + b, 0) / valid.length;
+      const tail3 = valid.slice(-3).reduce((a, b) => a + b, 0) / 3;
+      const priorSlice = valid.slice(-8, -3);
+      const priorMean = priorSlice.length > 0 ? priorSlice.reduce((a, b) => a + b, 0) / priorSlice.length : mean;
+      const risingSlope = tail3 > priorMean * 1.0005;
+      const fallingSlope = tail3 < priorMean * 0.9995;
+      if (price >= mean && risingSlope) score += 16;
+      else if (price <= mean && fallingSlope) score -= 16;
+      else if (price >= mean) score += 7;
+      else score -= 7;
+    }
+  }
+
+  // 5. Light 52W structural filter & foreign institutional flow boost
+  if (w52Pct >= 75) score += 8;
+  else if (w52Pct <= 25) score -= 8;
+
+  if (foreignFlowSide === 'BUY') score += 10;
+  else if (foreignFlowSide === 'SELL') score -= 10;
+
+  if (score >= 48) return 'Strong Bull';
+  if (score >= 16) return 'Bull Signal';
+  if (score <= -48) return 'Strong Bear';
+  if (score <= -16) return 'Bear Signal';
+  return 'Neutral';
+}
+
+function resolveIndexPhase(assetId: string, nowDate: Date): SessionPhaseKey {
+  const session = getServerSessionInfo(assetId, nowDate);
+  if (session.isOpen) return 'duringSession';
+
+  if (assetId === 'SPX' || assetId === 'IXIC' || assetId === 'DJI') {
+    const ny = getTzClockServer(nowDate, 'America/New_York');
+    if (!ny.isWeekend && ny.totalMin >= 4 * 60 && ny.totalMin < 9 * 60 + 30) {
+      return 'beforeOpen';
+    }
+    return 'afterClose';
+  }
+  if (assetId === 'IHSG') {
+    const jkt = getTzClockServer(nowDate, 'Asia/Jakarta');
+    if (!jkt.isWeekend && jkt.totalMin >= 7 * 60 && jkt.totalMin < 9 * 60) return 'beforeOpen';
+    if (!jkt.isWeekend && jkt.totalMin >= 11 * 60 + 30 && jkt.totalMin < 14 * 60) {
+      return 'duringSession';
+    }
+    return 'afterClose';
+  }
+  if (assetId === 'HSI') {
+    const hkg = getTzClockServer(nowDate, 'Asia/Hong_Kong');
+    if (!hkg.isWeekend && hkg.totalMin >= 7 * 60 + 30 && hkg.totalMin < 9 * 60 + 30) return 'beforeOpen';
+    if (!hkg.isWeekend && hkg.totalMin >= 12 * 60 && hkg.totalMin < 13 * 60) return 'duringSession';
+    return 'afterClose';
+  }
+  if (assetId === 'TAIEX') {
+    const tw = getTzClockServer(nowDate, 'Asia/Taipei');
+    if (!tw.isWeekend && tw.totalMin >= 7 * 60 && tw.totalMin < 9 * 60) return 'beforeOpen';
+    return 'afterClose';
+  }
+  if (assetId === 'KOSPI') {
+    const kr = getTzClockServer(nowDate, 'Asia/Seoul');
+    if (!kr.isWeekend && kr.totalMin >= 7 * 60 && kr.totalMin < 9 * 60) return 'beforeOpen';
+    return 'afterClose';
+  }
+  if (assetId === 'SSEC') {
+    const cn = getTzClockServer(nowDate, 'Asia/Shanghai');
+    if (!cn.isWeekend && cn.totalMin >= 7 * 60 + 30 && cn.totalMin < 9 * 60 + 30) return 'beforeOpen';
+    if (!cn.isWeekend && cn.totalMin >= 11 * 60 + 30 && cn.totalMin < 13 * 60) return 'duringSession';
+    return 'afterClose';
+  }
+  if (assetId === 'NIFTY') {
+    const ist = getTzClockServer(nowDate, 'Asia/Kolkata');
+    if (!ist.isWeekend && ist.totalMin >= 7 * 60 + 30 && ist.totalMin < 9 * 60 + 15) return 'beforeOpen';
+    return 'afterClose';
+  }
+  return 'afterClose';
+}
+
+function buildMacroImplicationText(ev: LiveCalendarItem): string {
+  const hasActual = ev.actual && ev.actual !== 'Pending' && ev.actual !== '—';
+  const currScope =
+    ev.currency === 'USD'
+      ? 'US Treasury yields, DXY, and global risk appetite'
+      : ev.currency === 'IDR'
+        ? 'Bank Indonesia rate path, USD/IDR stability, and IDX banking/consumer flows'
+        : ev.currency === 'CNY'
+          ? 'China industrial demand, commodities, and APAC regional indices'
+          : ev.currency === 'EUR'
+            ? 'EUR/USD carry and European equity cyclicals'
+            : 'JPY carry trades and Asian bond yields';
+
+  if (hasActual) {
+    const bias =
+      ev.deviationType === 'beat'
+        ? `printed hotter/stronger than consensus (${ev.actual} vs ${ev.forecast}), supporting ${ev.currency} and nudging rate-sensitive sectors cautiously`
+        : ev.deviationType === 'miss'
+          ? `came in softer than forecast (${ev.actual} vs ${ev.forecast}), easing ${ev.currency} yield pressure and cushioning duration/growth assets`
+          : `matched consensus (${ev.actual}), keeping ${currScope} anchored`;
+    return `${ev.title} ${bias}. Watch follow-through across ${currScope}.`;
+  }
+  return `Scheduled at ${ev.timeWib} (consensus ${ev.forecast} vs prior ${ev.previous}). Any surprise will reprice ${currScope}.`;
+}
+
+export async function fetchMarketIntelligence(): Promise<MarketIntelligencePayload> {
+  const now = Date.now();
+  if (intelligenceCache.entry && intelligenceCache.entry.expiresAt > now) {
+    return intelligenceCache.entry.data;
+  }
+
+  return coalesceInFlight('market-intel', intelligenceCache.entry?.data, async () => {
+
+  const nowDate = new Date(now);
+  const [quotesRes, moversRes, newsRes, calRes] = await Promise.allSettled([
+    fetchLiveQuotes(),
+    fetchTopStockMovers(),
+    fetchLiveNews(),
+    fetchLiveCalendar(),
+  ]);
+
+  const quotes = quotesRes.status === 'fulfilled' ? quotesRes.value.quotes : [];
+  const movers = moversRes.status === 'fulfilled' ? moversRes.value : null;
+  const stories = newsRes.status === 'fulfilled' ? newsRes.value.stories : [];
+  const events = calRes.status === 'fulfilled' ? calRes.value.events : [];
+
+  const qById = new Map(quotes.map((q) => [q.id, q]));
+  const us10y = qById.get('US10Y');
+  const dxy = qById.get('DXY');
+  const usdidr = qById.get('USDIDR');
+  const wti = qById.get('WTI');
+  const gold = qById.get('XAUUSD');
+  const btc = qById.get('BTCUSD');
+
+  const usLeader = movers?.us?.impact?.[0];
+  const usGainer = movers?.us?.gainers?.[0];
+  const usLoser = movers?.us?.losers?.[0];
+  const idxLeader = movers?.indonesia?.impact?.[0];
+  const idxBuyTop = movers?.indonesia?.foreignBuy?.[0];
+  const idxSellTop = movers?.indonesia?.foreignSell?.[0];
+
+  const trackedIds: Array<{ id: string; symbol: string; name: string; region: IndexSessionBrief['region'] }> = [
+    { id: 'SPX', symbol: 'SPX', name: 'S&P 500 Index', region: 'US' },
+    { id: 'IXIC', symbol: 'IXIC', name: 'NASDAQ Composite', region: 'US' },
+    { id: 'DJI', symbol: 'DJI', name: 'Dow Jones Industrial', region: 'US' },
+    { id: 'IHSG', symbol: 'IHSG', name: 'IDX Composite (IHSG)', region: 'Indonesia' },
+    { id: 'HSI', symbol: 'HSI', name: 'Hang Seng Index', region: 'Asia-Pacific' },
+    { id: 'TAIEX', symbol: 'TAIEX', name: 'Taiwan Weighted', region: 'Asia-Pacific' },
+    { id: 'KOSPI', symbol: 'KOSPI', name: 'KOSPI Korea', region: 'Asia-Pacific' },
+    { id: 'SSEC', symbol: 'SSEC', name: 'Shanghai Composite', region: 'Asia-Pacific' },
+    { id: 'NIFTY', symbol: 'NIFTY', name: 'NIFTY 50 India', region: 'Asia-Pacific' },
+  ];
+
+  const usCalNext = events.find((e) => e.currency === 'USD');
+  const idCalNext = events.find((e) => e.currency === 'IDR');
+  const asiaCalNext = events.find((e) => e.currency === 'CNY' || e.currency === 'JPY');
+
+  const indexSessions: IndexSessionBrief[] = trackedIds.map((meta) => {
+    const q = qById.get(meta.id);
+    const priceNum = q?.price ?? 0;
+    const chgPct = q?.changePercent ?? 0;
+    const signStr = chgPct >= 0 ? '+' : '';
+    const priceFormatted =
+      priceNum > 0
+        ? priceNum.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+        : '—';
+    const parseNum = (raw?: string) => {
+      if (!raw) return NaN;
+      const v = parseFloat(String(raw).replace(/[^0-9.\-]/g, ''));
+      return Number.isFinite(v) ? v : NaN;
+    };
+    const activePhase = resolveIndexPhase(meta.id, nowDate);
+    const signalTier = computeServerSignalTier({
+      assetId: meta.id,
+      changePercent: chgPct,
+      price: priceNum,
+      open: parseNum(q?.open),
+      prevClose: q?.prevClose,
+      dayHigh: parseNum(q?.dayHigh),
+      dayLow: parseNum(q?.dayLow),
+      series: q?.chart1D,
+      w52Pct: q?.w52Pct ?? 50,
+    });
+
+    const macroCue =
+      meta.region === 'US'
+        ? usCalNext
+          ? `Key USD catalyst: ${usCalNext.title} (${usCalNext.timeWib}, est ${usCalNext.forecast}).`
+          : 'Focus stays on US 10Y yields and Treasury liquidity.'
+        : meta.region === 'Indonesia'
+          ? idCalNext
+            ? `Jakarta macro focus: ${idCalNext.title} (${idCalNext.timeWib}) alongside USD/IDR near ${usdidr?.price.toLocaleString('en-US') || '16,200'}.`
+            : `USD/IDR near ${usdidr?.price.toLocaleString('en-US') || '16,200'} & Bank Indonesia liquidity posture remain key opening drivers.`
+          : asiaCalNext
+            ? `Regional watch: ${asiaCalNext.currency} ${asiaCalNext.title} (${asiaCalNext.timeWib}).`
+            : `Overnight Wall Street lead (${qById.get('IXIC')?.changePercent.toFixed(2) ?? '0.00'}% NASDAQ) and DXY (${dxy?.price.toFixed(3) ?? '103.7'}) guide Asia open.`;
+
+    const moversLine =
+      meta.region === 'US'
+        ? usLeader
+          ? `High-impact tape led by ${usLeader.symbol} (${usLeader.changePercent >= 0 ? '+' : ''}${usLeader.changePercent.toFixed(2)}%); top gainer ${usGainer?.symbol ?? 'NVDA'} vs laggard ${usLoser?.symbol ?? 'DOW'}.`
+          : 'Mega-cap tech and cyclical financials set intraday breadth.'
+        : meta.region === 'Indonesia'
+          ? idxLeader
+            ? `IDX heavyweight turnover led by ${idxLeader.symbol} (${idxLeader.changePercent >= 0 ? '+' : ''}${idxLeader.changePercent.toFixed(2)}%); foreign flow ${idxBuyTop ? `accumulated ${idxBuyTop.symbol} (${idxBuyTop.foreignNetLabel})` : 'selective in banks'}.`
+            : 'Big banks and commodity proxies anchor Jakarta Sector I/II breadth.'
+          : `${meta.name} tracks regional semiconductor, bank, and China-demand rotation within ${q?.dayLow ?? '—'}–${q?.dayHigh ?? '—'}.`;
+
+    const biasWord =
+      signalTier === 'Strong Bull' || signalTier === 'Bull Signal'
+        ? 'firm risk-on momentum'
+        : signalTier === 'Strong Bear' || signalTier === 'Bear Signal'
+          ? 'defensive distribution pressure'
+          : 'two-way range consolidation';
+
+    const beforeOpen = `Pre-Open Setup: ${macroCue} DXY stands at ${dxy?.price.toFixed(3) ?? '103.7'} (${dxy && dxy.changePercent >= 0 ? '+' : ''}${dxy?.changePercent.toFixed(2) ?? '0.00'}%) with US 10Y yield at ${us10y?.price.toFixed(3) ?? '4.44'}%. Watch ${meta.symbol} opening drive (${q?.open ?? '—'}) between support ${q?.support ?? '—'} and resistance ${q?.resistance ?? '—'}.`;
+
+    const duringSession = `Live Session Flow: ${meta.symbol} trades at ${priceFormatted} (${signStr}${chgPct.toFixed(2)}%, Open ${q?.open ?? '—'}) showing ${biasWord} (${signalTier}). ${moversLine} Intraday range spans ${q?.dayLow ?? '—'}–${q?.dayHigh ?? '—'}.`;
+
+    const afterClose = `Post-Close Recap & Prediction: ${meta.symbol} settled at ${priceFormatted} (${signStr}${chgPct.toFixed(2)}%), leaving daily trading bias at ${signalTier}. Holding above ${q?.support ?? '—'} keeps recovery toward ${q?.resistance ?? '—'} alive next session; breaking below ${q?.support ?? '—'} opens lower demand zones.`;
+
+    return {
+      assetId: meta.id,
+      symbol: meta.symbol,
+      name: meta.name,
+      region: meta.region,
+      activePhase,
+      sessionStateLabel: q?.sessionStateLabel || getServerSessionInfo(meta.id, nowDate).stateLabel,
+      priceFormatted,
+      changePercent: chgPct,
+      signalTier,
+      beforeOpen,
+      duringSession,
+      afterClose,
+      keyLevels: `S1 ${q?.support ?? '—'} · R1 ${q?.resistance ?? '—'}`,
+    };
+  });
+
+  // Signal tally across all quotes + top impact US & IDX stocks using daily trading composite
+  let bullCount = 0;
+  let bearCount = 0;
+  let neutralCount = 0;
+  const parseQuoteNum = (raw?: string) => {
+    if (!raw) return NaN;
+    const v = parseFloat(String(raw).replace(/[^0-9.\-]/g, ''));
+    return Number.isFinite(v) ? v : NaN;
+  };
+  for (const q of quotes) {
+    const tier = computeServerSignalTier({
+      assetId: q.id,
+      changePercent: q.changePercent,
+      price: q.price,
+      open: parseQuoteNum(q.open),
+      prevClose: q.prevClose,
+      dayHigh: parseQuoteNum(q.dayHigh),
+      dayLow: parseQuoteNum(q.dayLow),
+      series: q.chart1D,
+      w52Pct: q.w52Pct,
+    });
+    if (tier === 'Strong Bull' || tier === 'Bull Signal') bullCount++;
+    else if (tier === 'Strong Bear' || tier === 'Bear Signal') bearCount++;
+    else neutralCount++;
+  }
+  for (const s of [...(movers?.us?.impact ?? []), ...(movers?.indonesia?.impact ?? [])]) {
+    const tier = computeServerSignalTier({
+      assetId: s.symbol,
+      changePercent: s.changePercent,
+      price: s.price,
+      prevClose: s.prevClose,
+      dayHigh: s.dayHigh,
+      dayLow: s.dayLow,
+      series: s.sparklinePoints,
+      foreignFlowSide: s.foreignFlowSide,
+    });
+    if (tier === 'Strong Bull' || tier === 'Bull Signal') bullCount++;
+    else if (tier === 'Strong Bear' || tier === 'Bear Signal') bearCount++;
+    else neutralCount++;
+  }
+
+  const compositeSentiment: 'Bullish' | 'Bearish' | 'Neutral' =
+    bullCount >= bearCount + 4 ? 'Bullish' : bearCount >= bullCount + 4 ? 'Bearish' : 'Neutral';
+
+  const spx = qById.get('SPX');
+  const ixic = qById.get('IXIC');
+  const ihsg = qById.get('IHSG');
+  const eido = qById.get('EIDO');
+
+  const sourceNames = Array.from(
+    new Set([
+      'Yahoo Finance Quotes',
+      'TradingView Scanner & Macro Calendar',
+      'Coinbase Spot USD',
+      ...stories.slice(0, 12).map((s) => s.publisher),
+    ])
+  ).slice(0, 8);
+
+  // Extract rumor & narrative themes from live news stories
+  const rumorAndCatalystThemes: MarketIntelligencePayload['rumorAndCatalystThemes'] = [];
+  const topicCheck = [
+    {
+      tag: 'Fed & Yields',
+      regex: /(fed|fomc|powell|rate|treasury|yield|inflation|cpi|pce|jobs)/i,
+    },
+    {
+      tag: 'AI & Big Tech',
+      regex: /(ai|nvidia|chip|semiconductor|nasdaq|tech|apple|microsoft|earnings)/i,
+    },
+    {
+      tag: 'IDX & Rupiah Flow',
+      regex: /(ihsg|rupiah|bi|bank indonesia|asing|saham|bbca|bbri|bmri)/i,
+    },
+    {
+      tag: 'Energy & Gold',
+      regex: /(oil|crude|opec|brent|wti|gold|bullion|commodity|middle east)/i,
+    },
+    {
+      tag: 'Crypto Liquidity',
+      regex: /(bitcoin|btc|eth|ethereum|crypto|etf|sec|stablecoin)/i,
+    },
+  ];
+
+  for (const bucket of topicCheck) {
+    const hit = stories.find((s) => bucket.regex.test(`${s.headline} ${s.summary}`));
+    if (hit) {
+      rumorAndCatalystThemes.push({
+        tag: bucket.tag,
+        theme: `${hit.headline} (${hit.publisher})`,
+        tone: hit.badgePositive === true ? 'bull' : hit.badgePositive === false ? 'bear' : 'neutral',
+      });
+    }
+  }
+  if (rumorAndCatalystThemes.length === 0 && stories.length > 0) {
+    for (const s of stories.slice(0, 3)) {
+      rumorAndCatalystThemes.push({
+        tag: s.publisher,
+        theme: s.headline,
+        tone: s.badgePositive === true ? 'bull' : s.badgePositive === false ? 'bear' : 'neutral',
+      });
+    }
+  }
+
+  const dataReleaseImplications = events.slice(0, 6).map((ev) => ({
+    currency: ev.currency,
+    impact: ev.impact,
+    title: ev.title,
+    timing: ev.timeWib,
+    implication: buildMacroImplicationText(ev),
+  }));
+
+  const btcTier = btc
+    ? computeServerSignalTier({
+        assetId: 'BTCUSD',
+        changePercent: btc.changePercent,
+        price: btc.price,
+        prevClose: btc.prevClose,
+        series: btc.chart1D,
+        w52Pct: btc.w52Pct,
+      })
+    : 'Neutral';
+  const goldTier = gold
+    ? computeServerSignalTier({
+        assetId: 'XAUUSD',
+        changePercent: gold.changePercent,
+        price: gold.price,
+        prevClose: gold.prevClose,
+        series: gold.chart1D,
+        w52Pct: gold.w52Pct,
+      })
+    : 'Neutral';
+
+  const commentaryPoints = [
+    `US Equities & Leadership: S&P 500 trades at ${spx?.price.toLocaleString('en-US') ?? '—'} (${spx && spx.changePercent >= 0 ? '+' : ''}${spx?.changePercent.toFixed(2) ?? '0.00'}%) while NASDAQ prints ${ixic && ixic.changePercent >= 0 ? '+' : ''}${ixic?.changePercent.toFixed(2) ?? '0.00'}%; institutional impact centers on ${usLeader?.symbol ?? 'NVDA'} (${usLeader ? `${usLeader.changePercent >= 0 ? '+' : ''}${usLeader.changePercent.toFixed(2)}%` : '—'}) with top momentum in ${usGainer?.symbol ?? '—'}.`,
+    `Indonesia IDX & Rupiah Sensitivity: IHSG stands at ${ihsg?.price.toLocaleString('en-US') ?? '—'} (${ihsg && ihsg.changePercent >= 0 ? '+' : ''}${ihsg?.changePercent.toFixed(2) ?? '0.00'}%) and MSCI Indonesia ETF (EIDO) sits at $${eido?.price.toFixed(2) ?? '—'} (${eido && eido.changePercent >= 0 ? '+' : ''}${eido?.changePercent.toFixed(2) ?? '0.00'}%), tracking USD/IDR near ${usdidr?.price.toLocaleString('en-US') ?? '—'} vs DXY ${dxy?.price.toFixed(3) ?? '—'}.`,
+    `Gold Spot & Macro Safe Haven: XAU/USD trades at $${gold?.price.toLocaleString('en-US') ?? '—'} (${gold && gold.changePercent >= 0 ? '+' : ''}${gold?.changePercent.toFixed(2) ?? '0.00'}%, Signal: ${goldTier}) alongside US 10Y at ${us10y?.price.toFixed(3) ?? '—'}% and WTI Crude at $${wti?.price.toFixed(2) ?? '—'}.`,
+    `BTC & 24/7 Liquidity Pulse: Bitcoin holds $${btc?.price.toLocaleString('en-US') ?? '—'} (${btc && btc.changePercent >= 0 ? '+' : ''}${btc?.changePercent.toFixed(2) ?? '0.00'}%, Signal: ${btcTier}), acting as high-beta barometer between support ${btc?.support ?? '—'} and resistance ${btc?.resistance ?? '—'}.`,
+  ];
+
+  const stocksAndFlowSummary = `US institutional turnover leads via ${
+    (movers?.us?.impact ?? []).slice(0, 3).map((s) => `${s.symbol} (${s.changePercent >= 0 ? '+' : ''}${s.changePercent.toFixed(2)}%)`).join(', ') || 'flagship mega-caps'
+  }. On IDX Jakarta, heavyweight rotation features ${
+    (movers?.indonesia?.impact ?? []).slice(0, 3).map((s) => `${s.symbol} (${s.changePercent >= 0 ? '+' : ''}${s.changePercent.toFixed(2)}%)`).join(', ') || 'LQ45 leaders'
+  }${
+    idxBuyTop || idxSellTop
+      ? `, with net foreign flow led by ${idxBuyTop ? `accumulation in ${idxBuyTop.symbol} (${idxBuyTop.foreignNetLabel})` : 'selective accumulation'}${idxSellTop ? ` vs distribution in ${idxSellTop.symbol} (${idxSellTop.foreignNetLabel})` : ''}.`
+      : '.'
+  }`;
+
+  const headline =
+    compositeSentiment === 'Bullish'
+      ? `Risk appetite firms across global equities led by ${usGainer?.symbol ?? 'tech leaders'} as ${bullCount} Bull Signals outpace ${bearCount} Bear Signals`
+      : compositeSentiment === 'Bearish'
+        ? `Cross-asset caution weighs on benchmarks (${bearCount} Bear vs ${bullCount} Bull Signals) with Gold (${goldTier}) and DXY setting defensive posture`
+        : `Two-way rotation across US (${spx && spx.changePercent >= 0 ? '+' : ''}${spx?.changePercent.toFixed(2) ?? '0.00'}%), IDX (${ihsg && ihsg.changePercent >= 0 ? '+' : ''}${ihsg?.changePercent.toFixed(2) ?? '0.00'}%), and BTC ($${btc?.price.toLocaleString('en-US') ?? '—'}) as traders track yields & macro data`;
+
+  let forwardPrediction = `Tactical Daily Outlook: While DXY stays capped below ${dxy?.resistance ?? '104.250'} and US 10Y holds near ${us10y?.price.toFixed(3) ?? '4.250'}%, watch SPX (${spx?.support ?? 'support'}–${spx?.resistance ?? 'resistance'}), IHSG (${ihsg?.support ?? 'support'}–${ihsg?.resistance ?? 'resistance'}), and XAU/USD ($${gold?.price.toLocaleString('en-US') ?? '—'}) around ${
+    events[0] ? `${events[0].currency} ${events[0].title} (${events[0].impact} · ${events[0].timeWib})` : 'scheduled macro releases'
+  }. Sustaining price above daily Open confirms trend continuation; failing opening support favors mean-reversion toward S1 pivots.`;
+
+  let aiRefined = false;
+  let finalHeadline = headline;
+  let finalCommentary = commentaryPoints;
+
+  // Optional Gemini refinement strictly server-side if GEMINI_API_KEY is configured
+  const geminiApiKey = process.env.GEMINI_API_KEY;
+  if (geminiApiKey) {
+    try {
+      const ai = new GoogleGenAI({
+        apiKey: geminiApiKey,
+        httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+      });
+      const digestInput = {
+        indices: indexSessions.map((i) => ({ s: i.symbol, p: i.priceFormatted, chg: i.changePercent, sig: i.signalTier })),
+        dxy: dxy ? { p: dxy.price, chg: dxy.changePercent } : null,
+        us10y: us10y ? { p: us10y.price, chg: us10y.changePercent } : null,
+        usdidr: usdidr ? { p: usdidr.price, chg: usdidr.changePercent } : null,
+        stocksAndFlowSummary,
+        newsHeadlines: stories.slice(0, 6).map((s) => `${s.publisher}: ${s.headline}`),
+        macroEvents: dataReleaseImplications.slice(0, 4).map((e) => `${e.currency} ${e.impact} ${e.title}: ${e.implication}`),
+      };
+
+      const aiRes = await ai.models.generateContent({
+        model: 'gemini-4-hydrogen',
+        contents: `Synthesize the following live cross-asset dataset, news headlines/rumors, stock flows, and macro events into a concise JSON object with keys: "headline" (1 crisp institutional sentence), "commentaryPoints" (array of 3 concise bullets covering US/Tech, IDX/Rupiah/Asia, and Yields/Commodities/Crypto), and "forwardPrediction" (2-sentence probabilistic market prediction referencing exact levels). Use ONLY facts from the data.\n\nDATA:\n${JSON.stringify(digestInput)}`,
+        config: {
+          responseMimeType: 'application/json',
+        },
+      });
+      const rawTxt = (aiRes.text ?? '').trim();
+      if (rawTxt) {
+        const parsed = JSON.parse(rawTxt) as {
+          headline?: string;
+          commentaryPoints?: string[];
+          forwardPrediction?: string;
+        };
+        if (parsed.headline && typeof parsed.headline === 'string') {
+          finalHeadline = parsed.headline.trim();
+          aiRefined = true;
+        }
+        if (Array.isArray(parsed.commentaryPoints) && parsed.commentaryPoints.length >= 2) {
+          finalCommentary = parsed.commentaryPoints.slice(0, 4).map((s) => String(s).trim());
+        }
+        if (parsed.forwardPrediction && typeof parsed.forwardPrediction === 'string') {
+          forwardPrediction = parsed.forwardPrediction.trim();
+        }
+      }
+    } catch {
+      // Retain deterministic live multi-source synthesis on Gemini failure/timeout
+    }
+  }
+
+  const result: MarketIntelligencePayload = {
+    updatedAt: new Date(now).toISOString(),
+    headline: finalHeadline,
+    compositeSentiment,
+    signalTally: { bullCount, bearCount, neutralCount },
+    sourcesCount: sourceNames.length,
+    sourceNames,
+    commentaryPoints: finalCommentary,
+    rumorAndCatalystThemes,
+    dataReleaseImplications,
+    stocksAndFlowSummary,
+    forwardPrediction,
+    indexSessions,
+    aiRefined,
+  };
+
+  intelligenceCache.entry = { data: result, expiresAt: now + (aiRefined ? 300_000 : 45_000) };
+  return result;
+  });
+}
+
+export interface HeatmapStockItem {
+  symbol: string;
+  yahooSymbol: string;
+  name: string;
+  market: 'US' | 'ID';
+  exchange: string;
+  currency: 'USD' | 'IDR';
+  sector: string;
+  price: number;
+  prevClose: number;
+  changePercent: number;
+  marketCap: number;
+  marketCapNative: number;
+  volumeRaw: number;
+  marketCapLabel: string;
+}
+
+export interface MarketHeatmapResponse {
+  us: HeatmapStockItem[];
+  indonesia: HeatmapStockItem[];
+  sectorsUs: string[];
+  sectorsIndonesia: string[];
+  updatedAt: string;
+}
+
+const US_DUAL_CLASS_SKIP = new Set([
+  'GOOG', 'BRK.A', 'FOXA', 'NWSA', 'PARAA', 'UHAL.B', 'LEN.B', 'BF.A', 'HEI.A',
+]);
+
+const HEATMAP_SECTOR_OVERRIDES: Record<string, string> = {
+  // Indonesia IDX accurate sector classification
+  BBCA: 'Financials',
+  BBRI: 'Financials',
+  BMRI: 'Financials',
+  BBNI: 'Financials',
+  BRIS: 'Financials',
+  ASII: 'Industrials',
+  UNTR: 'Industrials',
+  PANI: 'Industrials',
+  BREN: 'Energy & Materials',
+  TPIA: 'Energy & Materials',
+  AMMN: 'Energy & Materials',
+  ADRO: 'Energy & Materials',
+  BYAN: 'Energy & Materials',
+  CUAN: 'Energy & Materials',
+  PTBA: 'Energy & Materials',
+  ANTM: 'Energy & Materials',
+  MDKA: 'Energy & Materials',
+  INCO: 'Energy & Materials',
+  TLKM: 'Telecom & Utilities',
+  ISAT: 'Telecom & Utilities',
+  EXCL: 'Telecom & Utilities',
+  PGAS: 'Telecom & Utilities',
+  DNET: 'Telecom & Utilities',
+  DCII: 'Technology',
+  GOTO: 'Technology',
+  ICBP: 'Consumer',
+  INDF: 'Consumer',
+  UNVR: 'Consumer',
+  AMRT: 'Consumer',
+  HMSP: 'Consumer',
+  GGRM: 'Consumer',
+  KLBF: 'Healthcare',
+  MIKA: 'Healthcare',
+  SILO: 'Healthcare',
+  // US flagship accurate grouping
+  GOOGL: 'Technology',
+  META: 'Technology',
+  NFLX: 'Telecom & Utilities',
+  TMUS: 'Telecom & Utilities',
+  AMZN: 'Consumer',
+  TSLA: 'Consumer',
+  WMT: 'Consumer',
+  COST: 'Consumer',
+  HD: 'Consumer',
+};
+
+function normalizeHeatmapSector(symbol: string, rawSector: string, rawIndustry = ''): string {
+  const override = HEATMAP_SECTOR_OVERRIDES[symbol];
+  if (override) return override;
+
+  const combined = `${rawSector} ${rawIndustry}`.toLowerCase();
+  if (combined.includes('financ') || combined.includes('bank') || combined.includes('insurance') || combined.includes('reit')) {
+    return 'Financials';
+  }
+  if (combined.includes('health') || combined.includes('pharma') || combined.includes('biotech') || combined.includes('medical') || combined.includes('hospital')) {
+    return 'Healthcare';
+  }
+  if (
+    combined.includes('energy') ||
+    combined.includes('oil') ||
+    combined.includes('gas') ||
+    combined.includes('mineral') ||
+    combined.includes('metal') ||
+    combined.includes('mining') ||
+    combined.includes('coal') ||
+    combined.includes('chemical') ||
+    combined.includes('material')
+  ) {
+    return 'Energy & Materials';
+  }
+  if (combined.includes('telecom') || combined.includes('utilit') || combined.includes('wireless') || combined.includes('electric') || combined.includes('renewable')) {
+    return 'Telecom & Utilities';
+  }
+  if (combined.includes('retail') || combined.includes('consumer') || combined.includes('food') || combined.includes('beverage') || combined.includes('tobacco') || combined.includes('apparel')) {
+    return 'Consumer';
+  }
+  if (combined.includes('tech') || combined.includes('electronic') || combined.includes('software') || combined.includes('semiconductor') || combined.includes('internet')) {
+    return 'Technology';
+  }
+  if (combined.includes('manufact') || combined.includes('industr') || combined.includes('transport') || combined.includes('aerospace') || combined.includes('machinery') || combined.includes('auto') || combined.includes('real estate')) {
+    return 'Industrials';
+  }
+  return 'Diversified';
+}
+
+function formatMarketCapCompact(capNative: number, currency: 'USD' | 'IDR'): string {
+  if (!Number.isFinite(capNative) || capNative <= 0) return '—';
+  if (currency === 'IDR') {
+    if (capNative >= 1e12) return `Rp ${(capNative / 1e12).toFixed(1)}T`;
+    if (capNative >= 1e9) return `Rp ${(capNative / 1e9).toFixed(0)}B`;
+    return `Rp ${Math.round(capNative / 1e6)}M`;
+  }
+  if (capNative >= 1e12) return `$${(capNative / 1e12).toFixed(2)}T`;
+  if (capNative >= 1e9) return `$${(capNative / 1e9).toFixed(1)}B`;
+  return `$${(capNative / 1e6).toFixed(0)}M`;
+}
+
+const US_HEATMAP_META: Record<string, { sector: string; fallbackCapUsd: number }> = {
+  NVDA: { sector: 'Technology', fallbackCapUsd: 3.4e12 },
+  AAPL: { sector: 'Technology', fallbackCapUsd: 3.35e12 },
+  MSFT: { sector: 'Technology', fallbackCapUsd: 3.1e12 },
+  AMZN: { sector: 'Consumer', fallbackCapUsd: 2.2e12 },
+  GOOGL: { sector: 'Technology', fallbackCapUsd: 2.15e12 },
+  META: { sector: 'Telecom & Utilities', fallbackCapUsd: 1.5e12 },
+  TSLA: { sector: 'Consumer', fallbackCapUsd: 1.05e12 },
+  AVGO: { sector: 'Technology', fallbackCapUsd: 8.6e11 },
+  LLY: { sector: 'Healthcare', fallbackCapUsd: 7.9e11 },
+  JPM: { sector: 'Financials', fallbackCapUsd: 6.8e11 },
+  V: { sector: 'Financials', fallbackCapUsd: 6.1e11 },
+  XOM: { sector: 'Energy & Materials', fallbackCapUsd: 5.2e11 },
+  UNH: { sector: 'Healthcare', fallbackCapUsd: 5.1e11 },
+  ORCL: { sector: 'Technology', fallbackCapUsd: 4.8e11 },
+  NFLX: { sector: 'Telecom & Utilities', fallbackCapUsd: 3.8e11 },
+  AMD: { sector: 'Technology', fallbackCapUsd: 2.3e11 },
+  PLTR: { sector: 'Technology', fallbackCapUsd: 1.8e11 },
+  MU: { sector: 'Technology', fallbackCapUsd: 1.2e11 },
+};
+
+const IDX_HEATMAP_META: Record<string, { sector: string; fallbackCapIdr: number }> = {
+  BBCA: { sector: 'Financials', fallbackCapIdr: 1180e12 },
+  BREN: { sector: 'Energy & Materials', fallbackCapIdr: 950e12 },
+  BBRI: { sector: 'Financials', fallbackCapIdr: 680e12 },
+  TPIA: { sector: 'Energy & Materials', fallbackCapIdr: 640e12 },
+  AMMN: { sector: 'Energy & Materials', fallbackCapIdr: 620e12 },
+  BMRI: { sector: 'Financials', fallbackCapIdr: 580e12 },
+  TLKM: { sector: 'Telecom & Utilities', fallbackCapIdr: 280e12 },
+  ASII: { sector: 'Industrials', fallbackCapIdr: 205e12 },
+  BBNI: { sector: 'Financials', fallbackCapIdr: 185e12 },
+  ICBP: { sector: 'Consumer', fallbackCapIdr: 135e12 },
+  BRIS: { sector: 'Financials', fallbackCapIdr: 132e12 },
+  ADRO: { sector: 'Energy & Materials', fallbackCapIdr: 115e12 },
+  UNTR: { sector: 'Industrials', fallbackCapIdr: 98e12 },
+  INDF: { sector: 'Consumer', fallbackCapIdr: 68e12 },
+  KLBF: { sector: 'Healthcare', fallbackCapIdr: 66e12 },
+  ISAT: { sector: 'Telecom & Utilities', fallbackCapIdr: 74e12 },
+  GOTO: { sector: 'Technology', fallbackCapIdr: 82e12 },
+  MDKA: { sector: 'Energy & Materials', fallbackCapIdr: 54e12 },
+  PTBA: { sector: 'Energy & Materials', fallbackCapIdr: 32e12 },
+  ANTM: { sector: 'Energy & Materials', fallbackCapIdr: 38e12 },
+  PGAS: { sector: 'Telecom & Utilities', fallbackCapIdr: 37e12 },
+  EXCL: { sector: 'Telecom & Utilities', fallbackCapIdr: 30e12 },
+};
+
+async function fetchTradingViewHeatmapScan(
+  region: 'america' | 'indonesia',
+  usdIdrRate: number,
+  limit = 48
+): Promise<HeatmapStockItem[]> {
+  try {
+    const isId = region === 'indonesia';
+    const minCap = isId ? 8e12 : 1.5e10;
+    const res = await fetch(`https://scanner.tradingview.com/${region}/scan`, {
+      method: 'POST',
+      headers: {
+        ...UA_HEADERS,
+        'Content-Type': 'application/json',
+        Origin: 'https://www.tradingview.com',
+        Referer: 'https://www.tradingview.com/',
+      },
+      body: JSON.stringify({
+        filter: [
+          { left: 'type', operation: 'equal', right: 'stock' },
+          { left: 'subtype', operation: 'equal', right: 'common' },
+          { left: 'close', operation: 'greater', right: isId ? 50 : 5 },
+          { left: 'market_cap_basic', operation: 'greater', right: minCap },
+        ],
+        options: { lang: 'en' },
+        markets: [region],
+        columns: [
+          'name',
+          'description',
+          'close',
+          'change',
+          'change_abs',
+          'volume',
+          'exchange',
+          'market_cap_basic',
+          'sector',
+          'industry',
+        ],
+        sort: { sortBy: 'market_cap_basic', sortOrder: 'desc' },
+        range: [0, limit + 16],
+      }),
+      signal: AbortSignal.timeout(7000),
+    });
+    if (!res.ok) return [];
+    const json = (await res.json()) as {
+      data?: Array<{ s?: string; d?: Array<string | number | null> }>;
+    };
+
+    const items: HeatmapStockItem[] = [];
+    const seen = new Set<string>();
+    const seenRoots = new Set<string>();
+    for (const row of json.data ?? []) {
+      const d = row.d;
+      if (!d || d.length < 9) continue;
+      const symbol = String(d[0] || '').trim().toUpperCase();
+      if (!symbol || seen.has(symbol)) continue;
+      // Exclude preferred shares, dual-class duplicates, rights, warrants, or depositary duplicates
+      if (!isId && (US_DUAL_CLASS_SKIP.has(symbol) || /[.-](P|PR|WS|RT|UN)[A-Z0-9]*$/i.test(symbol))) {
+        continue;
+      }
+      const rawName = String(d[1] || symbol).replace(/\s+Tbk\.?$/i, ' Tbk');
+      if (/\b(Preferred|Depositary|Series\s+[A-Z]|ADR)\b/i.test(rawName)) continue;
+
+      const rootNameKey = rawName
+        .toLowerCase()
+        .replace(/,?\s*(inc\.?|corp\.?|corporation|ltd\.?|llc|plc|co\.?|tbk|class\s+[a-c]|cl\s+[a-c]).*$/i, '')
+        .replace(/[^a-z0-9]/g, '');
+      if (rootNameKey.length >= 4 && seenRoots.has(`${region}-${rootNameKey}`)) continue;
+
+      const name = rawName.slice(0, 42);
+      const close = Number(d[2]);
+      const changePct = Number(d[3]);
+      const changeAbs = Number(d[4] ?? 0);
+      const vol = Number(d[5] ?? 0);
+      const exchange = isId ? 'IDX · Jakarta' : String(d[6] || 'NYSE/NASDAQ');
+      const mcapNative = Number(d[7] ?? 0);
+      const rawSector = String(d[8] || '');
+      const rawIndustry = String(d[9] || '');
+      if (!Number.isFinite(close) || close <= 0 || !Number.isFinite(changePct) || !Number.isFinite(mcapNative) || mcapNative <= 0) {
+        continue;
+      }
+
+      seen.add(symbol);
+      if (rootNameKey.length >= 4) seenRoots.add(`${region}-${rootNameKey}`);
+      const price = isId ? Math.round(close) : Number(close.toFixed(2));
+      const prevClose = isId
+        ? Math.max(1, Math.round(close - changeAbs))
+        : Number(Math.max(0.01, close - changeAbs).toFixed(2));
+      const marketCapUsd = isId ? mcapNative / Math.max(10_000, usdIdrRate) : mcapNative;
+
+      items.push({
+        symbol,
+        yahooSymbol: isId ? `${symbol}.JK` : symbol,
+        name,
+        market: isId ? 'ID' : 'US',
+        exchange,
+        currency: isId ? 'IDR' : 'USD',
+        sector: normalizeHeatmapSector(symbol, rawSector, rawIndustry),
+        price,
+        prevClose,
+        changePercent: Number(changePct.toFixed(2)),
+        marketCap: marketCapUsd,
+        marketCapNative: mcapNative,
+        volumeRaw: Number.isFinite(vol) ? vol : 0,
+        marketCapLabel: formatMarketCapCompact(mcapNative, isId ? 'IDR' : 'USD'),
+      });
+      if (items.length >= limit) break;
+    }
+    return items;
+  } catch {
+    return [];
+  }
+}
+
+export async function fetchMarketHeatmap(): Promise<MarketHeatmapResponse> {
+  const now = Date.now();
+  if (heatmapCache.entry && heatmapCache.entry.expiresAt > now) {
+    return heatmapCache.entry.data;
+  }
+
+  return coalesceInFlight('market-heatmap', heatmapCache.entry?.data, async () => {
+
+  // Resolve current USD/IDR conversion factor so cross-market cap comparisons stay accurate
+  let usdIdrRate = 16_200;
+  try {
+    const q = await fetchLiveQuotes();
+    const idrQuote = q.quotes.find((item) => item.id === 'USDIDR');
+    if (idrQuote && idrQuote.price > 10_000) {
+      usdIdrRate = idrQuote.price;
+    }
+  } catch {
+    // use safe baseline
+  }
+
+  const [tvUs, tvId] = await Promise.all([
+    fetchTradingViewHeatmapScan('america', usdIdrRate, 48),
+    fetchTradingViewHeatmapScan('indonesia', usdIdrRate, 36),
+  ]);
+
+  let usItems = tvUs;
+  let idItems = tvId;
+
+  // Fallback to Yahoo Finance direct baskets + calibrated cap weights if TradingView throttles
+  if (usItems.length < 10) {
+    const yahooUs = await fetchYahooDirectBasket('US');
+    usItems = yahooUs.map((m) => {
+      const meta = US_HEATMAP_META[m.symbol] ?? { sector: 'Technology', fallbackCapUsd: 1.2e11 };
+      return {
+        symbol: m.symbol,
+        yahooSymbol: m.symbol,
+        name: m.name,
+        market: 'US',
+        exchange: m.exchange,
+        currency: 'USD',
+        sector: meta.sector,
+        price: m.price,
+        prevClose: m.prevClose,
+        changePercent: m.changePercent,
+        marketCap: meta.fallbackCapUsd,
+        marketCapNative: meta.fallbackCapUsd,
+        volumeRaw: m.volumeRaw,
+        marketCapLabel: formatMarketCapCompact(meta.fallbackCapUsd, 'USD'),
+      };
+    });
+  }
+
+  if (idItems.length < 10) {
+    const yahooId = await fetchYahooDirectBasket('ID');
+    idItems = yahooId.map((m) => {
+      const meta = IDX_HEATMAP_META[m.symbol] ?? { sector: 'Financials', fallbackCapIdr: 45e12 };
+      return {
+        symbol: m.symbol,
+        yahooSymbol: `${m.symbol}.JK`,
+        name: m.name,
+        market: 'ID',
+        exchange: 'IDX · Jakarta',
+        currency: 'IDR',
+        sector: meta.sector,
+        price: m.price,
+        prevClose: m.prevClose,
+        changePercent: m.changePercent,
+        marketCap: meta.fallbackCapIdr / usdIdrRate,
+        marketCapNative: meta.fallbackCapIdr,
+        volumeRaw: m.volumeRaw,
+        marketCapLabel: formatMarketCapCompact(meta.fallbackCapIdr, 'IDR'),
+      };
+    });
+  }
+
+  const sortSectors = (list: HeatmapStockItem[]) => {
+    const totals = new Map<string, number>();
+    for (const item of list) {
+      totals.set(item.sector, (totals.get(item.sector) ?? 0) + item.marketCap);
+    }
+    return Array.from(totals.entries())
+      .sort((a, b) => b[1] - a[1])
+      .map(([sec]) => sec);
+  };
+
+  const result: MarketHeatmapResponse = {
+    us: usItems.slice(0, 48),
+    indonesia: idItems.slice(0, 36),
+    sectorsUs: sortSectors(usItems),
+    sectorsIndonesia: sortSectors(idItems),
+    updatedAt: new Date(now).toISOString(),
+  };
+
+  heatmapCache.entry = { data: result, expiresAt: now + 20_000 };
+  return result;
+  });
 }
 

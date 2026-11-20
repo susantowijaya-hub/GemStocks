@@ -32,7 +32,7 @@ export const NewsModal: React.FC<NewsModalProps> = ({ story, onClose }) => {
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="w-full max-w-xl bg-white dark:bg-[#1C1C1E] border border-[#E5E5EA] dark:border-[#2C2C2E] rounded-t-3xl sm:rounded-2xl p-6 shadow-2xl flex flex-col gap-4 relative max-h-[88dvh]">
+      <div className="w-full max-w-xl liquid-glass-strong rounded-t-3xl sm:rounded-2xl p-6 shadow-2xl flex flex-col gap-4 relative max-h-[88dvh]">
         <button
           type="button"
           onClick={onClose}

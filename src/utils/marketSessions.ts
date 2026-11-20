@@ -30,13 +30,16 @@ function getTzClock(now: Date, timeZone: string) {
 }
 
 function getSingleIndexSession(assetId: string, now: Date): MarketSessionStatus | null {
-  if (assetId === 'SPX' || assetId === 'IXIC' || assetId === 'DJI') {
+  if (assetId === 'SPX' || assetId === 'IXIC' || assetId === 'DJI' || assetId === 'EIDO') {
     const ny = getTzClock(now, 'America/New_York');
+    const isEtf = assetId === 'EIDO';
+    const label = isEtf ? 'NYSE Arca · EIDO ETF' : 'US Equities (NYSE/NASDAQ)';
+    const shortLabel = isEtf ? 'NYSE' : 'US';
     if (ny.isWeekend) {
       return {
         id: 'us',
-        label: 'US Equities (NYSE/NASDAQ)',
-        shortLabel: 'US',
+        label,
+        shortLabel,
         stateLabel: 'Closed',
         detail: 'Weekend · Opens Mon 21:30 WIB',
         tone: 'closed',
@@ -46,8 +49,8 @@ function getSingleIndexSession(assetId: string, now: Date): MarketSessionStatus 
     if (ny.totalMin >= 9 * 60 + 30 && ny.totalMin < 16 * 60) {
       return {
         id: 'us',
-        label: 'US Equities (NYSE/NASDAQ)',
-        shortLabel: 'US',
+        label,
+        shortLabel,
         stateLabel: 'Open',
         detail: 'Regular Session · Closes 04:00 WIB',
         tone: 'open',
@@ -57,8 +60,8 @@ function getSingleIndexSession(assetId: string, now: Date): MarketSessionStatus 
     if (ny.totalMin >= 4 * 60 && ny.totalMin < 9 * 60 + 30) {
       return {
         id: 'us',
-        label: 'US Equities (NYSE/NASDAQ)',
-        shortLabel: 'US',
+        label,
+        shortLabel,
         stateLabel: 'Pre-Market',
         detail: 'Extended Hours · Regular 21:30 WIB',
         tone: 'extended',
@@ -68,8 +71,8 @@ function getSingleIndexSession(assetId: string, now: Date): MarketSessionStatus 
     if (ny.totalMin >= 16 * 60 && ny.totalMin < 20 * 60) {
       return {
         id: 'us',
-        label: 'US Equities (NYSE/NASDAQ)',
-        shortLabel: 'US',
+        label,
+        shortLabel,
         stateLabel: 'After-Hours',
         detail: 'Extended Trading · Ends 08:00 WIB',
         tone: 'extended',
@@ -78,8 +81,8 @@ function getSingleIndexSession(assetId: string, now: Date): MarketSessionStatus 
     }
     return {
       id: 'us',
-      label: 'US Equities (NYSE/NASDAQ)',
-      shortLabel: 'US',
+      label,
+      shortLabel,
       stateLabel: 'Closed',
       detail: 'Last Session Close · Next 21:30 WIB',
       tone: 'closed',
@@ -395,7 +398,7 @@ export function getAssetSessionStatus(
 export function getSessionProgressRatio(assetId: string, now: Date): number {
   const clamp = (v: number) => Math.max(0.08, Math.min(1, v));
 
-  if (assetId === 'SPX' || assetId === 'IXIC' || assetId === 'DJI') {
+  if (assetId === 'SPX' || assetId === 'IXIC' || assetId === 'DJI' || assetId === 'EIDO') {
     const ny = getTzClock(now, 'America/New_York');
     if (ny.isWeekend) return 1;
     if (ny.totalMin >= 9 * 60 + 30 && ny.totalMin < 16 * 60) {
@@ -465,6 +468,15 @@ export function getSessionProgressRatio(assetId: string, now: Date): number {
   if (assetId === 'BTCUSD' || assetId === 'ETHUSD') {
     const utcMins = now.getUTCHours() * 60 + now.getUTCMinutes();
     return clamp(utcMins / 1440);
+  }
+
+  if (assetId === 'DXY' || assetId === 'USDIDR' || assetId === 'EURUSD') {
+    const ny = getTzClock(now, 'America/New_York');
+    const isWeekendClosed =
+      (ny.weekday === 'Fri' && ny.totalMin >= 17 * 60) ||
+      ny.weekday === 'Sat' ||
+      (ny.weekday === 'Sun' && ny.totalMin < 18 * 60);
+    return isWeekendClosed ? 1 : clamp(((ny.hour * 60 + ny.minute + 360) % 1440) / 1440);
   }
 
   return 1;

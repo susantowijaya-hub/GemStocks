@@ -1,5 +1,6 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useId, useMemo, useRef, useState } from 'react';
 import { MarketAsset, Timeframe } from '../types/market';
+import { parseFormattedMarketNumber } from '../utils/marketSignals';
 
 interface InteractiveChartProps {
   asset: MarketAsset;
@@ -10,7 +11,7 @@ interface InteractiveChartProps {
 const TIMEFRAMES: Timeframe[] = ['1D', '1W', '1M', '3M', 'YTD', '1Y', 'ALL'];
 
 const TIME_LABELS: Record<Timeframe, string[]> = {
-  '1D': ['09:30', '11:00', '12:30', '14:00', '15:30', '16:00'],
+  '1D': ['Open', 'Morning', 'Midday', 'Afternoon', 'Pre-Close', 'Close'],
   '1W': ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Close'],
   '1M': ['W1', 'W2', 'W3', 'W4', 'Now'],
   '3M': ['Aug', 'Sep', 'Oct', 'Nov'],
@@ -37,32 +38,46 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
   timeframe,
   onTimeframeChange,
 }) => {
+  const uid = useId().replace(/:/g, '');
   const svgRef = useRef<SVGSVGElement | null>(null);
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
 
-  const series = asset.chartSeries[timeframe] ?? asset.chartSeries['1D'];
-  const isGain =
-    timeframe === '1D'
-      ? asset.changePercent >= 0
-      : series[series.length - 1] >= series[0];
+  const rawSeries = asset.chartSeries[timeframe] ?? asset.chartSeries['1D'];
+  const series = rawSeries.length >= 2 ? rawSeries : [asset.prevClose || asset.price, asset.price];
 
-  const strokeColor = isGain ? '#30D158' : '#FF453A';
-  const gradientId = `chartGrad-${asset.id}-${isGain ? 'gain' : 'loss'}`;
+  // Anchor split color & horizontal baseline on Opening Price for 1D, or Period Start for >1D
+  const openBaseline = useMemo(() => {
+    if (timeframe === '1D') {
+      const parsedOpen = parseFormattedMarketNumber(asset.open);
+      if (Number.isFinite(parsedOpen) && parsedOpen > 0) return parsedOpen;
+      if (Number.isFinite(asset.prevClose) && asset.prevClose > 0) return asset.prevClose;
+    }
+    return series[0];
+  }, [timeframe, asset.open, asset.prevClose, series]);
 
   const effectiveProgress =
     timeframe === '1D' && typeof asset.sessionProgressRatio === 'number'
       ? Math.max(0.15, Math.min(1, asset.sessionProgressRatio))
       : 1;
 
-  const { coords, linePath, areaPath, prevCloseY, minVal, maxVal, lastCoord } = useMemo(() => {
+  const {
+    coords,
+    linePath,
+    baselineAreaPath,
+    openingY,
+    minVal,
+    maxVal,
+    lastCoord,
+    splitPct,
+  } = useMemo(() => {
     const width = 700;
     const height = 220;
     const padY = 18;
     const drawW = width * effectiveProgress;
-    const allVals = [...series, asset.prevClose];
+    const allVals = [...series, openBaseline];
     const min = Math.min(...allVals);
     const max = Math.max(...allVals);
-    const span = max - min || 1;
+    const span = max - min || Math.max(Math.abs(openBaseline) * 0.002, 1);
 
     const pts = series.map((val, idx) => {
       const x = (idx / Math.max(series.length - 1, 1)) * drawW;
@@ -70,21 +85,24 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
       return { x, y, val };
     });
 
-    const pCloseY = padY + ((max - asset.prevClose) / span) * (height - padY * 2);
+    const rawOpenY = padY + ((max - openBaseline) / span) * (height - padY * 2);
+    const clampedOpenY = Math.max(8, Math.min(height - 8, rawOpenY));
     const line = buildSmoothPath(pts);
+    const firstPt = pts[0] ?? { x: 0, y: clampedOpenY, val: openBaseline };
     const lastPt = pts[pts.length - 1] ?? { x: drawW, y: height / 2, val: asset.price };
-    const area = `${line} L${lastPt.x.toFixed(1)},${height} L0,${height} Z`;
+    const baselineArea = `${line} L${lastPt.x.toFixed(1)},${clampedOpenY.toFixed(1)} L${firstPt.x.toFixed(1)},${clampedOpenY.toFixed(1)} Z`;
 
     return {
       coords: pts,
       linePath: line,
-      areaPath: area,
-      prevCloseY: Math.max(8, Math.min(height - 8, pCloseY)),
+      baselineAreaPath: baselineArea,
+      openingY: clampedOpenY,
       minVal: min,
       maxVal: max,
       lastCoord: lastPt,
+      splitPct: Math.max(0, Math.min(100, (clampedOpenY / height) * 100)),
     };
-  }, [series, asset.prevClose, asset.price, effectiveProgress]);
+  }, [series, openBaseline, asset.price, effectiveProgress]);
 
   const handlePointerPosition = (clientX: number) => {
     const svg = svgRef.current;
@@ -97,8 +115,11 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
   };
 
   const activePoint = hoverIndex !== null ? coords[hoverIndex] : null;
-  const activeDelta = activePoint ? activePoint.val - asset.prevClose : 0;
-  const activeDeltaPct = asset.prevClose ? (activeDelta / asset.prevClose) * 100 : 0;
+  const activeDelta = activePoint ? activePoint.val - openBaseline : 0;
+  const activeDeltaPct = openBaseline ? (activeDelta / openBaseline) * 100 : 0;
+
+  const lastAboveOpen = lastCoord.val >= openBaseline;
+  const activeAboveOpen = activePoint ? activePoint.val >= openBaseline : lastAboveOpen;
 
   const formatVal = (val: number) => {
     const formatted = val.toLocaleString('en-US', {
@@ -131,7 +152,7 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
       const totalMins = 9 * 60 + 30 + Math.round((idx / Math.max(coords.length - 1, 1)) * 390);
       const hh = String(Math.floor(totalMins / 60)).padStart(2, '0');
       const mm = String(totalMins % 60).padStart(2, '0');
-      return `${hh}:${mm} EST`;
+      return `${hh}:${mm}`;
     }
     const labels = TIME_LABELS[timeframe];
     const bucket = Math.min(
@@ -141,16 +162,20 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
     return `${timeframe} · ${labels[bucket]}`;
   };
 
-  const prevCloseFormatted = formatVal(asset.prevClose);
+  const strokeGradId = `chartSplitStroke-${uid}`;
+  const aboveFillId = `chartAboveFill-${uid}`;
+  const belowFillId = `chartBelowFill-${uid}`;
+  const aboveClipId = `chartAboveClip-${uid}`;
+  const belowClipId = `chartBelowClip-${uid}`;
 
   return (
     <div className="flex flex-col gap-3">
-      {/* Segmented Timeframe Selector + Prev Close Legend */}
-      <div className="flex items-center justify-between gap-2 overflow-x-auto no-scrollbar py-0.5">
+      {/* Segmented Timeframe Selector + Above/Below Opening Reference Legend */}
+      <div className="flex flex-wrap items-center justify-between gap-2 py-0.5">
         <div
           role="tablist"
           aria-label="Chart Timeframes"
-          className="inline-flex p-1 rounded-full bg-[#E5E5EA]/80 dark:bg-[#1C1C1E] border border-[#D1D1D6] dark:border-[#2C2C2E]"
+          className="liquid-glass-pill inline-flex p-1 rounded-full overflow-x-auto no-scrollbar max-w-full"
         >
           {TIMEFRAMES.map((tf) => {
             const active = tf === timeframe;
@@ -161,10 +186,10 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
                 role="tab"
                 aria-selected={active}
                 onClick={() => onTimeframeChange(tf)}
-                className={`px-3 sm:px-4 py-1 rounded-full text-xs font-semibold transition-colors whitespace-nowrap ${
+                className={`px-3 sm:px-4 py-1 rounded-full text-xs font-bold transition-all whitespace-nowrap ${
                   active
-                    ? 'bg-[#0071E3] dark:bg-[#0A84FF] text-white shadow-sm'
-                    : 'text-[#6C6C70] dark:text-[#8E8E93] hover:text-[#1C1C1E] dark:hover:text-white'
+                    ? 'bg-[#0066CC] dark:bg-[#0A84FF] text-white shadow-sm'
+                    : 'text-[#52525A] dark:text-[#AEAEB8] hover:text-[#1C1C1E] dark:hover:text-white'
                 }`}
               >
                 {tf}
@@ -173,22 +198,30 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
           })}
         </div>
 
-        <div className="hidden sm:flex items-center gap-2 text-xs text-[#6C6C70] dark:text-[#8E8E93] shrink-0">
-          <span className="inline-block w-3 border-b-2 border-dashed border-[#8E8E93]" />
-          <span>
-            Prev Close (
-            <span className="tabular-nums font-semibold text-[#1C1C1E] dark:text-white">
-              {prevCloseFormatted}
+        <div className="flex items-center gap-3 text-[11px] sm:text-xs text-[#52525A] dark:text-[#B4B4BE] shrink-0">
+          <div className="inline-flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full bg-[#16A34A] dark:bg-[#30D158]" />
+            <span className="font-semibold text-[#0F7033] dark:text-[#4ADE80]">Above</span>
+            <span className="text-[#8E8E93]">/</span>
+            <span className="w-2 h-2 rounded-full bg-[#DC2626] dark:bg-[#FF453A]" />
+            <span className="font-semibold text-[#C41C16] dark:text-[#FF5A52]">Below</span>
+          </div>
+          <div className="inline-flex items-center gap-1.5">
+            <span className="inline-block w-3 border-b-2 border-dashed border-[#6E6E78] dark:border-[#9898A2]" />
+            <span>
+              {timeframe === '1D' ? 'Open' : 'Start'}{' '}
+              <span className="tabular-nums font-bold font-mono text-[#1C1C1E] dark:text-white">
+                {formatVal(openBaseline)}
+              </span>
             </span>
-            )
-          </span>
+          </div>
         </div>
       </div>
 
-      {/* Interactive SVG Canvas */}
-      <div className="relative w-full h-64 sm:h-72 bg-white dark:bg-[#1C1C1E]/60 rounded-2xl border border-[#E5E5EA] dark:border-[#2C2C2E] p-3 sm:p-4 flex flex-col justify-between overflow-hidden select-none touch-pan-y">
+      {/* Interactive SVG Canvas with Liquid Glass Frame */}
+      <div className="liquid-glass-card relative w-full h-64 sm:h-72 rounded-2xl p-3 sm:p-4 flex flex-col justify-between overflow-hidden select-none touch-pan-y">
         {/* Range Bounds Hint */}
-        <div className="flex items-center justify-between text-[10px] font-mono tabular-nums text-[#6C6C70] dark:text-[#8E8E93] z-10 pointer-events-none">
+        <div className="flex items-center justify-between text-[10px] font-mono font-semibold tabular-nums text-[#52525A] dark:text-[#B4B4BE] z-10 pointer-events-none">
           <span>High: {formatVal(maxVal)}</span>
           <span>Low: {formatVal(minVal)}</span>
         </div>
@@ -196,22 +229,22 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         {/* Floating Tooltip Overlay */}
         {activePoint && hoverIndex !== null && (
           <div
-            className="absolute top-3 z-20 pointer-events-none bg-white/95 dark:bg-black/90 backdrop-blur-md border border-[#E5E5EA] dark:border-[#2C2C2E] px-3 py-1.5 rounded-xl shadow-lg text-xs flex flex-col"
+            className="liquid-glass-strong absolute top-3 z-20 pointer-events-none px-3 py-1.5 rounded-xl shadow-lg text-xs flex flex-col"
             style={{
-              left: `clamp(12px, calc(${(activePoint.x / 700) * 100}% - 55px), calc(100% - 145px))`,
+              left: `clamp(12px, calc(${(activePoint.x / 700) * 100}% - 55px), calc(100% - 155px))`,
             }}
           >
-            <span className="text-[10px] text-[#6C6C70] dark:text-[#8E8E93] font-medium">
-              {formatTimeHint(hoverIndex)}
+            <span className="text-[10px] text-[#52525A] dark:text-[#B4B4BE] font-semibold">
+              {formatTimeHint(hoverIndex)} · vs {timeframe === '1D' ? 'Open' : 'Start'}
             </span>
             <span className="font-bold text-sm text-[#1C1C1E] dark:text-white tabular-nums font-mono">
               {formatVal(activePoint.val)}
             </span>
             <span
-              className={`text-[11px] font-semibold tabular-nums font-mono ${
+              className={`text-[11px] font-bold tabular-nums font-mono ${
                 activeDelta >= 0
-                  ? 'text-[#16803C] dark:text-[#30D158]'
-                  : 'text-[#D7261C] dark:text-[#FF453A]'
+                  ? 'text-[#0F7033] dark:text-[#4ADE80]'
+                  : 'text-[#C41C16] dark:text-[#FF5A52]'
               }`}
             >
               {activeDelta >= 0 ? '+' : ''}
@@ -239,36 +272,86 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
           onTouchEnd={() => setHoverIndex(null)}
         >
           <defs>
-            <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor={strokeColor} stopOpacity="0.28" />
-              <stop offset="100%" stopColor={strokeColor} stopOpacity="0.0" />
+            {/* Exact coordinate-space stroke split at Opening Y */}
+            <linearGradient
+              id={strokeGradId}
+              gradientUnits="userSpaceOnUse"
+              x1="0"
+              y1="0"
+              x2="0"
+              y2="220"
+            >
+              <stop offset="0%" stopColor="#22C55E" />
+              <stop offset={`${splitPct}%`} stopColor="#22C55E" />
+              <stop offset={`${splitPct}%`} stopColor="#EF4444" />
+              <stop offset="100%" stopColor="#EF4444" />
             </linearGradient>
+
+            <linearGradient
+              id={aboveFillId}
+              gradientUnits="userSpaceOnUse"
+              x1="0"
+              y1="0"
+              x2="0"
+              y2={String(Math.max(1, openingY))}
+            >
+              <stop offset="0%" stopColor="#22C55E" stopOpacity="0.34" />
+              <stop offset="100%" stopColor="#22C55E" stopOpacity="0.05" />
+            </linearGradient>
+
+            <linearGradient
+              id={belowFillId}
+              gradientUnits="userSpaceOnUse"
+              x1="0"
+              y1={String(openingY)}
+              x2="0"
+              y2="220"
+            >
+              <stop offset="0%" stopColor="#EF4444" stopOpacity="0.05" />
+              <stop offset="100%" stopColor="#EF4444" stopOpacity="0.34" />
+            </linearGradient>
+
+            <clipPath id={aboveClipId}>
+              <rect x="0" y="0" width="700" height={openingY} />
+            </clipPath>
+            <clipPath id={belowClipId}>
+              <rect x="0" y={openingY} width="700" height={Math.max(0, 220 - openingY)} />
+            </clipPath>
           </defs>
 
-          {/* Dotted Prev Close Reference Line (Google Finance style) */}
+          {/* Horizontal Dashed Opening Reference Line */}
           <line
             x1="0"
-            y1={prevCloseY}
+            y1={openingY}
             x2="700"
-            y2={prevCloseY}
-            stroke="#8E8E93"
+            y2={openingY}
+            stroke="#8E8E98"
             strokeWidth="1.5"
-            strokeDasharray="2 5"
+            strokeDasharray="3 5"
             strokeLinecap="round"
-            opacity="0.65"
+            opacity="0.75"
           />
 
-          {/* Area Fill */}
-          <path d={areaPath} fill={`url(#${gradientId})`} />
+          {/* Split Area Fill: Green above Opening, Red below Opening */}
+          <path
+            d={baselineAreaPath}
+            clipPath={`url(#${aboveClipId})`}
+            fill={`url(#${aboveFillId})`}
+          />
+          <path
+            d={baselineAreaPath}
+            clipPath={`url(#${belowClipId})`}
+            fill={`url(#${belowFillId})`}
+          />
 
-          {/* Main Price Curve */}
+          {/* Split Main Price Curve (Green above Opening, Red below Opening) */}
           <path
             d={linePath}
             fill="none"
-            stroke={strokeColor}
-            strokeWidth="2.5"
+            stroke={`url(#${strokeGradId})`}
+            strokeWidth="2.6"
             strokeLinecap="round"
-            className={isGain ? 'sparkline-glow-gain' : 'sparkline-glow-loss'}
+            strokeLinejoin="round"
           />
 
           {/* Live Session Endpoint Dot */}
@@ -276,8 +359,10 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
             <circle
               cx={lastCoord.x}
               cy={lastCoord.y}
-              r="4"
-              fill={strokeColor}
+              r="4.2"
+              fill={lastAboveOpen ? '#22C55E' : '#EF4444'}
+              stroke="#FFFFFF"
+              strokeWidth="1.5"
               className="pointer-events-none"
             />
           )}
@@ -291,7 +376,7 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
                 x2={activePoint.x}
                 y2="220"
                 stroke="currentColor"
-                className="text-[#1C1C1E]/40 dark:text-white/55 pointer-events-none"
+                className="text-[#1C1C1E]/45 dark:text-white/55 pointer-events-none"
                 strokeWidth="1"
                 strokeDasharray="3,3"
               />
@@ -300,7 +385,7 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
                 cy={activePoint.y}
                 r="5.5"
                 fill="#FFFFFF"
-                stroke={strokeColor}
+                stroke={activeAboveOpen ? '#16A34A' : '#DC2626'}
                 strokeWidth="3"
                 className="pointer-events-none"
               />
@@ -309,7 +394,7 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         </svg>
 
         {/* Time Axis Labels */}
-        <div className="flex items-center justify-between text-[10px] text-[#6C6C70] dark:text-[#8E8E93] font-medium pt-2 border-t border-[#E5E5EA] dark:border-[#2C2C2E]/60">
+        <div className="flex items-center justify-between text-[10px] text-[#52525A] dark:text-[#B4B4BE] font-semibold pt-2 border-t border-black/10 dark:border-white/10">
           {TIME_LABELS[timeframe].map((lbl) => (
             <span key={lbl}>{lbl}</span>
           ))}

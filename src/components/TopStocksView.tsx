@@ -1,16 +1,42 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { ArrowDownLeft, ArrowUpRight, BarChart3, Clock, RefreshCw } from 'lucide-react';
-import { StockMover, StocksMoversBucket } from '../types/market';
+import { motion } from 'motion/react';
+import {
+  ArrowDownLeft,
+  ArrowRight,
+  ArrowUpRight,
+  BarChart3,
+  Building2,
+  Clock,
+  Compass,
+  Flame,
+  Globe2,
+  Loader2,
+  RefreshCw,
+  TrendingDown,
+  TrendingUp,
+} from 'lucide-react';
+import {
+  AppRoute,
+  MarketIntelligenceResponse,
+  StockMover,
+  StocksMoversBucket,
+} from '../types/market';
 import { getAllMarketSessions, MarketSessionStatus } from '../utils/marketSessions';
+import { getStockSignal } from '../utils/marketSignals';
 import { GoogleFinanceDeltaPill, GoogleFinanceMiniChart } from './GoogleFinanceMiniChart';
+import { SignalBadge } from './MarketUiPrimitives';
 
 interface TopStocksViewProps {
   usBucket: StocksMoversBucket;
   idxBucket: StocksMoversBucket;
   stocksUpdatedAt: string | null;
+  stocksLoading?: boolean;
+  marketIntelligence?: MarketIntelligenceResponse | null;
   searchQuery: string;
   onRefresh: () => void;
   onInspectSymbol?: (yahooSymbol: string) => void;
+  onNavigate?: (route: AppRoute) => void;
+  onClearSearch?: () => void;
 }
 
 type MarketFilter = 'all' | 'us' | 'id';
@@ -69,9 +95,14 @@ function SessionStatusCard({
         : 'bg-[#8E8E93]';
 
   return (
-    <div className="rounded-2xl bg-white dark:bg-[#1C1C1E] border border-[#E5E5EA] dark:border-[#2C2C2E] p-4 flex items-center justify-between gap-3">
+    <div className="rounded-2xl liquid-glass-card p-4 flex items-center justify-between gap-3">
       <div className="min-w-0">
         <div className="flex items-center gap-2">
+          {session.id === 'idx' ? (
+            <Globe2 className="w-3.5 h-3.5 text-[#0071E3] dark:text-[#8AB4F8] shrink-0" />
+          ) : (
+            <Building2 className="w-3.5 h-3.5 text-[#0071E3] dark:text-[#8AB4F8] shrink-0" />
+          )}
           <span className="text-xs font-bold text-[#1C1C1E] dark:text-white truncate">
             {session.label}
           </span>
@@ -101,6 +132,10 @@ function MarketMoversSection({
   stocks,
   isForeignFlow = false,
   foreignSide,
+  loading = false,
+  searchQuery = '',
+  onRefresh,
+  onClearSearch,
   onInspectSymbol,
 }: {
   title: string;
@@ -109,6 +144,10 @@ function MarketMoversSection({
   stocks: StockMover[];
   isForeignFlow?: boolean;
   foreignSide?: 'BUY' | 'SELL';
+  loading?: boolean;
+  searchQuery?: string;
+  onRefresh?: () => void;
+  onClearSearch?: () => void;
   onInspectSymbol?: (yahooSymbol: string) => void;
 }) {
   const openChartForStock = (stock: StockMover) => {
@@ -118,8 +157,13 @@ function MarketMoversSection({
   };
 
   return (
-    <section className="rounded-2xl bg-white dark:bg-[#1C1C1E] border border-[#E5E5EA] dark:border-[#2C2C2E] overflow-hidden">
-      <div className="px-4 sm:px-5 py-3.5 border-b border-[#E5E5EA] dark:border-[#2C2C2E] flex flex-wrap items-center justify-between gap-2">
+    <motion.section
+      initial={{ opacity: 0.85, y: 5 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+      className="rounded-2xl liquid-glass-card overflow-hidden"
+    >
+      <div className="px-4 sm:px-5 py-3.5 border-b border-black/8 dark:border-white/10 flex flex-wrap items-center justify-between gap-2">
         <div>
           <h2 className="text-base sm:text-lg font-bold text-[#1C1C1E] dark:text-white">{title}</h2>
           <p className="text-xs text-[#6C6C70] dark:text-[#8E8E93]">{subtitle}</p>
@@ -133,11 +177,42 @@ function MarketMoversSection({
       </div>
 
       {stocks.length === 0 ? (
-        <div className="p-8 text-center text-xs text-[#6C6C70] dark:text-[#8E8E93]">
-          {isForeignFlow
-            ? 'Syncing latest IDX Foreign Flow report...'
-            : 'No stocks match the active filter.'}
-        </div>
+        loading ? (
+          <div className="p-8 flex flex-col items-center justify-center gap-2 text-xs text-[#6C6C70] dark:text-[#8E8E93]">
+            <Loader2 className="w-5 h-5 animate-spin text-[#0071E3] dark:text-[#0A84FF]" />
+            <span>Loading live equity movers &amp; institutional liquidity ranking...</span>
+          </div>
+        ) : (
+          <div className="p-8 text-center text-xs text-[#6C6C70] dark:text-[#8E8E93] flex flex-col items-center gap-2.5">
+            <span>
+              {searchQuery.trim()
+                ? `No equity tickers match "${searchQuery.trim()}".`
+                : isForeignFlow
+                  ? 'Syncing latest IDX Foreign Flow report...'
+                  : 'No live movers available right now.'}
+            </span>
+            <div className="flex items-center gap-2">
+              {searchQuery.trim() && onClearSearch && (
+                <button
+                  type="button"
+                  onClick={onClearSearch}
+                  className="px-3 py-1 rounded-lg bg-[#0071E3] text-white font-semibold"
+                >
+                  Clear search filter
+                </button>
+              )}
+              {onRefresh && (
+                <button
+                  type="button"
+                  onClick={onRefresh}
+                  className="px-3 py-1 rounded-lg border border-[#D1D1D6] dark:border-[#2C2C2E] font-semibold text-[#1C1C1E] dark:text-white"
+                >
+                  Retry Live Sync
+                </button>
+              )}
+            </div>
+          </div>
+        )
       ) : (
         <>
           {/* Desktop Table */}
@@ -147,6 +222,7 @@ function MarketMoversSection({
                 <tr className="border-b border-[#E5E5EA] dark:border-[#2C2C2E] text-[11px] font-bold uppercase tracking-wider text-[#6C6C70] dark:text-[#8E8E93]">
                   <th className="py-3 pl-5 pr-2 w-12">Rank</th>
                   <th className="py-3 px-3">Stock</th>
+                  <th className="py-3 px-3">Signal</th>
                   <th className="py-3 px-3">Trend</th>
                   {isForeignFlow && (
                     <th className="py-3 px-3 text-right">
@@ -164,6 +240,7 @@ function MarketMoversSection({
                 {stocks.map((stock, idx) => {
                   const isGain = stock.changePercent >= 0;
                   const isForeignBuy = (stock.foreignNetAmount ?? 0) >= 0;
+                  const signal = getStockSignal(stock);
                   return (
                     <tr
                       key={`${stock.market}-${stock.symbol}-${idx}`}
@@ -176,12 +253,23 @@ function MarketMoversSection({
                         #{idx + 1}
                       </td>
                       <td className="py-3 px-3">
-                        <div className="font-bold text-sm text-[#1C1C1E] dark:text-white">
-                          {stock.symbol}
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-bold text-sm text-[#1C1C1E] dark:text-white">
+                            {stock.symbol}
+                          </span>
+                          {idx < 3 && (
+                            <Flame
+                              className="w-3.5 h-3.5 text-[#FF9F0A] shrink-0"
+                              aria-label="Top mover"
+                            />
+                          )}
                         </div>
-                        <div className="text-[11px] text-[#6C6C70] dark:text-[#8E8E93] truncate max-w-[220px]">
+                        <div className="text-[11px] text-[#6C6C70] dark:text-[#8E8E93] truncate max-w-[200px]">
                           {stock.name} · {stock.exchange}
                         </div>
+                      </td>
+                      <td className="py-3 px-3">
+                        <SignalBadge signal={signal} compact />
                       </td>
                       <td className="py-3 px-3">
                         <div className="w-20 h-8">
@@ -248,6 +336,7 @@ function MarketMoversSection({
             {stocks.map((stock, idx) => {
               const isGain = stock.changePercent >= 0;
               const isForeignBuy = (stock.foreignNetAmount ?? 0) >= 0;
+              const signal = getStockSignal(stock);
               return (
                 <div
                   key={`${stock.market}-${stock.symbol}-m-${idx}`}
@@ -257,19 +346,17 @@ function MarketMoversSection({
                   }`}
                 >
                   <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-1.5 flex-wrap">
                       <span className="text-[11px] font-mono font-bold text-[#6C6C70] dark:text-[#8E8E93]">
                         #{idx + 1}
                       </span>
                       <span className="text-sm font-extrabold text-[#1C1C1E] dark:text-white">
                         {stock.symbol}
                       </span>
-                      <span className="text-[10px] font-mono text-[#6C6C70] dark:text-[#8E8E93]">
-                        Vol {stock.volume}
-                      </span>
+                      <SignalBadge signal={signal} compact />
                     </div>
                     <p className="text-xs text-[#6C6C70] dark:text-[#8E8E93] truncate mt-0.5">
-                      {stock.name}
+                      {stock.name} · Vol {stock.volume}
                     </p>
                     {isForeignFlow && stock.foreignNetLabel ? (
                       <p
@@ -314,7 +401,7 @@ function MarketMoversSection({
           </div>
         </>
       )}
-    </section>
+    </motion.section>
   );
 }
 
@@ -322,9 +409,13 @@ export const TopStocksView: React.FC<TopStocksViewProps> = ({
   usBucket,
   idxBucket,
   stocksUpdatedAt,
+  stocksLoading = false,
+  marketIntelligence = null,
   searchQuery,
   onRefresh,
   onInspectSymbol,
+  onNavigate,
+  onClearSearch,
 }) => {
   const [marketFilter, setMarketFilter] = useState<MarketFilter>('all');
   const [directionFilter, setDirectionFilter] = useState<DirectionFilter>('impact');
@@ -380,6 +471,17 @@ export const TopStocksView: React.FC<TopStocksViewProps> = ({
     return filterSearch(raw);
   }, [idxBucket, directionFilter, searchQuery]);
 
+  const combinedSignalTally = useMemo(() => {
+    let bull = 0;
+    let bear = 0;
+    for (const s of [...activeUsList, ...activeIdxList]) {
+      const sig = getStockSignal(s);
+      if (sig.direction === 'bull') bull += 1;
+      else if (sig.direction === 'bear') bear += 1;
+    }
+    return { bull, bear };
+  }, [activeUsList, activeIdxList]);
+
   const handleManualRefresh = () => {
     setIsRefreshing(true);
     onRefresh();
@@ -424,7 +526,7 @@ export const TopStocksView: React.FC<TopStocksViewProps> = ({
             </h1>
           </div>
           <p className="text-xs sm:text-sm text-[#6C6C70] dark:text-[#8E8E93] mt-1">
-            Always 10 verified equities per category across US (NYSE/NASDAQ) &amp; Indonesia (IDX), plus daily IDX Foreign Buy &amp; Foreign Sell flow.
+            Always 10 institutional-weighted equities across US (NYSE/NASDAQ) &amp; Indonesia (IDX), plus daily IDX Foreign Buy &amp; Foreign Sell flow.
           </p>
         </div>
 
@@ -435,9 +537,9 @@ export const TopStocksView: React.FC<TopStocksViewProps> = ({
           <button
             type="button"
             onClick={handleManualRefresh}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white dark:bg-[#1C1C1E] border border-[#D1D1D6] dark:border-[#2C2C2E] hover:border-[#0071E3] text-xs font-semibold text-[#1C1C1E] dark:text-white transition-colors"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full liquid-glass-pill hover:border-[#0071E3] text-xs font-semibold text-[#1C1C1E] dark:text-white transition-colors"
           >
-            <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
+            <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing || stocksLoading ? 'animate-spin' : ''}`} />
             Refresh
           </button>
         </div>
@@ -449,9 +551,54 @@ export const TopStocksView: React.FC<TopStocksViewProps> = ({
         <SessionStatusCard session={sessions.idx} count={activeIdxList.length || 10} />
       </div>
 
+      {/* Connected Equity & Foreign Flow Intelligence Summary Banner */}
+      <section className="rounded-2xl liquid-glass-card p-4 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <Compass className="w-4 h-4 text-[#0071E3] dark:text-[#0A84FF] shrink-0" />
+            <span className="text-xs font-bold text-[#1C1C1E] dark:text-white">
+              Stocks &amp; Foreign Flow Briefing
+            </span>
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[#30D158]/15 text-[#16803C] dark:text-[#30D158] text-[10px] font-bold tabular-nums">
+              <TrendingUp className="w-3 h-3" />
+              {combinedSignalTally.bull} Bull Signals
+            </span>
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[#FF453A]/15 text-[#D7261C] dark:text-[#FF453A] text-[10px] font-bold tabular-nums">
+              <TrendingDown className="w-3 h-3" />
+              {combinedSignalTally.bear} Bear Signals
+            </span>
+          </div>
+          <p className="text-xs text-[#3A3A3C] dark:text-[#D1D1D6] leading-relaxed mt-1.5">
+            {marketIntelligence?.stocksAndFlowSummary ||
+              'Synchronizing US institutional capitalization leaders, Jakarta IDX liquidity movers, and foreign net buy/sell flows across active sessions.'}
+          </p>
+        </div>
+
+        {onNavigate && (
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => onNavigate('dashboard')}
+              className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-[#F2F2F7] dark:bg-[#2C2C2E] text-xs font-semibold text-[#1C1C1E] dark:text-white hover:opacity-85 transition-opacity"
+            >
+              <span>Indices</span>
+              <ArrowRight className="w-3 h-3" />
+            </button>
+            <button
+              type="button"
+              onClick={() => onNavigate('news')}
+              className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-[#0071E3]/10 dark:bg-[#0A84FF]/15 text-xs font-semibold text-[#0071E3] dark:text-[#8AB4F8] hover:opacity-85 transition-opacity"
+            >
+              <span>News &amp; Recap</span>
+              <ArrowRight className="w-3 h-3" />
+            </button>
+          </div>
+        )}
+      </section>
+
       {/* Market & Category Filter Bar */}
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="inline-flex rounded-xl bg-[#E5E5EA]/80 dark:bg-[#1C1C1E] p-1 border border-[#D1D1D6] dark:border-[#2C2C2E]">
+        <div className="inline-flex rounded-xl liquid-glass-pill p-1">
           {(
             [
               {
@@ -469,7 +616,7 @@ export const TopStocksView: React.FC<TopStocksViewProps> = ({
               className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-colors ${
                 marketFilter === tab.id
                   ? 'bg-[#0071E3] dark:bg-[#0A84FF] text-white shadow-sm'
-                  : 'text-[#6C6C70] dark:text-[#8E8E93] hover:text-[#1C1C1E] dark:hover:text-white'
+                  : 'text-[#4A4D57] dark:text-[#B4B8C4] hover:text-[#1C1C1E] dark:hover:text-white'
               }`}
             >
               {tab.label}
@@ -477,7 +624,7 @@ export const TopStocksView: React.FC<TopStocksViewProps> = ({
           ))}
         </div>
 
-        <div className="inline-flex flex-wrap rounded-xl bg-[#E5E5EA]/80 dark:bg-[#1C1C1E] p-1 border border-[#D1D1D6] dark:border-[#2C2C2E] gap-0.5">
+        <div className="inline-flex flex-wrap rounded-xl liquid-glass-pill p-1 gap-0.5">
           {(
             [
               { id: 'impact', label: 'Highest Impact', idxOnly: false },
@@ -518,9 +665,13 @@ export const TopStocksView: React.FC<TopStocksViewProps> = ({
       {showUsSection && (
         <MarketMoversSection
           title={`United States · ${directionTitleSuffix}`}
-          subtitle="Ranked from live NYSE & NASDAQ session movers and traded liquidity"
+          subtitle="Ranked by institutional market-cap weight, dollar turnover, relative volume, and price displacement"
           session={sessions.us}
           stocks={activeUsList}
+          loading={stocksLoading}
+          searchQuery={searchQuery}
+          onRefresh={handleManualRefresh}
+          onClearSearch={onClearSearch}
           onInspectSymbol={onInspectSymbol}
         />
       )}
@@ -533,12 +684,16 @@ export const TopStocksView: React.FC<TopStocksViewProps> = ({
               ? 'Top 10 Indonesian equities by net foreign institutional buy value (IDR)'
               : directionFilter === 'foreignSell'
                 ? 'Top 10 Indonesian equities by net foreign institutional sell value (IDR)'
-                : 'Top 10 liquid Jakarta IDX/LQ45 equities for the active session'
+                : 'Top 10 institutional IDX/LQ45 equities ranked by market-cap impact, turnover & relative volume'
           }
           session={sessions.idx}
           stocks={activeIdxList}
           isForeignFlow={isForeignTab}
           foreignSide={directionFilter === 'foreignBuy' ? 'BUY' : directionFilter === 'foreignSell' ? 'SELL' : undefined}
+          loading={stocksLoading}
+          searchQuery={searchQuery}
+          onRefresh={handleManualRefresh}
+          onClearSearch={onClearSearch}
           onInspectSymbol={onInspectSymbol}
         />
       )}

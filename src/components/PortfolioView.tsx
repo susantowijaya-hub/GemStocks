@@ -19,10 +19,11 @@ import {
   Pencil,
   PieChart,
   Plus,
-  ReceiptText,
   RefreshCw,
   Search,
   Trash2,
+  TrendingDown,
+  TrendingUp,
   X,
 } from 'lucide-react';
 import {
@@ -48,7 +49,9 @@ import {
   PortfolioTransaction,
   StockSearchResult,
 } from '../types/market';
+import { computeTechnicalSignal } from '../utils/marketSignals';
 import { GoogleFinanceDeltaPill } from './GoogleFinanceMiniChart';
+import { AssetCategoryMiniIcon, SignalBadge } from './MarketUiPrimitives';
 
 interface PortfolioViewProps {
   assets: MarketAsset[];
@@ -57,7 +60,7 @@ interface PortfolioViewProps {
   onInspectSymbol?: (yahooSymbol: string) => void;
 }
 
-type PortfolioSubTab = 'holdings' | 'insights' | 'transactions';
+type PortfolioSubTab = 'holdings' | 'insights';
 type PortfolioChartRange = '1D' | '5D' | '1M' | '6M' | 'YTD' | '1Y' | 'MAX';
 
 const STORAGE_KEY = 'stocks_gf_portfolio_state_v1';
@@ -964,6 +967,17 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
         )
         .sort((a, b) => Date.parse(b.purchaseDateIso) - Date.parse(a.purchaseDateIso));
 
+      const signal = computeTechnicalSignal({
+        price: liveNativePrice,
+        prevClose: prevNativeClose,
+        changePercent: dayChangePct,
+        dayHigh: quote?.dayHigh,
+        dayLow: quote?.dayLow,
+        series: quote?.chart1D,
+        assetId: h.symbol,
+        category: h.category,
+      });
+
       return {
         ...h,
         lots: holdingLots,
@@ -977,11 +991,22 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
         dayChangePct,
         totalReturnVal,
         totalReturnPct,
+        signal,
         sessionOpen: quote?.sessionOpen ?? matchedAsset?.marketSessionOpen ?? false,
         sessionStateLabel: quote?.sessionStateLabel ?? matchedAsset?.sessionStateLabel ?? 'Syncing',
       };
     });
   }, [filteredHoldings, state.lots, liveQuotes, assets, activePortfolio.displayCurrency, convertAmount]);
+
+  const portfolioSignalTally = useMemo(() => {
+    let bull = 0;
+    let bear = 0;
+    for (const h of enrichedHoldings) {
+      if (h.signal.direction === 'bull') bull += 1;
+      else if (h.signal.direction === 'bear') bear += 1;
+    }
+    return { bull, bear };
+  }, [enrichedHoldings]);
 
   // Portfolio Summary Totals
   const summary = useMemo(() => {
@@ -1672,12 +1697,14 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
     const line = coords
       .map((pt, idx) => `${idx === 0 ? 'M' : 'L'}${pt.x.toFixed(1)},${pt.y.toFixed(1)}`)
       .join(' ');
+    const firstX = coords[0]?.x ?? 0;
     const lastX = coords[coords.length - 1]?.x ?? w;
-    const area = `${line} L${lastX.toFixed(1)},${h} L0,${h} Z`;
     const prevY = Math.max(10, Math.min(h - 10, padY + ((max - refClose) / span) * (h - padY * 2)));
+    const area = `${line} L${lastX.toFixed(1)},${prevY.toFixed(1)} L${firstX.toFixed(1)},${prevY.toFixed(1)} Z`;
+    const splitPct = Math.max(0, Math.min(100, (prevY / h) * 100));
 
     const yTicks = [max, max - span * 0.33, max - span * 0.66, min];
-    return { coords, line, area, prevY, yTicks, width: w, height: h };
+    return { coords, line, area, prevY, splitPct, yTicks, width: w, height: h };
   }, [portfolioChartData]);
 
   const handleChartPointer = (clientX: number) => {
@@ -1787,7 +1814,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
       </div>
 
       {/* Main Portfolio Summary & Interactive Chart Card */}
-      <section className="rounded-3xl bg-white dark:bg-[#1C1C1E] border border-[#E5E5EA] dark:border-[#2C2C2E] p-5 sm:p-6 flex flex-col gap-4">
+      <section className="rounded-3xl liquid-glass-card p-5 sm:p-6 flex flex-col gap-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <div className="flex items-center gap-2">
@@ -1919,10 +1946,55 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                   onTouchEnd={() => setHoverIdx(null)}
                 >
                   <defs>
-                    <linearGradient id={`pfArea-${chartUid}`} x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#4C8DF6" stopOpacity="0.42" />
-                      <stop offset="100%" stopColor="#4C8DF6" stopOpacity="0.06" />
+                    <linearGradient
+                      id={`pfStroke-${chartUid}`}
+                      gradientUnits="userSpaceOnUse"
+                      x1="0"
+                      y1="0"
+                      x2="0"
+                      y2={String(chartGeometry.height)}
+                    >
+                      <stop offset="0%" stopColor="#16A34A" />
+                      <stop offset={`${chartGeometry.splitPct}%`} stopColor="#16A34A" />
+                      <stop offset={`${chartGeometry.splitPct}%`} stopColor="#EF4444" />
+                      <stop offset="100%" stopColor="#EF4444" />
                     </linearGradient>
+
+                    <linearGradient
+                      id={`pfAreaAbove-${chartUid}`}
+                      gradientUnits="userSpaceOnUse"
+                      x1="0"
+                      y1="0"
+                      x2="0"
+                      y2={String(Math.max(1, chartGeometry.prevY))}
+                    >
+                      <stop offset="0%" stopColor="#22C55E" stopOpacity="0.34" />
+                      <stop offset="100%" stopColor="#22C55E" stopOpacity="0.04" />
+                    </linearGradient>
+
+                    <linearGradient
+                      id={`pfAreaBelow-${chartUid}`}
+                      gradientUnits="userSpaceOnUse"
+                      x1="0"
+                      y1={String(chartGeometry.prevY)}
+                      x2="0"
+                      y2={String(chartGeometry.height)}
+                    >
+                      <stop offset="0%" stopColor="#EF4444" stopOpacity="0.04" />
+                      <stop offset="100%" stopColor="#EF4444" stopOpacity="0.34" />
+                    </linearGradient>
+
+                    <clipPath id={`pfClipAbove-${chartUid}`}>
+                      <rect x="0" y="0" width={chartGeometry.width} height={chartGeometry.prevY} />
+                    </clipPath>
+                    <clipPath id={`pfClipBelow-${chartUid}`}>
+                      <rect
+                        x="0"
+                        y={chartGeometry.prevY}
+                        width={chartGeometry.width}
+                        height={Math.max(0, chartGeometry.height - chartGeometry.prevY)}
+                      />
+                    </clipPath>
                   </defs>
 
                   <line
@@ -1930,19 +2002,28 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                     y1={chartGeometry.prevY}
                     x2={chartGeometry.width}
                     y2={chartGeometry.prevY}
-                    stroke="#8E8E93"
+                    stroke="#8E8E98"
                     strokeWidth="1.5"
                     strokeDasharray="2 5"
                     strokeLinecap="round"
-                    opacity="0.7"
+                    opacity="0.72"
                   />
 
-                  <path d={chartGeometry.area} fill={`url(#pfArea-${chartUid})`} />
+                  <path
+                    d={chartGeometry.area}
+                    clipPath={`url(#pfClipAbove-${chartUid})`}
+                    fill={`url(#pfAreaAbove-${chartUid})`}
+                  />
+                  <path
+                    d={chartGeometry.area}
+                    clipPath={`url(#pfClipBelow-${chartUid})`}
+                    fill={`url(#pfAreaBelow-${chartUid})`}
+                  />
                   <path
                     d={chartGeometry.line}
                     fill="none"
-                    stroke="#5B9BFF"
-                    strokeWidth="2.2"
+                    stroke={`url(#pfStroke-${chartUid})`}
+                    strokeWidth="2.4"
                     strokeLinecap="round"
                     strokeLinejoin="round"
                   />
@@ -2029,13 +2110,12 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
         )}
       </section>
 
-      {/* Sub-Tabs: Holdings | Insights | Transactions */}
-      <div className="border-b border-[#E5E5EA] dark:border-[#2C2C2E] grid grid-cols-3 text-center">
+      {/* Sub-Tabs: Holdings | Insights */}
+      <div className="border-b border-[#E5E5EA] dark:border-[#2C2C2E] grid grid-cols-2 text-center">
         {(
           [
             { id: 'holdings', label: 'Holdings', icon: Briefcase },
             { id: 'insights', label: 'Insights', icon: PieChart },
-            { id: 'transactions', label: 'Transactions', icon: ReceiptText },
           ] as const
         ).map((tab) => {
           const active = subTab === tab.id;
@@ -2064,7 +2144,25 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
       {/* TAB 1: HOLDINGS (with Swipe-to-Edit/Delete + Expandable Lots with ⋮ menu) */}
       {subTab === 'holdings' && (
         <section className="flex flex-col gap-3">
-          <div className="rounded-2xl bg-white dark:bg-[#1C1C1E] border border-[#E5E5EA] dark:border-[#2C2C2E] overflow-hidden">
+          <div className="rounded-2xl liquid-glass-card overflow-hidden">
+            {enrichedHoldings.length > 0 && (
+              <div className="px-4 sm:px-5 py-2.5 border-b border-black/8 dark:border-white/10 bg-black/[0.02] dark:bg-white/[0.02] flex flex-wrap items-center justify-between gap-2 text-xs">
+                <span className="font-bold text-[#1C1C1E] dark:text-white">
+                  Position Technical Signals ({enrichedHoldings.length})
+                </span>
+                <div className="flex items-center gap-2">
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[#30D158]/15 text-[#16803C] dark:text-[#30D158] text-[10px] font-bold tabular-nums">
+                    <TrendingUp className="w-3 h-3" />
+                    {portfolioSignalTally.bull} Bull
+                  </span>
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[#FF453A]/15 text-[#D7261C] dark:text-[#FF453A] text-[10px] font-bold tabular-nums">
+                    <TrendingDown className="w-3 h-3" />
+                    {portfolioSignalTally.bear} Bear
+                  </span>
+                </div>
+              </div>
+            )}
+
             <div className="px-4 sm:px-5 py-3 border-b border-[#E5E5EA] dark:border-[#2C2C2E] grid grid-cols-12 items-center text-xs font-semibold text-[#6C6C70] dark:text-[#AEAEB2]">
               <div className="col-span-5 sm:col-span-4">Symbol</div>
               <div className="col-span-3 sm:col-span-3 text-right">Value</div>
@@ -2095,11 +2193,13 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                       >
                         <div className="px-4 sm:px-5 py-3.5 grid grid-cols-12 items-center gap-2 hover:bg-[#F2F2F7]/60 dark:hover:bg-[#2C2C2E]/40 cursor-pointer transition-colors">
                           <div className="col-span-5 sm:col-span-4 flex items-center gap-2.5 min-w-0">
-                            <span className="w-8 h-8 rounded-full bg-[#F2F2F7] dark:bg-[#2C2C2E] flex items-center justify-center text-[11px] font-extrabold text-[#1C1C1E] dark:text-white shrink-0">
-                              {h.symbol.slice(0, 2)}
-                            </span>
+                            <AssetCategoryMiniIcon
+                              category={h.category}
+                              idOrSymbol={h.symbol}
+                              size="md"
+                            />
                             <div className="min-w-0">
-                              <div className="flex items-center gap-1.5">
+                              <div className="flex items-center gap-1.5 flex-wrap">
                                 <span className="font-bold text-sm text-[#1C1C1E] dark:text-white truncate">
                                   {h.symbol}
                                 </span>
@@ -2109,6 +2209,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                                   }`}
                                   title={h.sessionStateLabel}
                                 />
+                                <SignalBadge signal={h.signal} compact />
                               </div>
                               <p className="text-xs text-[#6C6C70] dark:text-[#8E8E93] tabular-nums truncate">
                                 {h.units.toLocaleString('en-US')} shares
@@ -2398,7 +2499,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
       {subTab === 'insights' && (
         <section className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           {/* Card A: Your investments visualized (Google Finance Proportional Treemap) */}
-          <div className="lg:col-span-2 rounded-3xl bg-white dark:bg-[#1C1C1E] border border-[#E5E5EA] dark:border-[#2C2C2E] p-5 sm:p-6 flex flex-col gap-4">
+          <div className="lg:col-span-2 rounded-3xl liquid-glass-card p-5 sm:p-6 flex flex-col gap-4">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div>
                 <h2 className="text-lg font-bold text-[#1C1C1E] dark:text-white">
@@ -2465,7 +2566,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
           </div>
 
           {/* Card B: Daily movers analysis about portfolio holdings */}
-          <div className="lg:col-span-2 rounded-3xl bg-white dark:bg-[#1C1C1E] border border-[#E5E5EA] dark:border-[#2C2C2E] p-5 sm:p-6 flex flex-col gap-4">
+          <div className="lg:col-span-2 rounded-3xl liquid-glass-card p-5 sm:p-6 flex flex-col gap-4">
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-2">
                 <Newspaper className="w-5 h-5 text-[#0071E3] dark:text-[#8AB4F8]" />
@@ -2561,7 +2662,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
           </div>
 
           {/* Card C: Asset Allocation Donut */}
-          <div className="rounded-3xl bg-white dark:bg-[#1C1C1E] border border-[#E5E5EA] dark:border-[#2C2C2E] p-5 sm:p-6 flex flex-col gap-5">
+          <div className="rounded-3xl liquid-glass-card p-5 sm:p-6 flex flex-col gap-5">
             <h2 className="text-lg font-bold text-[#1C1C1E] dark:text-white">
               Asset allocation
             </h2>
@@ -2648,7 +2749,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
           </div>
 
           {/* Card D: Concentration Risk */}
-          <div className="rounded-3xl bg-white dark:bg-[#1C1C1E] border border-[#E5E5EA] dark:border-[#2C2C2E] p-5 sm:p-6 flex flex-col gap-4">
+          <div className="rounded-3xl liquid-glass-card p-5 sm:p-6 flex flex-col gap-4">
             <h2 className="text-lg font-bold text-[#1C1C1E] dark:text-white">
               Concentration risk
             </h2>
@@ -2700,75 +2801,6 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
               </>
             )}
           </div>
-        </section>
-      )}
-
-      {/* TAB 3: TRANSACTIONS */}
-      {subTab === 'transactions' && (
-        <section className="rounded-2xl bg-white dark:bg-[#1C1C1E] border border-[#E5E5EA] dark:border-[#2C2C2E] overflow-hidden">
-          <div className="px-4 sm:px-5 py-3 border-b border-[#E5E5EA] dark:border-[#2C2C2E] flex items-center justify-between text-xs font-semibold text-[#6C6C70] dark:text-[#AEAEB2]">
-            <span>Transaction</span>
-            <span>Total</span>
-          </div>
-
-          {activeTransactions.length === 0 ? (
-            <div className="p-8 text-center text-xs text-[#6C6C70] dark:text-[#8E8E93]">
-              No transactions logged yet. Purchases and sales added via <strong>+ Add holding</strong> appear here automatically.
-            </div>
-          ) : (
-            <div className="divide-y divide-[#E5E5EA] dark:divide-[#2C2C2E]/70">
-              {activeTransactions.map((tx) => {
-                const totalNative = tx.units * tx.pricePerUnit;
-                const totalDisplay = convertAmount(
-                  totalNative,
-                  tx.currency,
-                  activePortfolio.displayCurrency
-                );
-                const dateFormatted = new Intl.DateTimeFormat('en-GB', {
-                  day: '2-digit',
-                  month: 'short',
-                  year: 'numeric',
-                }).format(new Date(tx.dateIso));
-                const isBuy = tx.type === 'BUY';
-
-                return (
-                  <div
-                    key={tx.id}
-                    className="px-4 sm:px-5 py-3.5 flex items-center justify-between gap-3"
-                  >
-                    <div className="flex items-center gap-3 min-w-0">
-                      <span
-                        className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${
-                          isBuy
-                            ? 'bg-[#30D158]/15 text-[#16803C] dark:text-[#30D158]'
-                            : 'bg-[#FF453A]/15 text-[#D7261C] dark:text-[#FF453A]'
-                        }`}
-                      >
-                        {isBuy ? (
-                          <ArrowUpRight className="w-4 h-4" />
-                        ) : (
-                          <ArrowDownRight className="w-4 h-4" />
-                        )}
-                      </span>
-                      <div className="min-w-0">
-                        <p className="text-sm font-bold text-[#1C1C1E] dark:text-white truncate">
-                          {tx.symbol} {isBuy ? 'purchase' : 'sale'}
-                        </p>
-                        <p className="text-xs text-[#6C6C70] dark:text-[#8E8E93] truncate">
-                          {dateFormatted} · {tx.units.toLocaleString('en-US')} shares at{' '}
-                          {formatUnitPrice(tx.pricePerUnit, tx.currency)}
-                        </p>
-                      </div>
-                    </div>
-
-                    <div className="text-right shrink-0 font-mono text-xs sm:text-sm font-bold text-[#1C1C1E] dark:text-white tabular-nums">
-                      {formatMoney(totalDisplay, activePortfolio.displayCurrency, true)}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
         </section>
       )}
 

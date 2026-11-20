@@ -1,4 +1,4 @@
-export type AppRoute = 'dashboard' | 'watchlist' | 'portfolio' | 'stocks' | 'news' | 'calendar';
+export type AppRoute = 'dashboard' | 'watchlist' | 'portfolio' | 'stocks' | 'heatmap' | 'news' | 'calendar' | 'extract';
 
 export type ThemeMode = 'light' | 'dark' | 'monochrome';
 
@@ -314,5 +314,90 @@ export interface DailyMarketSummaryResponse {
   dateLabel: string;
   updatedAt: string;
   highlights: DailyMarketHighlight[];
+}
+
+export type SignalTier = 'Strong Bull' | 'Bull Signal' | 'Neutral' | 'Bear Signal' | 'Strong Bear';
+
+export interface MarketSignalInfo {
+  tier: SignalTier;
+  direction: 'bull' | 'bear' | 'neutral';
+  score: number;
+  shortLabel: string;
+  reason: string;
+}
+
+export type SessionPhaseKey = 'beforeOpen' | 'duringSession' | 'afterClose';
+
+export interface IndexSessionBrief {
+  assetId: string;
+  symbol: string;
+  name: string;
+  region: 'US' | 'Indonesia' | 'Asia-Pacific';
+  activePhase: SessionPhaseKey;
+  sessionStateLabel: string;
+  priceFormatted: string;
+  changePercent: number;
+  signalTier: SignalTier;
+  beforeOpen: string;
+  duringSession: string;
+  afterClose: string;
+  keyLevels: string;
+}
+
+export interface MarketIntelligenceResponse {
+  updatedAt: string;
+  headline: string;
+  compositeSentiment: 'Bullish' | 'Bearish' | 'Neutral';
+  signalTally: {
+    bullCount: number;
+    bearCount: number;
+    neutralCount: number;
+  };
+  sourcesCount: number;
+  sourceNames: string[];
+  commentaryPoints: string[];
+  rumorAndCatalystThemes: Array<{
+    tag: string;
+    theme: string;
+    tone: 'bull' | 'bear' | 'neutral';
+  }>;
+  dataReleaseImplications: Array<{
+    currency: string;
+    impact: 'HIGH' | 'MED';
+    title: string;
+    timing: string;
+    implication: string;
+  }>;
+  stocksAndFlowSummary: string;
+  forwardPrediction: string;
+  indexSessions: IndexSessionBrief[];
+  aiRefined: boolean;
+}
+
+export type HeatmapMarketFilter = 'us' | 'indonesia' | 'all';
+
+export interface HeatmapStockItem {
+  symbol: string;
+  yahooSymbol: string;
+  name: string;
+  market: 'US' | 'ID';
+  exchange: string;
+  currency: 'USD' | 'IDR';
+  sector: string;
+  price: number;
+  prevClose: number;
+  changePercent: number;
+  marketCap: number;
+  marketCapNative: number;
+  volumeRaw: number;
+  marketCapLabel: string;
+}
+
+export interface MarketHeatmapResponse {
+  us: HeatmapStockItem[];
+  indonesia: HeatmapStockItem[];
+  sectorsUs: string[];
+  sectorsIndonesia: string[];
+  updatedAt: string;
 }
 

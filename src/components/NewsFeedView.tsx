@@ -6,6 +6,7 @@ import {
   DailyMarketSummaryResponse,
   EconomicEvent,
   MarketAsset,
+  MarketIntelligenceResponse,
   NewsStory,
   StocksMoversBucket,
 } from '../types/market';
@@ -18,6 +19,7 @@ interface NewsFeedViewProps {
   dailySummary?: DailyMarketSummaryResponse | null;
   dailySummaryLoading?: boolean;
   onRefreshDailySummary?: () => void;
+  marketIntelligence?: MarketIntelligenceResponse | null;
   assets: MarketAsset[];
   economicEvents: EconomicEvent[];
   usBucket?: StocksMoversBucket;
@@ -44,6 +46,7 @@ export const NewsFeedView: React.FC<NewsFeedViewProps> = ({
   dailySummary = null,
   dailySummaryLoading = false,
   onRefreshDailySummary,
+  marketIntelligence = null,
   assets,
   economicEvents,
   usBucket,
@@ -111,8 +114,8 @@ export const NewsFeedView: React.FC<NewsFeedViewProps> = ({
                 onClick={() => setActiveTopic(t.id)}
                 className={`px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-colors border ${
                   active
-                    ? 'bg-[#1C1C1E] dark:bg-[#2C2C2E] text-white border-[#1C1C1E] dark:border-[#3A3A3C]'
-                    : 'bg-white/80 dark:bg-[#1C1C1E]/60 text-[#6C6C70] dark:text-[#AEAEB2] border-[#E5E5EA] dark:border-[#2C2C2E] hover:text-[#1C1C1E] dark:hover:text-white'
+                    ? 'bg-[#1C1C1E] dark:bg-white text-white dark:text-[#111318] border-transparent'
+                    : 'liquid-glass-pill text-[#4A4D57] dark:text-[#C7CBD6] hover:text-[#1C1C1E] dark:hover:text-white'
                 }`}
               >
                 {t.label}
@@ -142,7 +145,7 @@ export const NewsFeedView: React.FC<NewsFeedViewProps> = ({
               <article
                 key={story.id}
                 onClick={() => onOpenStory(story)}
-                className="p-4 rounded-2xl bg-white dark:bg-[#1C1C1E] hover:bg-[#E5E5EA]/50 dark:hover:bg-[#2C2C2E] border border-[#E5E5EA] dark:border-[#2C2C2E] cursor-pointer transition-colors flex flex-col justify-between gap-2.5"
+                className="p-4 rounded-2xl liquid-glass-card hover:brightness-[0.98] dark:hover:brightness-110 cursor-pointer transition-all flex flex-col justify-between gap-2.5"
               >
                 <div>
                   <div className="flex items-center justify-between mb-1.5 text-xs">
@@ -188,6 +191,7 @@ export const NewsFeedView: React.FC<NewsFeedViewProps> = ({
         summaryData={dailySummary}
         summaryLoading={dailySummaryLoading}
         onRefreshSummary={onRefreshDailySummary}
+        marketIntelligence={marketIntelligence}
         assets={assets}
         economicEvents={economicEvents}
         newsStories={stories}
@@ -218,7 +222,7 @@ export const NewsFeedView: React.FC<NewsFeedViewProps> = ({
               <article
                 key={story.id}
                 onClick={() => onOpenStory(story)}
-                className="p-4 rounded-2xl bg-white dark:bg-[#1C1C1E] hover:bg-[#E5E5EA]/50 dark:hover:bg-[#2C2C2E] border border-[#E5E5EA] dark:border-[#2C2C2E] flex flex-col justify-between gap-3 cursor-pointer transition-colors"
+                className="p-4 rounded-2xl liquid-glass-card hover:brightness-[0.98] dark:hover:brightness-110 flex flex-col justify-between gap-3 cursor-pointer transition-all"
               >
                 <div className="flex flex-col gap-2">
                   <div className="flex items-center justify-between text-xs">
@@ -295,7 +299,7 @@ export const NewsFeedView: React.FC<NewsFeedViewProps> = ({
           {EDITORIAL_INSIGHTS.map((note) => (
             <div
               key={note.id}
-              className="p-5 rounded-2xl bg-white dark:bg-[#1C1C1E] border border-[#E5E5EA] dark:border-[#2C2C2E] flex flex-col gap-2"
+              className="p-5 rounded-2xl liquid-glass-card flex flex-col gap-2"
             >
               <div className="flex items-center justify-between text-xs">
                 <span
