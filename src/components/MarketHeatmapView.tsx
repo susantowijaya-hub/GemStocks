@@ -29,48 +29,12 @@ function getTileColors(
   changePercent: number,
   themeMode: ThemeMode
 ): { bg: string; text: string; subtext: string; border: string } {
-  if (themeMode === 'monochrome') {
-    if (changePercent >= 2.0) {
-      return {
-        bg: '#181816',
-        text: '#F7F4EC',
-        subtext: 'rgba(247, 244, 236, 0.8)',
-        border: '#F7F4EC',
-      };
-    }
-    if (changePercent >= 0.4) {
-      return {
-        bg: '#3B3934',
-        text: '#F7F4EC',
-        subtext: 'rgba(247, 244, 236, 0.78)',
-        border: '#EFECE4',
-      };
-    }
-    if (changePercent > -0.4) {
-      return {
-        bg: '#D5CFC2',
-        text: '#181816',
-        subtext: '#4A4842',
-        border: '#EFECE4',
-      };
-    }
-    if (changePercent > -2.0) {
-      return {
-        bg: '#9E988B',
-        text: '#171715',
-        subtext: '#2B2A26',
-        border: '#EFECE4',
-      };
-    }
-    return {
-      bg: '#6E6A60',
-      text: '#F7F4EC',
-      subtext: 'rgba(247, 244, 236, 0.85)',
-      border: '#EFECE4',
-    };
-  }
-
-  const border = themeMode === 'dark' ? 'rgba(9, 10, 14, 0.9)' : 'rgba(255, 255, 255, 0.94)';
+  const isDarkSurface = themeMode === 'obsidian';
+  const border = isDarkSurface
+    ? 'rgba(8, 12, 20, 0.92)'
+    : themeMode === 'parchment'
+      ? 'rgba(244, 240, 230, 0.94)'
+      : 'rgba(255, 255, 255, 0.94)';
 
   if (changePercent >= 3.0) {
     return { bg: '#096B31', text: '#FFFFFF', subtext: 'rgba(255,255,255,0.92)', border };
@@ -83,7 +47,7 @@ function getTileColors(
   }
   if (changePercent > -0.3) {
     return {
-      bg: themeMode === 'dark' ? '#2E313B' : '#535866',
+      bg: isDarkSurface ? '#2E313B' : '#535866',
       text: '#FFFFFF',
       subtext: 'rgba(255,255,255,0.86)',
       border,

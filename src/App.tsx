@@ -3,43 +3,47 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Loader2 } from 'lucide-react';
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ChevronLeft, ChevronRight, Loader2 } from 'lucide-react';
+import { motion } from 'motion/react';
 import { BottomDock } from './components/BottomDock';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { Header } from './components/Header';
 import { MarketDashboardView } from './components/MarketDashboardView';
 import { OfflineIndicator } from './components/OfflineIndicator';
+import { PriceAlertToastStack } from './components/PriceAlertOverlay';
 import { AuthProvider } from './contexts/AuthContext';
 import { useLiveMarket } from './hooks/useLiveMarket';
+import { usePriceAlerts } from './hooks/usePriceAlerts';
 import { useTheme } from './hooks/useTheme';
-import { AppRoute, CalendarCatalyst, NewsStory } from './types/market';
+import { AppRoute, CalendarCatalyst, NewsStory, PriceAlertItem } from './types/market';
+import { lazyWithRetry } from './utils/lazyWithRetry';
 
-const WatchlistView = lazy(() =>
+const WatchlistView = lazyWithRetry(() =>
   import('./components/WatchlistView').then((m) => ({ default: m.WatchlistView }))
 );
-const PortfolioView = lazy(() =>
+const PortfolioView = lazyWithRetry(() =>
   import('./components/PortfolioView').then((m) => ({ default: m.PortfolioView }))
 );
-const TopStocksView = lazy(() =>
+const TopStocksView = lazyWithRetry(() =>
   import('./components/TopStocksView').then((m) => ({ default: m.TopStocksView }))
 );
-const MarketHeatmapView = lazy(() =>
+const MarketHeatmapView = lazyWithRetry(() =>
   import('./components/MarketHeatmapView').then((m) => ({ default: m.MarketHeatmapView }))
 );
-const NewsFeedView = lazy(() =>
+const NewsFeedView = lazyWithRetry(() =>
   import('./components/NewsFeedView').then((m) => ({ default: m.NewsFeedView }))
 );
-const EconomicCalendarView = lazy(() =>
+const EconomicCalendarView = lazyWithRetry(() =>
   import('./components/EconomicCalendarView').then((m) => ({ default: m.EconomicCalendarView }))
 );
-const MarketExtractShareView = lazy(() =>
+const MarketExtractShareView = lazyWithRetry(() =>
   import('./components/MarketExtractShareView').then((m) => ({ default: m.MarketExtractShareView }))
 );
-const NewsModal = lazy(() =>
+const NewsModal = lazyWithRetry(() =>
   import('./components/NewsModal').then((m) => ({ default: m.NewsModal }))
 );
-const SymbolDetailModal = lazy(() =>
+const SymbolDetailModal = lazyWithRetry(() =>
   import('./components/SymbolDetailModal').then((m) => ({ default: m.SymbolDetailModal }))
 );
 
@@ -52,6 +56,37 @@ const RouteLoadingFallback = () => (
 
 const VALID_ROUTES: AppRoute[] = ['dashboard', 'watchlist', 'portfolio', 'stocks', 'heatmap', 'news', 'calendar', 'extract'];
 
+const ROUTE_SHORT_LABELS: Record<AppRoute, string> = {
+  dashboard: 'Markets',
+  watchlist: 'Watchlist',
+  portfolio: 'Portfolio',
+  stocks: 'Stocks',
+  heatmap: 'Heatmap',
+  news: 'News',
+  calendar: 'Calendar',
+  extract: 'Share',
+};
+
+function hasHorizontalScrollAncestor(el: EventTarget | null, boundary: HTMLElement | null): boolean {
+  let curr = el instanceof HTMLElement ? el : null;
+  while (curr && curr !== boundary) {
+    if (curr.dataset.noViewSwipe === 'true') return true;
+    const tag = curr.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || tag === 'CANVAS') {
+      return true;
+    }
+    const style = window.getComputedStyle(curr);
+    if (
+      (style.overflowX === 'auto' || style.overflowX === 'scroll') &&
+      curr.scrollWidth > curr.clientWidth + 6
+    ) {
+      return true;
+    }
+    curr = curr.parentElement;
+  }
+  return false;
+}
+
 function getInitialRoute(): AppRoute {
   if (typeof window === 'undefined') return 'dashboard';
   const hash = window.location.hash.replace('#', '') as AppRoute;
@@ -59,7 +94,7 @@ function getInitialRoute(): AppRoute {
 }
 
 function StocksTerminalShell() {
-  const { themeMode, toggleTheme } = useTheme();
+  const { themeMode, setThemeMode, toggleTheme } = useTheme();
   const {
     assets,
     newsStories,
@@ -85,6 +120,9 @@ function StocksTerminalShell() {
     wsConnected,
     feedsLive,
     flashMap,
+    serverDiagnostics,
+    clientTransport,
+    refreshDiagnostics,
     togglePulse,
     loadChartTimeframe,
     refreshStocks,
@@ -92,6 +130,12 @@ function StocksTerminalShell() {
   } = useLiveMarket();
 
   const [activeRoute, setActiveRoute] = useState<AppRoute>(getInitialRoute);
+  const [swipeSlideDir, setSwipeSlideDir] = useState<1 | -1 | 0>(0);
+  const [swipeHint, setSwipeHint] = useState<{
+    direction: 'prev' | 'next';
+    targetRoute: AppRoute;
+    progress: number;
+  } | null>(null);
   const [selectedAssetId, setSelectedAssetId] = useState<string>('SPX');
   const [inspectedSymbol, setInspectedSymbol] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -99,6 +143,35 @@ function StocksTerminalShell() {
   const [activeStory, setActiveStory] = useState<NewsStory | null>(null);
   const [countdownSeconds, setCountdownSeconds] = useState<number>(3 * 3600 + 42 * 60 + 15);
   const lastRollRefreshRef = useRef<number>(0);
+  const mainSwipeRef = useRef<HTMLElement | null>(null);
+  const swipeSessionRef = useRef<{
+    active: boolean;
+    locked: 'horizontal' | 'vertical' | null;
+    startX: number;
+    startY: number;
+    startAt: number;
+    lastDx: number;
+  }>({
+    active: false,
+    locked: null,
+    startX: 0,
+    startY: 0,
+    startAt: 0,
+    lastDx: 0,
+  });
+
+  const {
+    alerts,
+    toasts,
+    unreadCount,
+    volatility5mMap,
+    market5mStats,
+    dismissToast,
+    markRead,
+    markAllRead,
+    clearAlerts,
+    triggerTestAlert,
+  } = usePriceAlerts(assets);
 
   // Sync browser hash navigation (Back/Forward on Desktop, Android, and iOS Safari)
   useEffect(() => {
@@ -173,7 +246,8 @@ function StocksTerminalShell() {
     return () => window.clearInterval(timer);
   }, [activeTargetEpochMs]);
 
-  const handleNavigate = useCallback((route: AppRoute) => {
+  const handleNavigate = useCallback((route: AppRoute, dir: 1 | -1 | 0 = 0) => {
+    setSwipeSlideDir(dir);
     setActiveRoute(route);
     setSearchQuery('');
     if (typeof window !== 'undefined') {
@@ -184,6 +258,88 @@ function StocksTerminalShell() {
       window.scrollTo({ top: 0, behavior: 'smooth' });
     }
   }, []);
+
+  const handleSwipeTouchStart = useCallback(
+    (e: React.TouchEvent<HTMLElement>) => {
+      if (activeStory || inspectedSymbol || e.touches.length !== 1) {
+        swipeSessionRef.current.active = false;
+        return;
+      }
+      if (hasHorizontalScrollAncestor(e.target, mainSwipeRef.current)) {
+        swipeSessionRef.current.active = false;
+        return;
+      }
+      const touch = e.touches[0];
+      swipeSessionRef.current = {
+        active: true,
+        locked: null,
+        startX: touch.clientX,
+        startY: touch.clientY,
+        startAt: Date.now(),
+        lastDx: 0,
+      };
+    },
+    [activeStory, inspectedSymbol]
+  );
+
+  const handleSwipeTouchMove = useCallback(
+    (e: React.TouchEvent<HTMLElement>) => {
+      const sess = swipeSessionRef.current;
+      if (!sess.active || e.touches.length !== 1) return;
+      const touch = e.touches[0];
+      const dx = touch.clientX - sess.startX;
+      const dy = touch.clientY - sess.startY;
+      sess.lastDx = dx;
+
+      if (sess.locked === null) {
+        if (Math.abs(dx) < 14 && Math.abs(dy) < 14) return;
+        if (Math.abs(dx) > Math.abs(dy) * 1.45) {
+          sess.locked = 'horizontal';
+        } else {
+          sess.locked = 'vertical';
+          sess.active = false;
+          setSwipeHint(null);
+          return;
+        }
+      }
+
+      if (sess.locked === 'horizontal') {
+        const curIdx = VALID_ROUTES.indexOf(activeRoute);
+        const targetIdx = dx < 0 ? curIdx + 1 : curIdx - 1;
+        if (targetIdx < 0 || targetIdx >= VALID_ROUTES.length || Math.abs(dx) < 20) {
+          setSwipeHint(null);
+          return;
+        }
+        setSwipeHint({
+          direction: dx < 0 ? 'next' : 'prev',
+          targetRoute: VALID_ROUTES[targetIdx],
+          progress: Math.min(1, Math.abs(dx) / 72),
+        });
+      }
+    },
+    [activeRoute]
+  );
+
+  const handleSwipeTouchEnd = useCallback(() => {
+    const sess = swipeSessionRef.current;
+    setSwipeHint(null);
+    if (!sess.active || sess.locked !== 'horizontal') {
+      sess.active = false;
+      return;
+    }
+    sess.active = false;
+    const dx = sess.lastDx;
+    const elapsed = Date.now() - sess.startAt;
+    const absDx = Math.abs(dx);
+    const shouldSwitch = absDx >= 68 || (absDx >= 42 && elapsed < 260);
+    if (!shouldSwitch) return;
+
+    const curIdx = VALID_ROUTES.indexOf(activeRoute);
+    const nextIdx = dx < 0 ? curIdx + 1 : curIdx - 1;
+    if (nextIdx >= 0 && nextIdx < VALID_ROUTES.length) {
+      handleNavigate(VALID_ROUTES[nextIdx], dx < 0 ? 1 : -1);
+    }
+  }, [activeRoute, handleNavigate]);
 
   const handleToggleBadgeMode = useCallback(() => {
     setIsPercentMode((prev) => !prev);
@@ -200,7 +356,9 @@ function StocksTerminalShell() {
   );
 
   return (
-    <div className="min-h-dvh flex flex-col text-[#1C1C1E] dark:text-white transition-colors selection:bg-[#0071E3]/20 dark:selection:bg-[#0A84FF]/30">
+    <div className="relative min-h-dvh flex flex-col text-[#1C1C1E] dark:text-white selection:bg-[#0066CC]/20 dark:selection:bg-[#F59E0B]/30">
+      <div aria-hidden="true" data-testid="ambient-glass-backdrop" className="ambient-theme-canvas" />
+      <div className="relative z-10 min-h-dvh flex flex-col">
       <Header
         activeRoute={activeRoute}
         onNavigate={handleNavigate}
@@ -208,6 +366,7 @@ function StocksTerminalShell() {
         onSearchChange={setSearchQuery}
         themeMode={themeMode}
         onToggleTheme={toggleTheme}
+        onSelectTheme={setThemeMode}
         isPulseActive={isPulseActive}
         wsConnected={wsConnected || feedsLive}
         onTogglePulse={togglePulse}
@@ -216,11 +375,54 @@ function StocksTerminalShell() {
         assets={assets}
         usMovers={usMovers}
         idxMovers={idxMovers}
+        marketIntelligence={marketIntelligence}
+        economicEvents={economicEvents}
         onSelectAsset={setSelectedAssetId}
         onInspectSymbol={handleInspectSymbol}
+        serverDiagnostics={serverDiagnostics}
+        clientTransport={clientTransport}
+        feedsLive={feedsLive}
+        onRefreshAll={refreshAll}
+        onRefreshDiagnostics={refreshDiagnostics}
       />
 
-      <main className="flex-1 flex flex-col">
+      <main
+        ref={mainSwipeRef}
+        onTouchStart={handleSwipeTouchStart}
+        onTouchMove={handleSwipeTouchMove}
+        onTouchEnd={handleSwipeTouchEnd}
+        onTouchCancel={handleSwipeTouchEnd}
+        className="flex-1 flex flex-col relative"
+      >
+        {/* Tactile Edge Swipe Indicator on Mobile */}
+        {swipeHint && (
+          <div
+            aria-hidden="true"
+            style={{
+              opacity: Math.max(0.25, swipeHint.progress),
+              transform: `translateY(-50%) scale(${0.92 + swipeHint.progress * 0.08})`,
+            }}
+            className={`fixed top-1/2 z-50 pointer-events-none px-3 py-2 rounded-full liquid-glass-strong shadow-lg flex items-center gap-1.5 text-xs font-bold text-[#1C1C1E] dark:text-white transition-transform duration-75 ${
+              swipeHint.direction === 'next' ? 'right-3' : 'left-3'
+            }`}
+          >
+            {swipeHint.direction === 'prev' && <ChevronLeft className="w-4 h-4" />}
+            <span>{ROUTE_SHORT_LABELS[swipeHint.targetRoute]}</span>
+            {swipeHint.direction === 'next' && <ChevronRight className="w-4 h-4" />}
+          </div>
+        )}
+
+        <motion.div
+          key={activeRoute}
+          initial={
+            swipeSlideDir !== 0
+              ? { opacity: 0.72, x: swipeSlideDir * 16 }
+              : false
+          }
+          animate={{ opacity: 1, x: 0 }}
+          transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+          className="flex-1 flex flex-col"
+        >
         <Suspense fallback={<RouteLoadingFallback />}>
         {activeRoute === 'dashboard' && (
           <MarketDashboardView
@@ -232,9 +434,19 @@ function StocksTerminalShell() {
             onNavigate={handleNavigate}
             onLoadTimeframe={loadChartTimeframe}
             themeMode={themeMode}
+            newsStories={newsStories}
+            onOpenStory={setActiveStory}
             marketIntelligence={marketIntelligence}
             intelligenceLoading={intelligenceLoading}
             onRefreshIntelligence={refreshMarketIntelligence}
+            alerts={alerts}
+            unreadAlertCount={unreadCount}
+            volatility5mMap={volatility5mMap}
+            market5mStats={market5mStats}
+            onMarkAllAlertsRead={markAllRead}
+            onMarkAlertRead={markRead}
+            onClearAlerts={clearAlerts}
+            onTriggerTestAlert={triggerTestAlert}
           />
         )}
 
@@ -257,6 +469,7 @@ function StocksTerminalShell() {
             assets={assets}
             fxRates={fxRates}
             searchQuery={searchQuery}
+            themeMode={themeMode}
             onInspectSymbol={(sym) => handleInspectSymbol(sym)}
           />
         )}
@@ -321,10 +534,12 @@ function StocksTerminalShell() {
             marketIntelligence={marketIntelligence}
             usBucket={usMoversBucket}
             idxBucket={idxMoversBucket}
+            feedsLive={feedsLive}
             onRefreshIntelligence={refreshMarketIntelligence}
           />
         )}
         </Suspense>
+        </motion.div>
       </main>
 
       <BottomDock
@@ -335,6 +550,18 @@ function StocksTerminalShell() {
       />
 
       <OfflineIndicator />
+      <PriceAlertToastStack
+        toasts={toasts}
+        onDismiss={dismissToast}
+        onSelectAlert={(alert: PriceAlertItem) => {
+          setSelectedAssetId(alert.assetId);
+          markRead(alert.id);
+          dismissToast(alert.id);
+          if (activeRoute !== 'dashboard') {
+            handleNavigate('dashboard');
+          }
+        }}
+      />
       <Suspense fallback={null}>
         {activeStory && (
           <NewsModal story={activeStory} onClose={() => setActiveStory(null)} />
@@ -346,6 +573,7 @@ function StocksTerminalShell() {
           />
         )}
       </Suspense>
+      </div>
     </div>
   );
 }

@@ -470,7 +470,18 @@ export function getSessionProgressRatio(assetId: string, now: Date): number {
     return clamp(utcMins / 1440);
   }
 
-  if (assetId === 'DXY' || assetId === 'USDIDR' || assetId === 'EURUSD') {
+  if (
+    assetId === 'DXY' ||
+    assetId === 'USDIDR' ||
+    assetId === 'EURUSD' ||
+    assetId === 'GBPUSD' ||
+    assetId === 'USDJPY' ||
+    assetId === 'AUDUSD' ||
+    assetId === 'USDCHF' ||
+    assetId === 'USDCAD' ||
+    assetId === 'NZDUSD' ||
+    assetId === 'USDCNY'
+  ) {
     const ny = getTzClock(now, 'America/New_York');
     const isWeekendClosed =
       (ny.weekday === 'Fri' && ny.totalMin >= 17 * 60) ||

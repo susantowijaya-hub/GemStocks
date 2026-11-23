@@ -15,12 +15,12 @@ export const PWAInstallButton: React.FC = () => {
       <button
         type="button"
         onClick={() => void install()}
+        aria-label="Install Stocks App"
         title="Install Stocks as a standalone app"
-        className="min-h-[36px] sm:min-h-[32px] px-2.5 sm:px-3 py-1 rounded-full bg-[#0071E3] dark:bg-[#0A84FF] hover:opacity-90 text-white text-[11px] sm:text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap shadow-sm transition-opacity"
+        className="h-8 w-8 sm:w-auto sm:px-2.5 rounded-full bg-[#0066CC] hover:opacity-90 text-white text-xs font-semibold flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 shadow-sm transition-opacity"
       >
-        <Download className="w-3.5 h-3.5" />
-        <span className="hidden sm:inline">Install App</span>
-        <span className="sm:hidden">Install</span>
+        <Download className="w-3.5 h-3.5 shrink-0" />
+        <span className="hidden md:inline">Install App</span>
       </button>
     );
   }
@@ -30,11 +30,12 @@ export const PWAInstallButton: React.FC = () => {
       <button
         type="button"
         onClick={() => setShowGuide(true)}
+        aria-label="Install as standalone app"
         title="Install as standalone app on phone or desktop"
-        className="min-h-[36px] sm:min-h-[32px] px-2.5 sm:px-3 py-1 rounded-full bg-[#E5E5EA]/80 dark:bg-[#1C1C1E] hover:bg-[#D1D1D6] dark:hover:bg-[#2C2C2E] border border-[#D1D1D6] dark:border-[#2C2C2E] text-[#1C1C1E] dark:text-white text-[11px] sm:text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap transition-colors"
+        className="h-8 w-8 sm:w-auto sm:px-2.5 rounded-full liquid-glass-pill hover:brightness-95 dark:hover:brightness-110 text-[#1C1C1E] dark:text-white text-xs font-semibold flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
       >
-        <Smartphone className="w-3.5 h-3.5 text-[#0071E3] dark:text-[#0A84FF]" />
-        <span className="hidden sm:inline">App Install</span>
+        <Smartphone className="w-3.5 h-3.5 text-[#0066CC] dark:text-[#38BDF8] shrink-0" />
+        <span className="hidden md:inline">App Install</span>
       </button>
 
       {showGuide && (
@@ -43,7 +44,7 @@ export const PWAInstallButton: React.FC = () => {
           onClick={() => setShowGuide(false)}
         >
           <div
-            className="w-full max-w-sm rounded-2xl bg-white dark:bg-[#1C1C1E] border border-[#E5E5EA] dark:border-[#2C2C2E] p-5 shadow-2xl"
+            className="w-full max-w-sm rounded-2xl bg-white dark:bg-[#141B28] border border-[#E5E5EA] dark:border-white/15 p-5 shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between mb-2">
@@ -75,7 +76,7 @@ export const PWAInstallButton: React.FC = () => {
             <button
               type="button"
               onClick={() => setShowGuide(false)}
-              className="mt-4 w-full rounded-xl bg-[#0071E3] dark:bg-[#0A84FF] py-2 text-xs font-bold text-white"
+              className="mt-4 w-full rounded-xl bg-[#0066CC] py-2 text-xs font-bold text-white"
             >
               Got it
             </button>

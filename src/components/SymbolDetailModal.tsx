@@ -1,7 +1,10 @@
-import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
-import { Loader2, TrendingUp, X } from 'lucide-react';
-import { Timeframe } from '../types/market';
+import React, { useEffect, useMemo, useState } from 'react';
+import { ArrowDown, ArrowUp, Loader2, TrendingUp, X } from 'lucide-react';
+import { CandlePoint, MarketAsset, Timeframe } from '../types/market';
+import { computeFearGreedIndex, parseFormattedMarketNumber } from '../utils/marketSignals';
 import { GoogleFinanceDeltaPill } from './GoogleFinanceMiniChart';
+import { InteractiveChart } from './InteractiveChart';
+import { FearGreedMeter } from './MarketUiPrimitives';
 
 interface SymbolDetailData {
   id: string;
@@ -33,6 +36,10 @@ interface SymbolDetailData {
   commentary: string;
   points: number[];
   timestamps: number[];
+  candles?: CandlePoint[];
+  chart1D: number[];
+  timestamps1D: number[];
+  candles1D?: CandlePoint[];
   marketSessionOpen: boolean;
   sessionStateLabel: string;
   sessionProgressRatio: number;
@@ -44,25 +51,27 @@ interface SymbolDetailModalProps {
   onClose: () => void;
 }
 
-const TIMEFRAMES: Timeframe[] = ['1D', '1W', '1M', '3M', 'YTD', '1Y', 'ALL'];
-
 export const SymbolDetailModal: React.FC<SymbolDetailModalProps> = ({
   yahooSymbol,
   onClose,
 }) => {
-  const uid = useId().replace(/:/g, '');
   const [timeframe, setTimeframe] = useState<Timeframe>('1D');
+  const [loadedTimeframe, setLoadedTimeframe] = useState<Timeframe>('1D');
   const [detail, setDetail] = useState<SymbolDetailData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
-  const svgRef = useRef<SVGSVGElement | null>(null);
+  const [inspectedIdx, setInspectedIdx] = useState<number | null>(null);
 
   useEffect(() => {
     if (!yahooSymbol) return;
     setTimeframe('1D');
-    setHoverIdx(null);
+    setLoadedTimeframe('1D');
+    setInspectedIdx(null);
   }, [yahooSymbol]);
+
+  useEffect(() => {
+    setInspectedIdx(null);
+  }, [timeframe]);
 
   useEffect(() => {
     if (!yahooSymbol) return;
@@ -81,6 +90,7 @@ export const SymbolDetailModal: React.FC<SymbolDetailModalProps> = ({
         const json = (await res.json()) as SymbolDetailData;
         if (!cancelled) {
           setDetail(json);
+          setLoadedTimeframe(timeframe);
         }
       } catch (e) {
         if (!cancelled) {
@@ -105,45 +115,94 @@ export const SymbolDetailModal: React.FC<SymbolDetailModalProps> = ({
     };
   }, [yahooSymbol, timeframe, detail?.marketSessionOpen]);
 
-  const geom = useMemo(() => {
-    const pts = detail?.points ?? [];
-    if (pts.length < 2) return null;
-    const width = 680;
-    const height = 220;
-    const padY = 18;
-    const parsedOpen = detail?.open ? parseFloat(String(detail.open).replace(/[^0-9.\-]/g, '')) : NaN;
-    const refBaseline =
-      timeframe === '1D'
-        ? Number.isFinite(parsedOpen) && parsedOpen > 0
-          ? parsedOpen
-          : detail?.prevClose ?? pts[0]
-        : pts[0];
-    const all = [...pts, refBaseline].filter((v) => Number.isFinite(v));
-    const min = Math.min(...all);
-    const max = Math.max(...all);
-    const span = max - min || Math.max(max * 0.01, 1);
+  // Adapt individual stock / symbol response into a MarketAsset for InteractiveChart (Line + Candlestick OHLC)
+  const chartAsset = useMemo<MarketAsset | null>(() => {
+    if (!detail) return null;
+    const activePoints =
+      loadedTimeframe === timeframe && detail.points.length >= 2
+        ? detail.points
+        : detail.chart1D;
+    const activeTimestamps =
+      loadedTimeframe === timeframe && detail.timestamps.length >= 2
+        ? detail.timestamps
+        : detail.timestamps1D;
+    const activeCandles =
+      loadedTimeframe === timeframe && detail.candles && detail.candles.length >= 2
+        ? detail.candles
+        : detail.candles1D;
 
-    const progress =
-      timeframe === '1D' ? Math.max(0.08, Math.min(1, detail?.sessionProgressRatio ?? 1)) : 1;
-    const plotWidth = width * progress;
+    return {
+      id: detail.id || detail.symbol,
+      symbol: detail.symbol,
+      name: detail.name,
+      shortName: detail.shortName,
+      exchange: detail.exchange,
+      category: detail.isIndex ? 'us-indices' : 'us-indices',
+      categoryLabel: detail.isIndex ? 'Benchmark Index' : 'Equity Stock',
+      price: detail.price,
+      prevClose: detail.prevClose,
+      changeValue: detail.changeValue,
+      changePercent: detail.changePercent,
+      currencyPrefix: detail.currencyPrefix,
+      decimals: detail.decimals,
+      open: detail.open,
+      dayHigh: detail.dayHigh,
+      dayLow: detail.dayLow,
+      volume: detail.volume,
+      avgVol: '—',
+      peLabel: 'Range',
+      peValue: `${detail.w52Pct}th pct`,
+      capLabel: 'Exchange',
+      capValue: detail.exchange,
+      w52Low: detail.w52Low,
+      w52High: detail.w52High,
+      w52Pct: detail.w52Pct,
+      sentiment: detail.sentiment,
+      support: detail.support,
+      supportNote: detail.supportNote,
+      resistance: detail.resistance,
+      resistanceNote: detail.resistanceNote,
+      commentary: detail.commentary,
+      sparklinePoints: detail.chart1D.slice(-16),
+      chartSeries: {
+        '1D': detail.chart1D,
+        [timeframe]: activePoints,
+      },
+      chartTimestamps: {
+        '1D': detail.timestamps1D,
+        [timeframe]: activeTimestamps,
+      },
+      chartCandles: activeCandles
+        ? {
+            ...(detail.candles1D ? { '1D': detail.candles1D } : {}),
+            [timeframe]: activeCandles,
+          }
+        : undefined,
+      marketSessionOpen: detail.marketSessionOpen,
+      sessionStateLabel: detail.sessionStateLabel,
+      sessionProgressRatio: detail.sessionProgressRatio,
+      updatedAtEpoch: detail.updatedAtEpoch,
+    };
+  }, [detail, timeframe, loadedTimeframe]);
 
-    const coords = pts.map((val, idx) => {
-      const x = (idx / Math.max(pts.length - 1, 1)) * plotWidth;
-      const y = padY + ((max - val) / span) * (height - padY * 2);
-      return { x, y, val };
+  const detailFearGreed = useMemo(() => {
+    if (!detail) return null;
+    const openNum = parseFormattedMarketNumber(detail.open);
+    const highNum = parseFormattedMarketNumber(detail.dayHigh);
+    const lowNum = parseFormattedMarketNumber(detail.dayLow);
+    return computeFearGreedIndex({
+      price: detail.price,
+      prevClose: detail.prevClose,
+      changePercent: detail.changePercent,
+      open: Number.isFinite(openNum) ? openNum : undefined,
+      dayHigh: Number.isFinite(highNum) ? highNum : undefined,
+      dayLow: Number.isFinite(lowNum) ? lowNum : undefined,
+      series: detail.points,
+      w52Pct: detail.w52Pct,
+      assetId: detail.yahooSymbol || detail.symbol,
+      category: detail.isIndex ? 'indices' : 'stocks',
     });
-
-    const line = coords
-      .map((c, idx) => `${idx === 0 ? 'M' : 'L'}${c.x.toFixed(1)},${c.y.toFixed(1)}`)
-      .join(' ');
-    const firstX = coords[0]?.x ?? 0;
-    const lastX = coords[coords.length - 1]?.x ?? plotWidth;
-    const prevY = Math.max(10, Math.min(height - 10, padY + ((max - refBaseline) / span) * (height - padY * 2)));
-    const area = `${line} L${lastX.toFixed(1)},${prevY.toFixed(1)} L${firstX.toFixed(1)},${prevY.toFixed(1)} Z`;
-    const splitPct = Math.max(0, Math.min(100, (prevY / height) * 100));
-
-    return { coords, line, area, prevY, refClose: refBaseline, splitPct, width, height, min, max };
-  }, [detail, timeframe]);
+  }, [detail]);
 
   if (!yahooSymbol) return null;
 
@@ -156,40 +215,34 @@ export const SymbolDetailModal: React.FC<SymbolDetailModalProps> = ({
     })}`;
   };
 
-  const handlePointer = (clientX: number) => {
-    const svg = svgRef.current;
-    if (!svg || !geom) return;
-    const rect = svg.getBoundingClientRect();
-    const relX = Math.max(0, Math.min(clientX - rect.left, rect.width));
-    const targetSvgX = (relX / Math.max(rect.width, 1)) * geom.width;
-    let nearest = 0;
-    let bestDist = Infinity;
-    geom.coords.forEach((pt, idx) => {
-      const d = Math.abs(pt.x - targetSvgX);
-      if (d < bestDist) {
-        bestDist = d;
-        nearest = idx;
-      }
-    });
-    setHoverIdx(nearest);
-  };
+  const isTimeframeSynced = loadedTimeframe === timeframe;
+  const activePts = chartAsset?.chartSeries[timeframe] ?? detail?.points ?? [];
+  const activeVal =
+    inspectedIdx !== null && activePts[inspectedIdx] !== undefined
+      ? activePts[inspectedIdx]
+      : detail?.price ?? 0;
 
-  const activePt = hoverIdx !== null && geom ? geom.coords[hoverIdx] : null;
-  const activeTs =
-    hoverIdx !== null && detail?.timestamps?.[hoverIdx]
-      ? detail.timestamps[hoverIdx]
-      : detail?.updatedAtEpoch;
+  const parsedOpen = detail?.open ? parseFormattedMarketNumber(detail.open) : NaN;
+  const refOpen = Number.isFinite(parsedOpen) && parsedOpen > 0 ? parsedOpen : detail?.prevClose ?? 0;
+  const periodStartVal =
+    timeframe === '1D'
+      ? inspectedIdx !== null
+        ? refOpen
+        : detail?.prevClose ?? refOpen
+      : activePts[0] ?? refOpen;
 
-  const lastVal = detail?.points?.[detail.points.length - 1] ?? detail?.price ?? 0;
-  const activeDotColor =
-    activePt
-      ? activePt.val >= (geom?.refClose ?? lastVal)
-        ? '#16A34A'
-        : '#DC2626'
-      : lastVal >= (geom?.refClose ?? lastVal)
-        ? '#16A34A'
-        : '#DC2626';
-  const isGain = (detail?.changePercent ?? 0) >= 0;
+  const displayChangeVal =
+    detail && timeframe === '1D' && inspectedIdx === null
+      ? detail.changeValue
+      : activeVal - periodStartVal;
+
+  const displayChangePct =
+    detail && timeframe === '1D' && inspectedIdx === null
+      ? detail.changePercent
+      : periodStartVal > 0
+        ? (displayChangeVal / periodStartVal) * 100
+        : 0;
+  const isGain = displayChangePct >= 0;
 
   return (
     <div
@@ -197,6 +250,7 @@ export const SymbolDetailModal: React.FC<SymbolDetailModalProps> = ({
       onClick={onClose}
     >
       <div
+        data-testid="symbol-detail-modal"
         className="liquid-glass-strong w-full max-w-3xl rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90dvh]"
         onClick={(e) => e.stopPropagation()}
       >
@@ -248,25 +302,25 @@ export const SymbolDetailModal: React.FC<SymbolDetailModalProps> = ({
           {loading && !detail ? (
             <div className="py-16 flex flex-col items-center justify-center gap-2 text-xs text-[#6C6C70] dark:text-[#8E8E93]">
               <Loader2 className="w-6 h-6 animate-spin text-[#0071E3]" />
-              Loading live quote &amp; interactive chart for {yahooSymbol}...
+              Loading live quote &amp; technical candlestick chart for {yahooSymbol}...
             </div>
           ) : error && !detail ? (
             <div className="py-12 text-center text-xs text-[#D7261C] dark:text-[#FF453A]">
               {error}
             </div>
-          ) : detail ? (
+          ) : detail && chartAsset ? (
             <>
-              {/* Price Readout */}
+              {/* Price Readout & Timeframe Gain/Loss Return */}
               <div className="flex flex-wrap items-baseline justify-between gap-3">
                 <div>
                   <div className="text-3xl font-extrabold font-mono tabular-nums text-[#1C1C1E] dark:text-white">
-                    {activePt ? formatVal(activePt.val) : formatVal(detail.price)}
+                    {formatVal(activeVal)}
                   </div>
-                  <div className="mt-1 flex items-center gap-2 text-xs sm:text-sm">
+                  <div className="mt-1 flex flex-wrap items-center gap-2 text-xs sm:text-sm">
                     <GoogleFinanceDeltaPill changePercent={detail.changePercent} />
                     <span
                       className={`font-mono font-semibold tabular-nums ${
-                        isGain
+                        detail.changePercent >= 0
                           ? 'text-[#16803C] dark:text-[#30D158]'
                           : 'text-[#D7261C] dark:text-[#FF453A]'
                       }`}
@@ -274,156 +328,54 @@ export const SymbolDetailModal: React.FC<SymbolDetailModalProps> = ({
                       {detail.changeValue >= 0 ? '+' : '-'}
                       {formatVal(Math.abs(detail.changeValue))} Today
                     </span>
-                    {activeTs && (
-                      <span className="text-[11px] font-mono text-[#6C6C70] dark:text-[#8E8E93]">
-                        ·{' '}
-                        {new Intl.DateTimeFormat('en-GB', {
-                          timeZone: 'Asia/Jakarta',
-                          day: '2-digit',
-                          month: 'short',
-                          hour: '2-digit',
-                          minute: '2-digit',
-                          hour12: false,
-                        }).format(new Date(activeTs))}{' '}
-                        WIB
-                      </span>
-                    )}
-                  </div>
-                </div>
 
-                {/* Timeframe Switcher */}
-                <div className="inline-flex rounded-xl bg-[#F2F2F7] dark:bg-[#2C2C2E] p-1 border border-[#E5E5EA] dark:border-[#3A3A3C]">
-                  {TIMEFRAMES.map((tf) => (
-                    <button
-                      key={tf}
-                      type="button"
-                      onClick={() => setTimeframe(tf)}
-                      className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-colors ${
-                        timeframe === tf
-                          ? 'bg-[#0071E3] dark:bg-[#0A84FF] text-white'
-                          : 'text-[#6C6C70] dark:text-[#AEAEB2] hover:text-[#1C1C1E] dark:hover:text-white'
-                      }`}
-                    >
-                      {tf}
-                    </button>
-                  ))}
+                    {(timeframe !== '1D' || inspectedIdx !== null) &&
+                      (!isTimeframeSynced ? (
+                        <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full liquid-glass-pill text-[11px] font-semibold text-[#6C6C70] dark:text-[#AEAEB2]">
+                          <Loader2 className="w-3 h-3 animate-spin text-[#0071E3]" />
+                          Loading {timeframe}...
+                        </span>
+                      ) : (
+                        <span
+                          className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full border text-xs font-mono tabular-nums ${
+                            isGain
+                              ? 'bg-[#22C55E]/14 dark:bg-[#4ADE80]/16 border-[#16A34A]/35 text-[#0F7033] dark:text-[#4ADE80]'
+                              : 'bg-[#EF4444]/14 dark:bg-[#FF6B63]/16 border-[#DC2626]/35 text-[#C41C16] dark:text-[#FF6B63]'
+                          }`}
+                        >
+                          <span className="font-sans text-[10px] font-extrabold uppercase tracking-wider opacity-85">
+                            {inspectedIdx !== null ? `${timeframe} Pt` : timeframe}
+                          </span>
+                          <span className="inline-flex items-center gap-0.5 font-extrabold">
+                            {isGain ? (
+                              <ArrowUp className="w-3 h-3 stroke-[2.75]" />
+                            ) : (
+                              <ArrowDown className="w-3 h-3 stroke-[2.75]" />
+                            )}
+                            {displayChangePct >= 0 ? '+' : ''}
+                            {displayChangePct.toFixed(2)}%
+                          </span>
+                          <span className="font-semibold opacity-90 hidden sm:inline">
+                            ({displayChangeVal >= 0 ? '+' : '-'}
+                            {formatVal(Math.abs(displayChangeVal))})
+                          </span>
+                        </span>
+                      ))}
+                  </div>
                 </div>
               </div>
 
-              {/* Chart */}
-              {geom && (
-                <div className="relative h-56 sm:h-64 rounded-2xl bg-[#F2F2F7]/50 dark:bg-[#141416] border border-[#E5E5EA] dark:border-[#2C2C2E] overflow-hidden select-none">
-                  <div
-                    className="absolute left-3 z-10 pointer-events-none px-2 py-0.5 rounded bg-white/95 dark:bg-[#2C2C2E]/95 border border-[#E5E5EA] dark:border-[#3A3A3C] text-[10px] font-mono text-[#6C6C70] dark:text-[#AEAEB2]"
-                    style={{
-                      top: `clamp(8px, calc(${(geom.prevY / geom.height) * 100}% - 12px), calc(100% - 28px))`,
-                    }}
-                  >
-                    {timeframe === '1D' ? 'Open' : 'Start'}: {formatVal(geom.refClose)}
-                  </div>
-
-                  <svg
-                    ref={svgRef}
-                    viewBox={`0 0 ${geom.width} ${geom.height}`}
-                    preserveAspectRatio="none"
-                    className="w-full h-full cursor-crosshair"
-                    onPointerMove={(e) => handlePointer(e.clientX)}
-                    onPointerDown={(e) => handlePointer(e.clientX)}
-                    onPointerLeave={() => setHoverIdx(null)}
-                  >
-                    <defs>
-                      <linearGradient
-                        id={`symSplit-${uid}`}
-                        gradientUnits="userSpaceOnUse"
-                        x1="0"
-                        y1="0"
-                        x2="0"
-                        y2={String(geom.height)}
-                      >
-                        <stop offset="0%" stopColor="#22C55E" />
-                        <stop offset={`${geom.splitPct}%`} stopColor="#22C55E" />
-                        <stop offset={`${geom.splitPct}%`} stopColor="#EF4444" />
-                        <stop offset="100%" stopColor="#EF4444" />
-                      </linearGradient>
-
-                      <linearGradient
-                        id={`symAbove-${uid}`}
-                        gradientUnits="userSpaceOnUse"
-                        x1="0"
-                        y1="0"
-                        x2="0"
-                        y2={String(Math.max(1, geom.prevY))}
-                      >
-                        <stop offset="0%" stopColor="#22C55E" stopOpacity="0.34" />
-                        <stop offset="100%" stopColor="#22C55E" stopOpacity="0.05" />
-                      </linearGradient>
-
-                      <linearGradient
-                        id={`symBelow-${uid}`}
-                        gradientUnits="userSpaceOnUse"
-                        x1="0"
-                        y1={String(geom.prevY)}
-                        x2="0"
-                        y2={String(geom.height)}
-                      >
-                        <stop offset="0%" stopColor="#EF4444" stopOpacity="0.05" />
-                        <stop offset="100%" stopColor="#EF4444" stopOpacity="0.34" />
-                      </linearGradient>
-
-                      <clipPath id={`symClipA-${uid}`}>
-                        <rect x="0" y="0" width={geom.width} height={geom.prevY} />
-                      </clipPath>
-                      <clipPath id={`symClipB-${uid}`}>
-                        <rect x="0" y={geom.prevY} width={geom.width} height={Math.max(0, geom.height - geom.prevY)} />
-                      </clipPath>
-                    </defs>
-                    <line
-                      x1="0"
-                      y1={geom.prevY}
-                      x2={geom.width}
-                      y2={geom.prevY}
-                      stroke="#8E8E98"
-                      strokeWidth="1.5"
-                      strokeDasharray="2 5"
-                      opacity="0.75"
-                    />
-                    <path d={geom.area} clipPath={`url(#symClipA-${uid})`} fill={`url(#symAbove-${uid})`} />
-                    <path d={geom.area} clipPath={`url(#symClipB-${uid})`} fill={`url(#symBelow-${uid})`} />
-                    <path
-                      d={geom.line}
-                      fill="none"
-                      stroke={`url(#symSplit-${uid})`}
-                      strokeWidth="2.4"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                    {activePt && (
-                      <>
-                        <line
-                          x1={activePt.x}
-                          y1="0"
-                          x2={activePt.x}
-                          y2={geom.height}
-                          stroke="#8E8E93"
-                          strokeDasharray="3 3"
-                          strokeWidth="1"
-                        />
-                        <circle
-                          cx={activePt.x}
-                          cy={activePt.y}
-                          r="5"
-                          fill="#FFFFFF"
-                          stroke={activeDotColor}
-                          strokeWidth="2.5"
-                        />
-                      </>
-                    )}
-                  </svg>
-                </div>
-              )}
+              {/* Technical Line & Candlestick OHLC Chart (Unified with Index Terminal) */}
+              <InteractiveChart
+                asset={chartAsset}
+                timeframe={timeframe}
+                onTimeframeChange={setTimeframe}
+                onInspectIndexChange={setInspectedIdx}
+                compact
+              />
 
               {/* Key Statistics Grid */}
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 rounded-2xl bg-[#F2F2F7]/60 dark:bg-[#141416] border border-[#E5E5EA] dark:border-[#2C2C2E] p-4 text-xs">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 rounded-2xl liquid-glass-inset p-4 text-xs">
                 <div>
                   <span className="text-[#6C6C70] dark:text-[#8E8E93]">Open</span>
                   <p className="font-mono font-bold text-[#1C1C1E] dark:text-white mt-0.5">
@@ -450,9 +402,15 @@ export const SymbolDetailModal: React.FC<SymbolDetailModalProps> = ({
                 </div>
               </div>
 
-              <p className="text-xs text-[#6C6C70] dark:text-[#AEAEB2] leading-relaxed">
-                {detail.commentary}
-              </p>
+              {/* Per-Instrument Fear & Greed Gauge */}
+              {detailFearGreed && (
+                <FearGreedMeter
+                  fearGreed={detailFearGreed}
+                  instrumentLabel={detail.symbol}
+                  compact
+                  showComponents
+                />
+              )}
             </>
           ) : null}
         </div>

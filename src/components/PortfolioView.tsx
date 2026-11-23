@@ -1,7 +1,10 @@
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { AnimatePresence, motion } from 'motion/react';
 import {
   AlertTriangle,
+  ArrowDown,
   ArrowDownRight,
+  ArrowUp,
   ArrowUpRight,
   BarChart2,
   Briefcase,
@@ -48,15 +51,18 @@ import {
   PortfolioQuoteItem,
   PortfolioTransaction,
   StockSearchResult,
+  ThemeMode,
 } from '../types/market';
 import { computeTechnicalSignal } from '../utils/marketSignals';
 import { GoogleFinanceDeltaPill } from './GoogleFinanceMiniChart';
 import { AssetCategoryMiniIcon, SignalBadge } from './MarketUiPrimitives';
+import { PortfolioSectorPieChart } from './PortfolioSectorPieChart';
 
 interface PortfolioViewProps {
   assets: MarketAsset[];
   fxRates: Record<CurrencyCode, number>;
   searchQuery?: string;
+  themeMode?: ThemeMode;
   onInspectSymbol?: (yahooSymbol: string) => void;
 }
 
@@ -226,7 +232,21 @@ function loadInitialPortfolioState(): StoredPortfolioState {
   }
 }
 
-function formatMoney(amount: number, currency: 'IDR' | 'USD', compact = false): string {
+const CURRENCY_SYMBOL_MAP: Record<CurrencyCode, string> = {
+  USD: '$',
+  EUR: '€',
+  GBP: '£',
+  JPY: '¥',
+  CHF: 'CHF ',
+  CAD: 'C$',
+  AUD: 'A$',
+  NZD: 'NZ$',
+  CNY: '¥',
+  SGD: 'S$',
+  IDR: 'Rp ',
+};
+
+function formatMoney(amount: number, currency: CurrencyCode, compact = false): string {
   const abs = Math.abs(amount);
   const sign = amount < 0 ? '-' : '';
   if (currency === 'IDR') {
@@ -240,12 +260,14 @@ function formatMoney(amount: number, currency: 'IDR' | 'USD', compact = false): 
       maximumFractionDigits: 2,
     })}`;
   }
+  const sym = CURRENCY_SYMBOL_MAP[currency] ?? `${currency} `;
   if (compact && abs >= 1e6) {
-    return `${sign}$${(abs / 1e6).toFixed(2)}M`;
+    return `${sign}${sym}${(abs / 1e6).toFixed(2)}M`;
   }
-  return `${sign}$${abs.toLocaleString('en-US', {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
+  const decimals = currency === 'JPY' ? 0 : 2;
+  return `${sign}${sym}${abs.toLocaleString('en-US', {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
   })}`;
 }
 
@@ -480,7 +502,7 @@ const SwipeableHoldingRow: React.FC<SwipeableHoldingRowProps> = ({
   };
 
   return (
-    <div className="relative overflow-hidden group touch-pan-y">
+    <div data-no-view-swipe="true" className="relative overflow-hidden group touch-pan-y">
       {/* Revealed Swipe Action Tray (Right Side) */}
       <div
         className="absolute inset-y-0 right-0 flex items-center justify-end gap-2 px-3 bg-[#F2F2F7] dark:bg-[#141416]"
@@ -542,6 +564,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
   assets,
   fxRates,
   searchQuery = '',
+  themeMode = 'arctic',
   onInspectSymbol,
 }) => {
   const chartUid = useId().replace(/:/g, '');
@@ -571,10 +594,10 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
   const [tradeMode, setTradeMode] = useState<'BUY' | 'SELL'>('BUY');
   const [showPortfolioModal, setShowPortfolioModal] = useState(false);
   const [editingPortfolioName, setEditingPortfolioName] = useState('');
-  const [editingPortfolioCurrency, setEditingPortfolioCurrency] = useState<'IDR' | 'USD'>('IDR');
+  const [editingPortfolioCurrency, setEditingPortfolioCurrency] = useState<CurrencyCode>('IDR');
   const [confirmDeletePortfolio, setConfirmDeletePortfolio] = useState(false);
   const [newPortfolioName, setNewPortfolioName] = useState('');
-  const [newPortfolioCurrency, setNewPortfolioCurrency] = useState<'IDR' | 'USD'>('IDR');
+  const [newPortfolioCurrency, setNewPortfolioCurrency] = useState<CurrencyCode>('IDR');
 
   // Edit Holding Modal (multi-lot editor)
   const [editingHoldingTarget, setEditingHoldingTarget] = useState<PortfolioHolding | null>(null);
@@ -612,6 +635,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
   // Portfolio interactive chart scrub
   const svgRef = useRef<SVGSVGElement | null>(null);
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+  const [pinnedIdx, setPinnedIdx] = useState<number | null>(null);
 
   // Persist to localStorage automatically
   useEffect(() => {
@@ -659,15 +683,16 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
     );
   }, [activeHoldings, searchQuery]);
 
-  // FX conversion helper
-  const usdToIdr = fxRates.IDR || 16000;
+  // Multi-currency FX conversion helper via USD base
   const convertAmount = useCallback(
-    (amount: number, from: 'IDR' | 'USD', to: 'IDR' | 'USD'): number => {
+    (amount: number, from: CurrencyCode, to: CurrencyCode): number => {
       if (from === to) return amount;
-      if (from === 'USD' && to === 'IDR') return amount * usdToIdr;
-      return amount / usdToIdr;
+      const fromRate = fxRates[from] || (from === 'IDR' ? 16000 : 1);
+      const toRate = fxRates[to] || (to === 'IDR' ? 16000 : 1);
+      const usdAmount = from === 'USD' ? amount : amount / fromRate;
+      return to === 'USD' ? usdAmount : usdAmount * toRate;
     },
-    [usdToIdr]
+    [fxRates]
   );
 
   const holdingYahooSymbols = useMemo(
@@ -733,38 +758,57 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
     return () => window.clearInterval(timer);
   }, [symbolsKey, fetchQuotesNow]);
 
-  // Fetch historical chart series per holding for selected Portfolio Chart Range
+  const chartSeriesMapRef = useRef(chartSeriesMap);
+  chartSeriesMapRef.current = chartSeriesMap;
+
+  // Fetch historical chart series per holding for selected Portfolio Chart Range + 1M (for header 30D trend)
   useEffect(() => {
     if (holdingYahooSymbols.length === 0) return;
     let cancelled = false;
 
     const loadAllSeries = async () => {
-      const entries = await Promise.all(
-        holdingYahooSymbols.map(async (sym) => {
-          try {
-            const res = await fetch(
-              `/api/portfolio/chart?symbol=${encodeURIComponent(sym)}&timeframe=${encodeURIComponent(
-                chartRange
-              )}`
-            );
-            if (!res.ok) return null;
-            const json = (await res.json()) as {
-              points: number[];
-              timestamps: number[];
-              prevClose: number;
-            };
-            return [sym, json] as const;
-          } catch {
-            return null;
+      const timeframesToLoad = Array.from(new Set<PortfolioChartRange>([chartRange, '1M']));
+      const requests: Array<
+        Promise<{
+          key: string;
+          data: { points: number[]; timestamps: number[]; prevClose: number };
+        } | null>
+      > = [];
+
+      for (const tf of timeframesToLoad) {
+        for (const sym of holdingYahooSymbols) {
+          const cacheKey = `${sym}:${tf}`;
+          if (tf !== chartRange && chartSeriesMapRef.current[cacheKey]) {
+            continue;
           }
-        })
-      );
+          requests.push(
+            (async () => {
+              try {
+                const res = await fetch(
+                  `/api/portfolio/chart?symbol=${encodeURIComponent(sym)}&timeframe=${encodeURIComponent(tf)}`
+                );
+                if (!res.ok) return null;
+                const json = (await res.json()) as {
+                  points: number[];
+                  timestamps: number[];
+                  prevClose: number;
+                };
+                return { key: cacheKey, data: json };
+              } catch {
+                return null;
+              }
+            })()
+          );
+        }
+      }
+
+      const entries = await Promise.all(requests);
       if (cancelled) return;
       setChartSeriesMap((prev) => {
         const next = { ...prev };
         for (const item of entries) {
           if (item) {
-            next[`${item[0]}:${chartRange}`] = item[1];
+            next[item.key] = item.data;
           }
         }
         return next;
@@ -819,6 +863,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
       collection(db, 'users', user.uid, 'positions'),
       (snap) => {
         if (snap.empty) return;
+        const idrPerUsd = fxRates.IDR || 16000;
         const cloudHoldings: PortfolioHolding[] = snap.docs.map((d) => {
           const data = d.data();
           const sym = String(data.symbol || 'AAPL');
@@ -833,7 +878,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
             category: (data.category as PortfolioAssetCategory) || 'Equities',
             currency: isIdr ? 'IDR' : 'USD',
             units: Number(data.units || 0),
-            avgCost: isIdr ? Math.round(avgCostUsd * usdToIdr) : avgCostUsd,
+            avgCost: isIdr ? Math.round(avgCostUsd * idrPerUsd) : avgCostUsd,
             linkedAssetId: typeof data.linkedAssetId === 'string' ? data.linkedAssetId : undefined,
             createdAt: new Date().toISOString(),
           };
@@ -855,7 +900,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
       }
     );
     return () => unsubscribe();
-  }, [user, profileReady, usdToIdr]);
+  }, [user, profileReady, fxRates.IDR]);
 
   const syncHoldingToFirestore = useCallback(
     async (holding: PortfolioHolding, currentPriceNative: number) => {
@@ -1106,6 +1151,97 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
     convertAmount,
     summary.totalPrevClose,
     summary.totalCost,
+  ]);
+
+  // Dedicated 30-Day Portfolio Value Trend Mini Line Chart for Portfolio Header
+  const portfolio30DayTrend = useMemo(() => {
+    if (enrichedHoldings.length === 0) return null;
+    const bucketCount = 30;
+    const targetCurr = activePortfolio.displayCurrency;
+    const points: number[] = new Array(bucketCount).fill(0);
+    let hasAny1M = false;
+
+    for (const h of enrichedHoldings) {
+      const stored1M = chartSeriesMap[`${h.yahooSymbol}:1M`];
+      if (stored1M?.points && stored1M.points.length >= 2) {
+        hasAny1M = true;
+      }
+      const rawPts =
+        stored1M?.points && stored1M.points.length >= 2
+          ? stored1M.points
+          : h.quote?.chart1D && h.quote.chart1D.length >= 2
+            ? h.quote.chart1D
+            : [h.prevNativeClose, h.liveNativePrice];
+
+      for (let i = 0; i < bucketCount; i++) {
+        const idx = Math.min(
+          rawPts.length - 1,
+          Math.round((i / (bucketCount - 1)) * (rawPts.length - 1))
+        );
+        const unitPrice = i === bucketCount - 1 ? h.liveNativePrice : rawPts[idx];
+        points[i] += convertAmount(h.units * unitPrice, h.currency, targetCurr);
+      }
+    }
+
+    if (!hasAny1M) {
+      return {
+        ready: false as const,
+        points: [] as number[],
+        startVal: summary.totalValue,
+        endVal: summary.totalValue,
+        delta: 0,
+        pct: 0,
+        linePath: '',
+        areaPath: '',
+        baselineY: 22,
+        lastPt: { x: 180, y: 22 },
+      };
+    }
+
+    const startVal = points[0] || summary.totalValue;
+    const endVal = summary.totalValue;
+    const delta = endVal - startVal;
+    const pct = startVal > 0 ? (delta / startVal) * 100 : 0;
+
+    const w = 180;
+    const h = 44;
+    const padY = 5;
+    const min = Math.min(...points, startVal);
+    const max = Math.max(...points, startVal);
+    const span = max - min || Math.max(Math.abs(startVal) * 0.01, 1);
+
+    const coords = points.map((v, i) => ({
+      x: (i / Math.max(points.length - 1, 1)) * w,
+      y: padY + ((max - v) / span) * (h - padY * 2),
+    }));
+    const linePath = coords
+      .map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x.toFixed(1)},${p.y.toFixed(1)}`)
+      .join(' ');
+    const baselineY = Math.max(
+      4,
+      Math.min(h - 4, padY + ((max - startVal) / span) * (h - padY * 2))
+    );
+    const lastPt = coords[coords.length - 1] ?? { x: w, y: h / 2 };
+    const areaPath = `${linePath} L${lastPt.x.toFixed(1)},${h} L0,${h} Z`;
+
+    return {
+      ready: true as const,
+      points,
+      startVal,
+      endVal,
+      delta,
+      pct,
+      linePath,
+      areaPath,
+      baselineY,
+      lastPt,
+    };
+  }, [
+    enrichedHoldings,
+    chartSeriesMap,
+    activePortfolio.displayCurrency,
+    convertAmount,
+    summary.totalValue,
   ]);
 
   // Asset Allocation, Concentration, and Treemap Insights
@@ -1666,8 +1802,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
     setShowPortfolioModal(false);
   };
 
-  const handleToggleDisplayCurrency = () => {
-    const nextCurr: 'IDR' | 'USD' = activePortfolio.displayCurrency === 'IDR' ? 'USD' : 'IDR';
+  const handleSelectDisplayCurrency = (nextCurr: CurrencyCode) => {
     setState((prev) => ({
       ...prev,
       portfolios: prev.portfolios.map((p) =>
@@ -1707,21 +1842,43 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
     return { coords, line, area, prevY, splitPct, yTicks, width: w, height: h };
   }, [portfolioChartData]);
 
-  const handleChartPointer = (clientX: number) => {
+  const handleChartPointer = (clientX: number, togglePin = false) => {
     const svg = svgRef.current;
     if (!svg) return;
     const rect = svg.getBoundingClientRect();
     const relX = Math.max(0, Math.min(clientX - rect.left, rect.width));
     const idx = Math.round((relX / Math.max(rect.width, 1)) * (chartGeometry.coords.length - 1));
-    setHoverIdx(Math.max(0, Math.min(chartGeometry.coords.length - 1, idx)));
+    const clamped = Math.max(0, Math.min(chartGeometry.coords.length - 1, idx));
+    setHoverIdx(clamped);
+    if (togglePin) {
+      setPinnedIdx((prev) => (prev === clamped ? null : clamped));
+    }
   };
 
-  const activeChartPoint = hoverIdx !== null ? chartGeometry.coords[hoverIdx] : null;
+  const inspectIdx = hoverIdx !== null ? hoverIdx : pinnedIdx;
+  const activeChartPoint = inspectIdx !== null ? chartGeometry.coords[inspectIdx] : null;
   const activeTimestamp =
-    hoverIdx !== null ? portfolioChartData.timestamps[hoverIdx] : lastFeedUpdatedAt;
+    inspectIdx !== null ? portfolioChartData.timestamps[inspectIdx] : lastFeedUpdatedAt;
 
-  const displayPct = chartRange === '1D' ? summary.dayPct : summary.totalReturnPct;
-  const displayDelta = chartRange === '1D' ? summary.dayDelta : summary.totalReturn;
+  const { displayPct, displayDelta } = useMemo(() => {
+    const base = portfolioChartData.prevClose;
+    if (activeChartPoint) {
+      const d = activeChartPoint.val - base;
+      const p = base > 0 ? (d / base) * 100 : 0;
+      return { displayDelta: d, displayPct: p };
+    }
+    if (chartRange === '1D') {
+      return { displayDelta: summary.dayDelta, displayPct: summary.dayPct };
+    }
+    if (chartRange === 'MAX') {
+      return { displayDelta: summary.totalReturn, displayPct: summary.totalReturnPct };
+    }
+    const startVal = portfolioChartData.points[0] ?? base;
+    const endVal = summary.totalValue;
+    const d = endVal - startVal;
+    const p = startVal > 0 ? (d / startVal) * 100 : 0;
+    return { displayDelta: d, displayPct: p };
+  }, [activeChartPoint, chartRange, portfolioChartData, summary]);
 
   const formattedUpdatedWib = new Intl.DateTimeFormat('en-GB', {
     timeZone: 'Asia/Jakarta',
@@ -1774,14 +1931,25 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
         </div>
 
         <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={handleToggleDisplayCurrency}
-            className="px-3 py-1.5 rounded-full text-xs font-bold font-mono bg-white dark:bg-[#1C1C1E] border border-[#D1D1D6] dark:border-[#2C2C2E] text-[#1C1C1E] dark:text-white hover:border-[#0071E3] transition-colors"
-            title="Switch portfolio display currency"
+          <select
+            aria-label="Select portfolio display currency"
+            value={activePortfolio.displayCurrency}
+            onChange={(e) => handleSelectDisplayCurrency(e.target.value as CurrencyCode)}
+            className="px-3 py-1.5 rounded-full text-xs font-bold font-mono bg-white dark:bg-[#141B28] border border-[#D1D1D6] dark:border-white/15 text-[#1C1C1E] dark:text-white hover:border-[#0071E3] focus:outline-none transition-colors cursor-pointer"
+            title="Switch portfolio display currency across major G10 & Asian FX"
           >
-            {activePortfolio.displayCurrency === 'IDR' ? 'Currency: IDR (Rp)' : 'Currency: USD ($)'}
-          </button>
+            <option value="IDR">IDR (Rp)</option>
+            <option value="USD">USD ($)</option>
+            <option value="EUR">EUR (€)</option>
+            <option value="GBP">GBP (£)</option>
+            <option value="JPY">JPY (¥)</option>
+            <option value="CHF">CHF (Fr)</option>
+            <option value="CAD">CAD (C$)</option>
+            <option value="AUD">AUD (A$)</option>
+            <option value="NZD">NZD (NZ$)</option>
+            <option value="CNY">CNY (¥)</option>
+            <option value="SGD">SGD (S$)</option>
+          </select>
 
           {user ? (
             <button
@@ -1815,8 +1983,8 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
 
       {/* Main Portfolio Summary & Interactive Chart Card */}
       <section className="rounded-3xl liquid-glass-card p-5 sm:p-6 flex flex-col gap-4">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+          <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
               <span className="text-sm font-bold text-[#6C6C70] dark:text-[#AEAEB2]">
                 {activePortfolio.name}
@@ -1843,14 +2011,41 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
             </div>
 
             <div className="mt-1.5 flex flex-wrap items-center gap-2 text-xs sm:text-sm">
-              <GoogleFinanceDeltaPill changePercent={displayPct} />
+              <GoogleFinanceDeltaPill changePercent={summary.dayPct} />
               <span className="font-mono font-semibold tabular-nums text-[#6C6C70] dark:text-[#AEAEB2]">
-                ({displayDelta >= 0 ? '+' : ''}
-                {formatMoney(displayDelta, activePortfolio.displayCurrency)})
+                ({summary.dayDelta >= 0 ? '+' : ''}
+                {formatMoney(summary.dayDelta, activePortfolio.displayCurrency)})
               </span>
               <span className="text-xs font-semibold uppercase tracking-wide text-[#6C6C70] dark:text-[#8E8E93]">
-                {chartRange === '1D' ? 'Today' : chartRange}
+                Today
               </span>
+
+              {(chartRange !== '1D' || Boolean(activeChartPoint)) && (
+                <span
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full border text-xs font-mono tabular-nums ${
+                    displayPct >= 0
+                      ? 'bg-[#22C55E]/14 dark:bg-[#4ADE80]/16 border-[#16A34A]/35 text-[#0F7033] dark:text-[#4ADE80]'
+                      : 'bg-[#EF4444]/14 dark:bg-[#FF6B63]/16 border-[#DC2626]/35 text-[#C41C16] dark:text-[#FF6B63]'
+                  }`}
+                >
+                  <span className="font-sans text-[10px] font-extrabold uppercase tracking-wider opacity-85">
+                    {activeChartPoint ? `${chartRange} Pt` : chartRange}
+                  </span>
+                  <span className="inline-flex items-center gap-0.5 font-extrabold">
+                    {displayPct >= 0 ? (
+                      <ArrowUp className="w-3 h-3 stroke-[2.75]" />
+                    ) : (
+                      <ArrowDown className="w-3 h-3 stroke-[2.75]" />
+                    )}
+                    {displayPct >= 0 ? '+' : ''}
+                    {displayPct.toFixed(2)}%
+                  </span>
+                  <span className="font-semibold opacity-90 hidden sm:inline">
+                    ({displayDelta >= 0 ? '+' : ''}
+                    {formatMoney(displayDelta, activePortfolio.displayCurrency)})
+                  </span>
+                </span>
+              )}
             </div>
 
             <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[11px] text-[#6C6C70] dark:text-[#8E8E93]">
@@ -1885,35 +2080,139 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => void fetchQuotesNow(holdingYahooSymbols)}
-              className="p-2 rounded-full bg-[#F2F2F7] dark:bg-[#2C2C2E] text-[#1C1C1E] dark:text-white hover:bg-[#E5E5EA] dark:hover:bg-[#3A3A3C] transition-colors"
-              title="Refresh quotes"
-            >
-              <RefreshCw className="w-4 h-4" />
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setTradeMode('BUY');
-                setSelectedSymbol(null);
-                setFormError(null);
-                setShowAddModal(true);
-              }}
-              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full bg-[#0071E3] dark:bg-[#0A84FF] hover:opacity-90 text-white text-xs font-bold shadow-sm transition-opacity"
-            >
-              <Plus className="w-4 h-4" />
-              Add holding
-            </button>
+          <div className="flex flex-wrap sm:flex-nowrap items-center gap-3 shrink-0">
+            {/* 30-Day Portfolio Value Trend Mini Line Chart */}
+            {portfolio30DayTrend && (
+              <div
+                className="liquid-glass-inset rounded-2xl px-3.5 py-2.5 w-full sm:w-[238px] flex flex-col gap-1.5"
+                title={
+                  portfolio30DayTrend.ready
+                    ? `30-Day Portfolio Value Trend: ${formatMoney(portfolio30DayTrend.startVal, activePortfolio.displayCurrency)} → ${formatMoney(portfolio30DayTrend.endVal, activePortfolio.displayCurrency)}`
+                    : 'Loading 30-day portfolio trend...'
+                }
+              >
+                <div className="flex items-center justify-between gap-2 text-[10px]">
+                  <span className="font-bold uppercase tracking-wider text-[#6C6C70] dark:text-[#AEAEB2]">
+                    30D Value Trend
+                  </span>
+                  {portfolio30DayTrend.ready ? (
+                    <span
+                      className={`font-mono font-extrabold tabular-nums ${
+                        portfolio30DayTrend.delta >= 0
+                          ? 'text-[#0F7033] dark:text-[#4ADE80]'
+                          : 'text-[#C41C16] dark:text-[#FF6B63]'
+                      }`}
+                    >
+                      {portfolio30DayTrend.pct >= 0 ? '+' : ''}
+                      {portfolio30DayTrend.pct.toFixed(2)}%
+                    </span>
+                  ) : (
+                    <Loader2 className="w-3 h-3 animate-spin text-[#0071E3]" />
+                  )}
+                </div>
+
+                {portfolio30DayTrend.ready ? (
+                  <svg
+                    viewBox="0 0 180 44"
+                    className="w-full h-11 overflow-visible"
+                    role="img"
+                    aria-label={`30-day portfolio trend ${portfolio30DayTrend.pct >= 0 ? 'up' : 'down'} ${Math.abs(portfolio30DayTrend.pct).toFixed(2)} percent`}
+                  >
+                    <defs>
+                      <linearGradient id={`pf30d-${chartUid}`} x1="0" y1="0" x2="0" y2="1">
+                        <stop
+                          offset="0%"
+                          stopColor={portfolio30DayTrend.delta >= 0 ? '#16A34A' : '#DC2626'}
+                          stopOpacity="0.28"
+                        />
+                        <stop
+                          offset="100%"
+                          stopColor={portfolio30DayTrend.delta >= 0 ? '#16A34A' : '#DC2626'}
+                          stopOpacity="0.02"
+                        />
+                      </linearGradient>
+                    </defs>
+                    <line
+                      x1="0"
+                      y1={portfolio30DayTrend.baselineY}
+                      x2="180"
+                      y2={portfolio30DayTrend.baselineY}
+                      stroke="#8E8E98"
+                      strokeOpacity="0.45"
+                      strokeWidth="1"
+                      strokeDasharray="2.5 2.5"
+                    />
+                    <path d={portfolio30DayTrend.areaPath} fill={`url(#pf30d-${chartUid})`} />
+                    <path
+                      d={portfolio30DayTrend.linePath}
+                      fill="none"
+                      stroke={portfolio30DayTrend.delta >= 0 ? '#16A34A' : '#DC2626'}
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                    <circle
+                      cx={portfolio30DayTrend.lastPt.x}
+                      cy={portfolio30DayTrend.lastPt.y}
+                      r="2.6"
+                      fill={portfolio30DayTrend.delta >= 0 ? '#16A34A' : '#DC2626'}
+                    />
+                  </svg>
+                ) : (
+                  <div className="h-11 flex items-center justify-center text-[10px] text-[#6C6C70] dark:text-[#8E8E93]">
+                    Syncing 30D history...
+                  </div>
+                )}
+
+                <div className="flex items-center justify-between gap-2 text-[10px] font-mono tabular-nums text-[#6C6C70] dark:text-[#8E8E93]">
+                  <span>30D Net</span>
+                  <span
+                    className={`font-bold truncate ${
+                      portfolio30DayTrend.delta >= 0
+                        ? 'text-[#0F7033] dark:text-[#4ADE80]'
+                        : 'text-[#C41C16] dark:text-[#FF6B63]'
+                    }`}
+                  >
+                    {portfolio30DayTrend.delta >= 0 ? '+' : ''}
+                    {formatMoney(portfolio30DayTrend.delta, activePortfolio.displayCurrency)}
+                  </span>
+                </div>
+              </div>
+            )}
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => void fetchQuotesNow(holdingYahooSymbols)}
+                className="p-2 rounded-full bg-[#F2F2F7] dark:bg-[#2C2C2E] text-[#1C1C1E] dark:text-white hover:bg-[#E5E5EA] dark:hover:bg-[#3A3A3C] transition-colors"
+                title="Refresh quotes"
+              >
+                <RefreshCw className="w-4 h-4" />
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setTradeMode('BUY');
+                  setSelectedSymbol(null);
+                  setFormError(null);
+                  setShowAddModal(true);
+                }}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full bg-[#0071E3] dark:bg-[#0A84FF] hover:opacity-90 text-white text-xs font-bold shadow-sm transition-opacity whitespace-nowrap"
+              >
+                <Plus className="w-4 h-4" />
+                Add holding
+              </button>
+            </div>
           </div>
         </div>
 
         {/* Portfolio Performance Area Chart */}
         {activeHoldings.length > 0 ? (
           <div className="flex flex-col gap-3">
-            <div className="relative flex items-stretch gap-2 h-52 sm:h-60 select-none">
+            <div
+              data-no-view-swipe="true"
+              className="relative flex items-stretch gap-2 h-52 sm:h-60 select-none"
+            >
               <div className="relative flex-1 h-full rounded-2xl bg-[#F2F2F7]/50 dark:bg-[#141416] border border-[#E5E5EA] dark:border-[#2C2C2E]/80 overflow-hidden">
                 <div
                   className="absolute left-2.5 z-10 pointer-events-none px-2.5 py-1 rounded-lg bg-white/95 dark:bg-[#2C2C2E]/95 border border-[#E5E5EA] dark:border-[#3A3A3C] shadow text-[10px] font-mono"
@@ -1934,14 +2233,14 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                   viewBox={`0 0 ${chartGeometry.width} ${chartGeometry.height}`}
                   preserveAspectRatio="none"
                   className="w-full h-full cursor-crosshair"
-                  onPointerMove={(e) => handleChartPointer(e.clientX)}
-                  onPointerDown={(e) => handleChartPointer(e.clientX)}
+                  onPointerMove={(e) => handleChartPointer(e.clientX, false)}
+                  onPointerDown={(e) => handleChartPointer(e.clientX, true)}
                   onPointerLeave={() => setHoverIdx(null)}
                   onTouchStart={(e) => {
-                    if (e.touches[0]) handleChartPointer(e.touches[0].clientX);
+                    if (e.touches[0]) handleChartPointer(e.touches[0].clientX, true);
                   }}
                   onTouchMove={(e) => {
-                    if (e.touches[0]) handleChartPointer(e.touches[0].clientX);
+                    if (e.touches[0]) handleChartPointer(e.touches[0].clientX, false);
                   }}
                   onTouchEnd={() => setHoverIdx(null)}
                 >
@@ -2063,24 +2362,42 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
               </div>
             </div>
 
-            <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar">
-              {PORTFOLIO_RANGES.map((range) => {
-                const active = chartRange === range;
-                return (
-                  <button
-                    key={range}
-                    type="button"
-                    onClick={() => setChartRange(range)}
-                    className={`px-3 py-1 rounded-xl text-xs font-bold transition-colors ${
-                      active
-                        ? 'bg-[#0071E3] dark:bg-[#1D4ED8] text-white'
-                        : 'bg-[#F2F2F7] dark:bg-[#2C2C2E]/70 text-[#6C6C70] dark:text-[#AEAEB2] hover:text-[#1C1C1E] dark:hover:text-white'
-                    }`}
-                  >
-                    {range}
-                  </button>
-                );
-              })}
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar">
+                {PORTFOLIO_RANGES.map((range) => {
+                  const active = chartRange === range;
+                  return (
+                    <button
+                      key={range}
+                      type="button"
+                      onClick={() => {
+                        setChartRange(range);
+                        setPinnedIdx(null);
+                        setHoverIdx(null);
+                      }}
+                      className={`px-3 py-1 rounded-xl text-xs font-bold transition-colors ${
+                        active
+                          ? 'bg-[#0071E3] dark:bg-[#1D4ED8] text-white'
+                          : 'bg-[#F2F2F7] dark:bg-[#2C2C2E]/70 text-[#6C6C70] dark:text-[#AEAEB2] hover:text-[#1C1C1E] dark:hover:text-white'
+                      }`}
+                    >
+                      {range}
+                    </button>
+                  );
+                })}
+              </div>
+              {pinnedIdx !== null && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPinnedIdx(null);
+                    setHoverIdx(null);
+                  }}
+                  className="text-[11px] font-semibold text-[#0071E3] dark:text-[#8AB4F8] hover:underline"
+                >
+                  Reset point
+                </button>
+              )}
             </div>
           </div>
         ) : (
@@ -2175,96 +2492,114 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                 No holdings in &ldquo;{activePortfolio.name}&rdquo; yet. Click <strong>+ Add holding</strong> to record a position.
               </div>
             ) : (
-              <div className="divide-y divide-[#E5E5EA] dark:divide-[#2C2C2E]/70">
-                {enrichedHoldings.map((h) => {
-                  const isExpanded = expandedHoldingId === h.id;
-                  const isSwiped = swipedHoldingId === h.id;
+              <div data-testid="portfolio-holdings-list" className="divide-y divide-[#E5E5EA] dark:divide-[#2C2C2E]/70">
+                <AnimatePresence initial={false} mode="popLayout">
+                  {enrichedHoldings.map((h) => {
+                    const isExpanded = expandedHoldingId === h.id;
+                    const isSwiped = swipedHoldingId === h.id;
 
-                  return (
-                    <div key={h.id}>
-                      <SwipeableHoldingRow
-                        isOpen={isSwiped}
-                        onOpenChange={(open) => setSwipedHoldingId(open ? h.id : null)}
-                        onEditHolding={() => handleOpenEditHolding(h)}
-                        onDeleteHolding={() => handleRemoveHolding(h)}
-                        onToggleExpand={() =>
-                          setExpandedHoldingId(isExpanded ? null : h.id)
-                        }
+                    return (
+                      <motion.div
+                        key={h.id}
+                        layout="position"
+                        initial={{ opacity: 0, y: 10, scale: 0.985 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        exit={{ opacity: 0, x: -20, scale: 0.98 }}
+                        transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
+                        data-testid={`portfolio-holding-row-${h.symbol}`}
+                        className="group"
                       >
-                        <div className="px-4 sm:px-5 py-3.5 grid grid-cols-12 items-center gap-2 hover:bg-[#F2F2F7]/60 dark:hover:bg-[#2C2C2E]/40 cursor-pointer transition-colors">
-                          <div className="col-span-5 sm:col-span-4 flex items-center gap-2.5 min-w-0">
-                            <AssetCategoryMiniIcon
-                              category={h.category}
-                              idOrSymbol={h.symbol}
-                              size="md"
-                            />
-                            <div className="min-w-0">
-                              <div className="flex items-center gap-1.5 flex-wrap">
-                                <span className="font-bold text-sm text-[#1C1C1E] dark:text-white truncate">
-                                  {h.symbol}
-                                </span>
-                                <span
-                                  className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-                                    h.sessionOpen ? 'bg-[#30D158]' : 'bg-[#8E8E93]/60'
-                                  }`}
-                                  title={h.sessionStateLabel}
-                                />
-                                <SignalBadge signal={h.signal} compact />
+                        <SwipeableHoldingRow
+                          isOpen={isSwiped}
+                          onOpenChange={(open) => setSwipedHoldingId(open ? h.id : null)}
+                          onEditHolding={() => handleOpenEditHolding(h)}
+                          onDeleteHolding={() => handleRemoveHolding(h)}
+                          onToggleExpand={() =>
+                            setExpandedHoldingId(isExpanded ? null : h.id)
+                          }
+                        >
+                          <div className="px-4 sm:px-5 py-3.5 grid grid-cols-12 items-center gap-2 hover:bg-[#F2F2F7]/60 dark:hover:bg-[#2C2C2E]/40 cursor-pointer transition-colors">
+                            <div className="col-span-5 sm:col-span-4 flex items-center gap-2.5 min-w-0">
+                              <AssetCategoryMiniIcon
+                                category={h.category}
+                                idOrSymbol={h.symbol}
+                                size="md"
+                              />
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                  <span className="font-bold text-sm text-[#1C1C1E] dark:text-white truncate">
+                                    {h.symbol}
+                                  </span>
+                                  <span
+                                    className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                                      h.sessionOpen ? 'bg-[#30D158]' : 'bg-[#8E8E93]/60'
+                                    }`}
+                                    title={h.sessionStateLabel}
+                                  />
+                                  <SignalBadge signal={h.signal} compact />
+                                </div>
+                                <p className="text-xs text-[#6C6C70] dark:text-[#8E8E93] tabular-nums truncate">
+                                  {h.units.toLocaleString('en-US')} shares
+                                </p>
                               </div>
-                              <p className="text-xs text-[#6C6C70] dark:text-[#8E8E93] tabular-nums truncate">
-                                {h.units.toLocaleString('en-US')} shares
-                              </p>
+                            </div>
+
+                            <div className="col-span-3 sm:col-span-3 text-right font-mono text-xs sm:text-sm font-bold text-[#1C1C1E] dark:text-white tabular-nums">
+                              <motion.span
+                                key={`${h.id}-${h.marketValue.toFixed(2)}`}
+                                initial={{ opacity: 0.65, y: -2 }}
+                                animate={{ opacity: 1, y: 0 }}
+                                transition={{ duration: 0.22 }}
+                                className="inline-block"
+                              >
+                                {formatMoney(h.marketValue, activePortfolio.displayCurrency, true)}
+                              </motion.span>
+                            </div>
+
+                            <div
+                              className={`hidden sm:block sm:col-span-2 text-right font-mono text-xs font-semibold tabular-nums ${
+                                h.dayChangePct >= 0
+                                  ? 'text-[#16803C] dark:text-[#6EE7B7]'
+                                  : 'text-[#D7261C] dark:text-[#FCA5A5]'
+                              }`}
+                            >
+                              {h.dayChangePct >= 0 ? '+' : ''}
+                              {h.dayChangePct.toFixed(2)}%
+                            </div>
+
+                            <div className="col-span-4 sm:col-span-3 flex items-center justify-end gap-1.5">
+                              <GoogleFinanceDeltaPill changePercent={h.totalReturnPct} compact />
+                              {/* Quick desktop edit/delete triggers (complement touch swipe left) */}
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleOpenEditHolding(h);
+                                }}
+                                className="hidden sm:inline-flex opacity-0 group-hover:opacity-100 p-1 rounded-full hover:bg-[#0071E3]/15 text-[#0071E3] dark:text-[#8AB4F8] transition-opacity"
+                                title="Edit holding"
+                              >
+                                <Pencil className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleRemoveHolding(h);
+                                }}
+                                className="hidden sm:inline-flex opacity-0 group-hover:opacity-100 p-1 rounded-full hover:bg-[#D7261C]/15 text-[#D7261C] dark:text-[#F28B82] transition-opacity"
+                                title="Delete holding"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                              {isExpanded ? (
+                                <ChevronUp className="w-4 h-4 text-[#8E8E93] shrink-0" />
+                              ) : (
+                                <ChevronDown className="w-4 h-4 text-[#8E8E93] shrink-0" />
+                              )}
                             </div>
                           </div>
-
-                          <div className="col-span-3 sm:col-span-3 text-right font-mono text-xs sm:text-sm font-bold text-[#1C1C1E] dark:text-white tabular-nums">
-                            {formatMoney(h.marketValue, activePortfolio.displayCurrency, true)}
-                          </div>
-
-                          <div
-                            className={`hidden sm:block sm:col-span-2 text-right font-mono text-xs font-semibold tabular-nums ${
-                              h.dayChangePct >= 0
-                                ? 'text-[#16803C] dark:text-[#6EE7B7]'
-                                : 'text-[#D7261C] dark:text-[#FCA5A5]'
-                            }`}
-                          >
-                            {h.dayChangePct >= 0 ? '+' : ''}
-                            {h.dayChangePct.toFixed(2)}%
-                          </div>
-
-                          <div className="col-span-4 sm:col-span-3 flex items-center justify-end gap-1.5">
-                            <GoogleFinanceDeltaPill changePercent={h.totalReturnPct} compact />
-                            {/* Quick desktop edit/delete triggers (complement touch swipe left) */}
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleOpenEditHolding(h);
-                              }}
-                              className="hidden sm:inline-flex opacity-0 group-hover:opacity-100 p-1 rounded-full hover:bg-[#0071E3]/15 text-[#0071E3] dark:text-[#8AB4F8] transition-opacity"
-                              title="Edit holding"
-                            >
-                              <Pencil className="w-3.5 h-3.5" />
-                            </button>
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleRemoveHolding(h);
-                              }}
-                              className="hidden sm:inline-flex opacity-0 group-hover:opacity-100 p-1 rounded-full hover:bg-[#D7261C]/15 text-[#D7261C] dark:text-[#F28B82] transition-opacity"
-                              title="Delete holding"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                            {isExpanded ? (
-                              <ChevronUp className="w-4 h-4 text-[#8E8E93] shrink-0" />
-                            ) : (
-                              <ChevronDown className="w-4 h-4 text-[#8E8E93] shrink-0" />
-                            )}
-                          </div>
-                        </div>
-                      </SwipeableHoldingRow>
+                        </SwipeableHoldingRow>
 
                       {/* Expanded Position Breakdown + Individual Purchase Lots */}
                       {isExpanded && (
@@ -2465,9 +2800,10 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                           </div>
                         </div>
                       )}
-                    </div>
+                    </motion.div>
                   );
                 })}
+                </AnimatePresence>
               </div>
             )}
           </div>
@@ -2492,6 +2828,22 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
               </span>
             )}
           </div>
+
+          {enrichedHoldings.length > 0 && (
+            <PortfolioSectorPieChart
+              holdings={enrichedHoldings}
+              displayCurrency={activePortfolio.displayCurrency}
+              formatMoney={formatMoney}
+              themeMode={themeMode}
+              onInspectSymbol={onInspectSymbol}
+              onAddHolding={() => {
+                setTradeMode('BUY');
+                setSelectedSymbol(null);
+                setFormError(null);
+                setShowAddModal(true);
+              }}
+            />
+          )}
         </section>
       )}
 
@@ -2661,92 +3013,20 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
             )}
           </div>
 
-          {/* Card C: Asset Allocation Donut */}
-          <div className="rounded-3xl liquid-glass-card p-5 sm:p-6 flex flex-col gap-5">
-            <h2 className="text-lg font-bold text-[#1C1C1E] dark:text-white">
-              Asset allocation
-            </h2>
-
-            {insights.allocation.length === 0 ? (
-              <p className="text-xs text-[#6C6C70] dark:text-[#8E8E93]">
-                Add holdings to inspect your asset class breakdown.
-              </p>
-            ) : (
-              <>
-                <div className="flex flex-wrap items-center gap-6">
-                  <svg viewBox="0 0 120 120" className="w-32 h-32 shrink-0 -rotate-90">
-                    <circle
-                      cx="60"
-                      cy="60"
-                      r="42"
-                      fill="none"
-                      stroke="#2C2C2E"
-                      strokeOpacity="0.15"
-                      strokeWidth="18"
-                    />
-                    {(() => {
-                      const circumference = 2 * Math.PI * 42;
-                      let offsetAcc = 0;
-                      return insights.allocation.map((slice) => {
-                        const dashLen = (slice.pct / 100) * circumference;
-                        const el = (
-                          <circle
-                            key={slice.category}
-                            cx="60"
-                            cy="60"
-                            r="42"
-                            fill="none"
-                            stroke={slice.color}
-                            strokeWidth="18"
-                            strokeDasharray={`${dashLen.toFixed(2)} ${circumference.toFixed(2)}`}
-                            strokeDashoffset={(-offsetAcc).toFixed(2)}
-                          />
-                        );
-                        offsetAcc += dashLen;
-                        return el;
-                      });
-                    })()}
-                  </svg>
-
-                  <div className="flex-1 min-w-[160px] flex flex-col gap-2.5">
-                    {insights.allocation.map((slice) => (
-                      <div
-                        key={slice.category}
-                        className="flex items-center justify-between text-xs sm:text-sm"
-                      >
-                        <div className="flex items-center gap-2">
-                          <span
-                            className="w-2.5 h-2.5 rounded-sm shrink-0"
-                            style={{ backgroundColor: slice.color }}
-                          />
-                          <span className="font-semibold text-[#1C1C1E] dark:text-[#E5E5EA]">
-                            {slice.category}
-                          </span>
-                        </div>
-                        <span className="font-mono font-bold tabular-nums text-[#1C1C1E] dark:text-white">
-                          {slice.pct.toFixed(0)}%
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="pt-4 border-t border-[#E5E5EA] dark:border-[#2C2C2E] text-xs sm:text-sm text-[#6C6C70] dark:text-[#AEAEB2] leading-relaxed">
-                  <strong className="text-[#1C1C1E] dark:text-white">
-                    Portfolio Composition:
-                  </strong>{' '}
-                  {insights.allocation[0].pct >= 99.5
-                    ? `Your currently tracked portfolio is 100% concentrated in ${insights.allocation[0].category.toLowerCase()}. Broadening your exposure across uncorrelated asset classes such as commodities, fixed income, or global equities can improve risk-adjusted resilience.`
-                    : `Your primary allocation is ${insights.allocation[0].category} (${insights.allocation[0].pct.toFixed(
-                        1
-                      )}%), complemented by ${insights.allocation
-                        .slice(1)
-                        .map((s) => `${s.category} (${s.pct.toFixed(1)}%)`)
-                        .join(', ')}.`}
-                </div>
-              </>
-            )}
-          </div>
+          {/* Card C: D3 Sector & Asset Class Allocation Pie Chart */}
+          <PortfolioSectorPieChart
+            holdings={enrichedHoldings}
+            displayCurrency={activePortfolio.displayCurrency}
+            formatMoney={formatMoney}
+            themeMode={themeMode}
+            onInspectSymbol={onInspectSymbol}
+            onAddHolding={() => {
+              setTradeMode('BUY');
+              setSelectedSymbol(null);
+              setFormError(null);
+              setShowAddModal(true);
+            }}
+          />
 
           {/* Card D: Concentration Risk */}
           <div className="rounded-3xl liquid-glass-card p-5 sm:p-6 flex flex-col gap-4">
@@ -3024,11 +3304,20 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                 </label>
                 <select
                   value={editingPortfolioCurrency}
-                  onChange={(e) => setEditingPortfolioCurrency(e.target.value as 'IDR' | 'USD')}
+                  onChange={(e) => setEditingPortfolioCurrency(e.target.value as CurrencyCode)}
                   className="w-full px-3 py-2 rounded-xl bg-[#F2F2F7] dark:bg-[#2C2C2E] text-sm font-semibold text-[#1C1C1E] dark:text-white focus:outline-none"
                 >
                   <option value="IDR">Indonesian Rupiah (IDR)</option>
                   <option value="USD">US Dollar (USD)</option>
+                  <option value="EUR">Euro (EUR)</option>
+                  <option value="GBP">British Pound (GBP)</option>
+                  <option value="JPY">Japanese Yen (JPY)</option>
+                  <option value="CHF">Swiss Franc (CHF)</option>
+                  <option value="CAD">Canadian Dollar (CAD)</option>
+                  <option value="AUD">Australian Dollar (AUD)</option>
+                  <option value="NZD">New Zealand Dollar (NZD)</option>
+                  <option value="CNY">Chinese Yuan (CNY)</option>
+                  <option value="SGD">Singapore Dollar (SGD)</option>
                 </select>
               </div>
 
@@ -3092,11 +3381,20 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
               <div className="flex items-center justify-between gap-2">
                 <select
                   value={newPortfolioCurrency}
-                  onChange={(e) => setNewPortfolioCurrency(e.target.value as 'IDR' | 'USD')}
+                  onChange={(e) => setNewPortfolioCurrency(e.target.value as CurrencyCode)}
                   className="px-3 py-2 rounded-xl bg-[#F2F2F7] dark:bg-[#2C2C2E] text-xs font-bold text-[#1C1C1E] dark:text-white"
                 >
                   <option value="IDR">IDR (Rp)</option>
                   <option value="USD">USD ($)</option>
+                  <option value="EUR">EUR (€)</option>
+                  <option value="GBP">GBP (£)</option>
+                  <option value="JPY">JPY (¥)</option>
+                  <option value="CHF">CHF (Fr)</option>
+                  <option value="CAD">CAD (C$)</option>
+                  <option value="AUD">AUD (A$)</option>
+                  <option value="NZD">NZD (NZ$)</option>
+                  <option value="CNY">CNY (¥)</option>
+                  <option value="SGD">SGD (S$)</option>
                 </select>
                 <button
                   type="submit"

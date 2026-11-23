@@ -17,9 +17,15 @@ import {
 } from '../types/market';
 import { formatAssetPrice } from '../utils/formatters';
 import { getSessionProgressRatio } from '../utils/marketSessions';
-import { getAssetSignal, parseFormattedMarketNumber } from '../utils/marketSignals';
+import { getAssetFearGreed, getAssetSignal, parseFormattedMarketNumber } from '../utils/marketSignals';
 import { GoogleFinanceDeltaPill, GoogleFinanceMiniChart } from './GoogleFinanceMiniChart';
-import { AssetCategoryMiniIcon, SignalBadge } from './MarketUiPrimitives';
+import {
+  AssetCategoryMiniIcon,
+  FearGreedInlineBar,
+  FearGreedTrendSparkline,
+  getFearGreedTextTone,
+  SignalBadge,
+} from './MarketUiPrimitives';
 
 interface WatchlistViewProps {
   assets: MarketAsset[];
@@ -127,6 +133,24 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
     () => assets.filter((a) => a.marketSessionOpen).length,
     [assets]
   );
+
+  const avgFearGreed = useMemo(() => {
+    const target = filteredAssets.length > 0 ? filteredAssets : assets;
+    if (target.length === 0) return { score: 50, zone: 'Neutral' as const };
+    const total = target.reduce((sum, item) => sum + getAssetFearGreed(item).score, 0);
+    const avg = Math.round(total / target.length);
+    const zone =
+      avg >= 75
+        ? 'Extreme Greed'
+        : avg >= 55
+          ? 'Greed'
+          : avg <= 24
+            ? 'Extreme Fear'
+            : avg <= 44
+              ? 'Fear'
+              : 'Neutral';
+    return { score: avg, zone };
+  }, [filteredAssets, assets]);
 
   return (
     <div className="flex-1 max-w-6xl w-full mx-auto p-4 sm:p-6 pb-28 flex flex-col gap-5">
@@ -245,7 +269,11 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
           <div>
             <h2 className="text-base font-bold text-[#1C1C1E] dark:text-white">Watchlist</h2>
             <p className="text-xs text-[#4A4D57] dark:text-[#B4B8C4]">
-              {filteredAssets.length} tracked assets · Tap row to open in Markets chart
+              {filteredAssets.length} tracked assets · Avg Fear &amp; Greed{' '}
+              <span className="font-mono font-bold tabular-nums text-[#1C1C1E] dark:text-white">
+                {avgFearGreed.score}
+              </span>{' '}
+              ({avgFearGreed.zone})
             </p>
           </div>
           {activeAsset && (
@@ -293,6 +321,7 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
                       const isGain = asset.changePercent >= 0;
                       const flash = flashMap[asset.id];
                       const signal = getAssetSignal(asset);
+                      const fearGreed = getAssetFearGreed(asset);
 
                       return (
                         <motion.div
@@ -346,11 +375,28 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
                                     </span>
                                   )}
                                 </div>
-                                <p className="text-[11px] text-[#6C6C70] dark:text-[#8E8E93] truncate">
-                                  {asset.shortName} · {asset.exchange}
-                                </p>
+                                <div className="text-[11px] text-[#6C6C70] dark:text-[#8E8E93] truncate flex items-center gap-1 flex-wrap">
+                                  <span>{asset.shortName} · {asset.exchange}</span>
+                                  <span className="md:hidden inline-flex items-center gap-1">
+                                    <span>· F&amp;G</span>
+                                    <span className={`font-mono font-bold tabular-nums ${getFearGreedTextTone(fearGreed.zone)}`}>
+                                      {fearGreed.score}
+                                    </span>
+                                    <FearGreedTrendSparkline
+                                      history7d={fearGreed.history7d}
+                                      score={fearGreed.score}
+                                      zone={fearGreed.zone}
+                                      compact
+                                      showLabel={false}
+                                    />
+                                  </span>
+                                </div>
                               </div>
                             </div>
+                          </div>
+
+                          <div className="hidden md:flex items-center justify-end shrink-0">
+                            <FearGreedInlineBar fearGreed={fearGreed} />
                           </div>
 
                           <div className="hidden lg:block text-right text-[11px] text-[#6C6C70] dark:text-[#8E8E93] font-mono tabular-nums shrink-0">

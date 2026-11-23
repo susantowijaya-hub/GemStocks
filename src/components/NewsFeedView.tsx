@@ -72,11 +72,7 @@ export const NewsFeedView: React.FC<NewsFeedViewProps> = ({
   }, [stories, activeTopic, searchQuery]);
 
   const topBreaking = useMemo(
-    () =>
-      filteredStories
-        .filter((s) => s.isBreaking)
-        .concat(filteredStories.filter((s) => !s.isBreaking))
-        .slice(0, 3),
+    () => filteredStories.filter((s) => Boolean(s.isBreaking)).slice(0, 6),
     [filteredStories]
   );
 
@@ -93,14 +89,14 @@ export const NewsFeedView: React.FC<NewsFeedViewProps> = ({
           <div className="flex items-center gap-2">
             <Newspaper className="w-4 h-4 text-[#D7261C] dark:text-[#FF453A]" />
             <span className="text-xs font-bold text-[#D7261C] dark:text-[#FF453A] uppercase tracking-wider">
-              Live Wire · Market Breaking News
+              Live Wire · Market Impact Filter
             </span>
           </div>
           <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight text-[#1C1C1E] dark:text-white mt-1">
-            Breaking News
+            Breaking &amp; Recent News
           </h1>
           <p className="text-xs sm:text-sm text-[#6C6C70] dark:text-[#8E8E93] mt-0.5">
-            Real-time dispatches from Financial Times, MarketWatch, CNBC, BBC Business, CoinDesk, CNBC Indonesia, and Yahoo Finance.
+            Impact-scored separation between market-moving breaking shocks and recent market dispatches.
           </p>
         </div>
 
@@ -125,21 +121,21 @@ export const NewsFeedView: React.FC<NewsFeedViewProps> = ({
         </div>
       </section>
 
-      {/* Top Breaking Wire (Market Section card style) */}
-      {topBreaking.length > 0 && (
-        <section className="flex flex-col gap-3">
-          <div className="flex items-center justify-between pb-2 border-b border-[#E5E5EA] dark:border-[#2C2C2E]">
-            <div className="flex items-center gap-2">
-              <Newspaper className="w-4 h-4 text-[#D7261C] dark:text-[#FF453A]" />
-              <h2 className="text-base font-bold text-[#1C1C1E] dark:text-white">
-                Top Breaking Wire
-              </h2>
-            </div>
-            <span className="text-xs font-medium text-[#6C6C70] dark:text-[#8E8E93]">
-              Latest {topBreaking.length} Headlines
-            </span>
+      {/* Verified High-Impact Breaking Wire */}
+      <section data-testid="breaking-wire-section" className="flex flex-col gap-3">
+        <div className="flex items-center justify-between pb-2 border-b border-[#E5E5EA] dark:border-[#2C2C2E]">
+          <div className="flex items-center gap-2">
+            <Newspaper className="w-4 h-4 text-[#D7261C] dark:text-[#FF453A]" />
+            <h2 className="text-base font-bold text-[#1C1C1E] dark:text-white">
+              High-Impact Breaking Alerts
+            </h2>
           </div>
+          <span className="text-xs font-medium text-[#6C6C70] dark:text-[#8E8E93] tabular-nums">
+            {topBreaking.length} Verified {topBreaking.length === 1 ? 'Alert' : 'Alerts'}
+          </span>
+        </div>
 
+        {topBreaking.length > 0 ? (
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
             {topBreaking.map((story) => (
               <article
@@ -150,11 +146,9 @@ export const NewsFeedView: React.FC<NewsFeedViewProps> = ({
                 <div>
                   <div className="flex items-center justify-between mb-1.5 text-xs">
                     <div className="flex items-center gap-2">
-                      {story.isBreaking && (
-                        <span className="px-1.5 py-0.5 rounded text-[10px] font-black uppercase bg-[#FF453A] text-white">
-                          BREAKING
-                        </span>
-                      )}
+                      <span className="px-1.5 py-0.5 rounded text-[10px] font-black uppercase bg-[#FF453A] text-white">
+                        BREAKING
+                      </span>
                       <span className="font-bold text-[#1C1C1E] dark:text-white">
                         {story.publisher}
                       </span>
@@ -173,6 +167,9 @@ export const NewsFeedView: React.FC<NewsFeedViewProps> = ({
 
                 <div className="flex items-center justify-between pt-2 border-t border-[#E5E5EA] dark:border-[#2C2C2E]/60 text-[11px]">
                   <span className="text-[#6C6C70] dark:text-[#8E8E93] truncate">
+                    {typeof story.impactScore === 'number'
+                      ? `Impact ${story.impactScore}/100 · `
+                      : ''}
                     {story.tags.slice(0, 2).join(' · ')}
                   </span>
                   <span className="font-semibold text-[#0071E3] dark:text-[#0A84FF] inline-flex items-center gap-1 shrink-0">
@@ -183,8 +180,14 @@ export const NewsFeedView: React.FC<NewsFeedViewProps> = ({
               </article>
             ))}
           </div>
-        </section>
-      )}
+        ) : (
+          <div className="px-4 py-3.5 rounded-2xl liquid-glass-inset text-xs text-[#6C6C70] dark:text-[#9EB5C8] flex items-center justify-between gap-2">
+            <span>
+              No verified high-impact market shocks for this filter within the past 4 hours. Recent market dispatches are separated below.
+            </span>
+          </div>
+        )}
+      </section>
 
       {/* 24-Hour Daily Market Summary inside News Tab */}
       <DailyMarketSummary
@@ -205,15 +208,15 @@ export const NewsFeedView: React.FC<NewsFeedViewProps> = ({
         onNavigate={onNavigate}
       />
 
-      {/* Full News Dispatches Grid (maintaining Market section card styling) */}
+      {/* Recent Market News Grid */}
       {remainingStories.length > 0 ? (
-        <section className="flex flex-col gap-3">
+        <section data-testid="recent-news-section" className="flex flex-col gap-3">
           <div className="flex items-center justify-between pb-2 border-b border-[#E5E5EA] dark:border-[#2C2C2E]">
             <h2 className="text-base font-bold text-[#1C1C1E] dark:text-white">
-              All Market Dispatches
+              Recent Market News
             </h2>
-            <span className="text-xs text-[#6C6C70] dark:text-[#8E8E93] font-medium">
-              {filteredStories.length} Stories
+            <span className="text-xs text-[#6C6C70] dark:text-[#8E8E93] font-medium tabular-nums">
+              {remainingStories.length} Recent Stories
             </span>
           </div>
 

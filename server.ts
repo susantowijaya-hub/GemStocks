@@ -9,20 +9,26 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  fetchCorrelationMatrix,
   fetchDailyMarketSummary,
   fetchLiveCalendar,
   fetchLiveChart,
   fetchLiveFxRates,
   fetchLiveNews,
   fetchLiveQuotes,
+  fetchMarketDepth,
   fetchMarketHeatmap,
   fetchMarketIntelligence,
   fetchPortfolioMoversBrief,
   fetchPortfolioQuotes,
   fetchPortfolioSymbolSeries,
+  fetchScheduledShareSnapshot,
   fetchSymbolDetail,
   fetchTopStockMovers,
+  getServerFeedDiagnostics,
   searchMarketSymbols,
+  warmServerCaches,
+  type ShareScheduleSlot,
 } from './server/liveFeeds.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -76,7 +82,7 @@ async function startServer() {
     });
   });
 
-  // Live Market Quotes (all 18 tracked global tickers)
+  // Live Market Quotes (all 18 tracked global tickers + provider diagnostics)
   app.get('/api/market/quotes', async (_req: Request, res: Response) => {
     try {
       const payload = await fetchLiveQuotes();
@@ -85,6 +91,11 @@ async function startServer() {
       console.error('Failed to fetch live quotes:', err);
       res.status(502).json({ error: 'Unable to fetch live market quotes.' });
     }
+  });
+
+  // Real-Time Multi-Provider Feed Latency, Failover & Cache Fallback Diagnostics
+  app.get('/api/market/diagnostics', (_req: Request, res: Response) => {
+    res.json(getServerFeedDiagnostics());
   });
 
   // 24-Hour Daily Market Summary JSON (Top Performers, Decliners & Economic Events)
@@ -120,6 +131,21 @@ async function startServer() {
     }
   });
 
+  // Timestamp-Anchored Static Share Snapshots (05:30 WIB Morning & 16:30 WIB Afternoon)
+  app.get('/api/market/share-snapshot', async (req: Request, res: Response) => {
+    try {
+      const rawSlot = typeof req.query.slot === 'string' ? req.query.slot : 'morning_0530';
+      const slot: ShareScheduleSlot =
+        rawSlot === 'afternoon_1630' ? 'afternoon_1630' : 'morning_0530';
+      const force = req.query.force === '1' || req.query.force === 'true';
+      const snapshot = await fetchScheduledShareSnapshot(slot, force);
+      res.json(snapshot);
+    } catch (err) {
+      console.error('Failed to fetch scheduled share snapshot:', err);
+      res.status(502).json({ error: 'Unable to fetch scheduled market share snapshot.' });
+    }
+  });
+
   // Live Historical Chart Series per ticker & timeframe
   app.get('/api/market/chart', async (req: Request, res: Response) => {
     try {
@@ -136,6 +162,37 @@ async function startServer() {
     } catch (err) {
       console.error('Failed to fetch live chart:', err);
       return res.status(502).json({ error: 'Unable to fetch chart series.' });
+    }
+  });
+
+  // Live Market Depth / Order Book per instrument
+  app.get('/api/market/depth', async (req: Request, res: Response) => {
+    try {
+      const id = typeof req.query.id === 'string' ? req.query.id.trim() : '';
+      if (!id) {
+        return res.status(400).json({ error: 'Missing asset id' });
+      }
+      const depth = await fetchMarketDepth(id);
+      if (!depth) {
+        return res.status(404).json({ error: 'Market depth unavailable for asset' });
+      }
+      return res.json(depth);
+    } catch (err) {
+      console.error('Failed to fetch market depth:', err);
+      return res.status(502).json({ error: 'Unable to fetch market depth.' });
+    }
+  });
+
+  // Watchlist Cross-Asset Correlation Matrix
+  app.get('/api/market/correlations', async (req: Request, res: Response) => {
+    try {
+      const rawTf = typeof req.query.timeframe === 'string' ? req.query.timeframe.toUpperCase() : '1M';
+      const timeframe: '1M' | '3M' = rawTf === '3M' ? '3M' : '1M';
+      const payload = await fetchCorrelationMatrix(timeframe);
+      return res.json(payload);
+    } catch (err) {
+      console.error('Failed to fetch correlation matrix:', err);
+      return res.status(502).json({ error: 'Unable to fetch correlation matrix.' });
     }
   });
 
@@ -387,7 +444,7 @@ async function startServer() {
   const distDir = path.resolve(__dirname, 'dist');
 
   if (isProd && fs.existsSync(distDir)) {
-    app.use(express.static(distDir));
+    app.use(express.static(distDir, { maxAge: '1h' }));
     app.get('*', (req: Request, res: Response) => {
       if (req.path.startsWith('/api/')) {
         return res.status(404).json({ error: 'API endpoint not found' });
@@ -449,6 +506,7 @@ export class ErrorOverlay {}
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Stocks Global Market Terminal running at http://0.0.0.0:${PORT}`);
+    warmServerCaches();
   });
 }
 

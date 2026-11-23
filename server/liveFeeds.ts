@@ -1,4 +1,4 @@
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 
 export interface LiveQuotePatch {
   id: string;
@@ -32,6 +32,18 @@ export interface LiveQuotePatch {
   marketSessionOpen: boolean;
   sessionStateLabel: string;
   sessionProgressRatio: number;
+  fearGreed7d?: number[];
+  move5mPct?: number;
+  vol5mRangePct?: number;
+  move5mSource?: 'server-5m' | 'intraday-1m' | 'closed';
+}
+
+export interface CandlePoint {
+  t: number;
+  o: number;
+  h: number;
+  l: number;
+  c: number;
 }
 
 export interface LiveChartResponse {
@@ -39,6 +51,7 @@ export interface LiveChartResponse {
   timeframe: string;
   points: number[];
   timestamps: number[];
+  candles?: CandlePoint[];
   prevClose: number;
 }
 
@@ -48,6 +61,8 @@ export interface LiveNewsItem {
   timeAgo: string;
   publishedAt: string;
   isBreaking?: boolean;
+  newsTier?: 'breaking' | 'recent';
+  impactScore?: number;
   impact?: string;
   topic: 'rates' | 'idx' | 'commodities' | 'crypto';
   tags: string[];
@@ -164,6 +179,13 @@ const YAHOO_SYMBOL_CONFIG: {
   { id: 'BRENT', name: 'Brent Crude Oil', yahooSymbol: 'BZ=F', decimals: 2, currencyPrefix: '$' },
   { id: 'USDIDR', name: 'USD/IDR', yahooSymbol: 'IDR=X', decimals: 2 },
   { id: 'EURUSD', name: 'EUR/USD', yahooSymbol: 'EURUSD=X', decimals: 4 },
+  { id: 'GBPUSD', name: 'GBP/USD', yahooSymbol: 'GBPUSD=X', decimals: 4 },
+  { id: 'USDJPY', name: 'USD/JPY', yahooSymbol: 'JPY=X', decimals: 2 },
+  { id: 'AUDUSD', name: 'AUD/USD', yahooSymbol: 'AUDUSD=X', decimals: 4 },
+  { id: 'USDCHF', name: 'USD/CHF', yahooSymbol: 'CHF=X', decimals: 4 },
+  { id: 'USDCAD', name: 'USD/CAD', yahooSymbol: 'CAD=X', decimals: 4 },
+  { id: 'NZDUSD', name: 'NZD/USD', yahooSymbol: 'NZDUSD=X', decimals: 4 },
+  { id: 'USDCNY', name: 'USD/CNY', yahooSymbol: 'CNY=X', decimals: 4 },
   { id: 'DXY', name: 'US Dollar Index', yahooSymbol: 'DX-Y.NYB', decimals: 3 },
   { id: 'US10Y', name: 'US 10-Year Treasury Yield', yahooSymbol: '^TNX', decimals: 3, unitSuffix: '%' },
   { id: 'US30Y', name: 'US 30-Year Treasury Yield', yahooSymbol: '^TYX', decimals: 3, unitSuffix: '%' },
@@ -191,6 +213,225 @@ const newsCache: { entry: CacheEntry<{ stories: LiveNewsItem[]; updatedAt: strin
 const calendarCache: { entry: CacheEntry<LiveCalendarResponse> | null } = { entry: null };
 const stocksMoversCache: { entry: CacheEntry<StocksMoversResponse> | null } = { entry: null };
 const heatmapCache: { entry: CacheEntry<MarketHeatmapResponse> | null } = { entry: null };
+
+export type ProviderHealthStatus = 'live' | 'failover' | 'cached' | 'offline';
+export type ProviderId = 'coinbase' | 'yahoo_macro' | 'idx_proxy' | 'fx_rates' | 'news_cal';
+
+export interface ProviderFeedDiagnostic {
+  id: ProviderId;
+  label: string;
+  primarySource: string;
+  activeSource: string;
+  status: ProviderHealthStatus;
+  latencyMs: number | null;
+  lastSuccessAt: number | null;
+  isCachedFallback: boolean;
+  fallbackReason?: string;
+}
+
+export interface ServerFeedDiagnosticsResponse {
+  overallStatus: ProviderHealthStatus;
+  hasCachedFallback: boolean;
+  hasFailover: boolean;
+  providers: ProviderFeedDiagnostic[];
+  serverTimestamp: number;
+}
+
+const providerDiagnosticsMap = new Map<ProviderId, ProviderFeedDiagnostic>([
+  [
+    'coinbase',
+    {
+      id: 'coinbase',
+      label: 'Coinbase L2 & Spot',
+      primarySource: 'Coinbase Exchange L2',
+      activeSource: 'Coinbase Exchange L2',
+      status: 'live',
+      latencyMs: null,
+      lastSuccessAt: null,
+      isCachedFallback: false,
+    },
+  ],
+  [
+    'yahoo_macro',
+    {
+      id: 'yahoo_macro',
+      label: 'Global Indices & Macro',
+      primarySource: 'Yahoo Finance v8 + TV',
+      activeSource: 'Yahoo Finance v8 + TV',
+      status: 'live',
+      latencyMs: null,
+      lastSuccessAt: null,
+      isCachedFallback: false,
+    },
+  ],
+  [
+    'idx_proxy',
+    {
+      id: 'idx_proxy',
+      label: 'IDX Equities Proxy',
+      primarySource: 'IDX TV Scanner + Flow',
+      activeSource: 'IDX TV Scanner + Flow',
+      status: 'live',
+      latencyMs: null,
+      lastSuccessAt: null,
+      isCachedFallback: false,
+    },
+  ],
+  [
+    'fx_rates',
+    {
+      id: 'fx_rates',
+      label: 'FX Matrix & SBN',
+      primarySource: 'Open ER-API + Live FX',
+      activeSource: 'Open ER-API + Live FX',
+      status: 'live',
+      latencyMs: null,
+      lastSuccessAt: null,
+      isCachedFallback: false,
+    },
+  ],
+  [
+    'news_cal',
+    {
+      id: 'news_cal',
+      label: 'News & Macro Calendar',
+      primarySource: 'RSS + TradingView Cal',
+      activeSource: 'RSS + TradingView Cal',
+      status: 'live',
+      latencyMs: null,
+      lastSuccessAt: null,
+      isCachedFallback: false,
+    },
+  ],
+]);
+
+function updateProviderMetric(
+  id: ProviderId,
+  patch: Partial<Omit<ProviderFeedDiagnostic, 'id' | 'label' | 'primarySource'>>
+): void {
+  const existing = providerDiagnosticsMap.get(id);
+  if (!existing) return;
+  providerDiagnosticsMap.set(id, {
+    ...existing,
+    ...patch,
+  });
+}
+
+export function getServerFeedDiagnostics(): ServerFeedDiagnosticsResponse {
+  const providers = Array.from(providerDiagnosticsMap.values());
+  const hasCachedFallback = providers.some((p) => p.isCachedFallback || p.status === 'cached');
+  const hasFailover = providers.some((p) => p.status === 'failover');
+  const hasOffline = providers.some((p) => p.status === 'offline');
+  const overallStatus: ProviderHealthStatus = hasOffline
+    ? 'offline'
+    : hasCachedFallback
+      ? 'cached'
+      : hasFailover
+        ? 'failover'
+        : 'live';
+
+  return {
+    overallStatus,
+    hasCachedFallback,
+    hasFailover,
+    providers,
+    serverTimestamp: Date.now(),
+  };
+}
+
+const serverTickHistory = new Map<string, Array<{ t: number; price: number }>>();
+const SERVER_5M_WINDOW_MS = 5 * 60 * 1000;
+const SERVER_10M_PRUNE_MS = 10 * 60 * 1000;
+
+function recordAndComputeServer5m(
+  assetId: string,
+  livePrice: number,
+  sameSourcePairs: Array<{ t: number; v: number }>,
+  isSessionOpen: boolean,
+  now: number
+): { move5mPct: number; vol5mRangePct: number; move5mSource: 'server-5m' | 'intraday-1m' | 'closed' } {
+  if (!isSessionOpen || !Number.isFinite(livePrice) || livePrice <= 0) {
+    return { move5mPct: 0, vol5mRangePct: 0, move5mSource: 'closed' };
+  }
+
+  const buf = serverTickHistory.get(assetId) ?? [];
+  const pruned = buf.filter((s) => now - s.t <= SERVER_10M_PRUNE_MS);
+  const lastSample = pruned[pruned.length - 1];
+  if (!lastSample || now - lastSample.t >= 2000 || Math.abs(livePrice - lastSample.price) > 1e-8) {
+    pruned.push({ t: now, price: livePrice });
+  }
+  serverTickHistory.set(assetId, pruned);
+
+  // 1. Once server tick buffer covers >= 4 minutes, compute exact time-interpolated 5m change + 5m realized range
+  const fiveMinCutoff = now - SERVER_5M_WINDOW_MS;
+  const recent5m = pruned.filter((s) => s.t >= fiveMinCutoff);
+  if (pruned.length >= 4 && now - pruned[0].t >= 240_000) {
+    let beforeAnchor = pruned[0];
+    let afterAnchor = recent5m[0] ?? pruned[pruned.length - 1];
+    for (let i = pruned.length - 1; i >= 0; i--) {
+      if (pruned[i].t <= fiveMinCutoff) {
+        beforeAnchor = pruned[i];
+        afterAnchor = pruned[i + 1] ?? pruned[i];
+        break;
+      }
+    }
+    let anchorPrice = beforeAnchor.price;
+    if (afterAnchor.t > beforeAnchor.t && fiveMinCutoff > beforeAnchor.t && fiveMinCutoff < afterAnchor.t) {
+      const ratio = (fiveMinCutoff - beforeAnchor.t) / (afterAnchor.t - beforeAnchor.t);
+      anchorPrice = beforeAnchor.price + (afterAnchor.price - beforeAnchor.price) * ratio;
+    }
+    if (anchorPrice > 0) {
+      const move5mPct = ((livePrice - anchorPrice) / anchorPrice) * 100;
+      const vals5m = recent5m.length >= 2 ? recent5m.map((s) => s.price) : [anchorPrice, livePrice];
+      const hi = Math.max(...vals5m);
+      const lo = Math.min(...vals5m);
+      const mid = (hi + lo) / 2 || livePrice;
+      const vol5mRangePct = ((hi - lo) / mid) * 100;
+      return {
+        move5mPct: Number(move5mPct.toFixed(3)),
+        vol5mRangePct: Number(vol5mRangePct.toFixed(3)),
+        move5mSource: 'server-5m',
+      };
+    }
+  }
+
+  // 2. Fallback: exact same-source intraday bars (1m/5m) so there is zero cross-provider basis jump
+  if (sameSourcePairs.length >= 2) {
+    const lastBar = sameSourcePairs[sameSourcePairs.length - 1];
+    // Only trust intraday bars if latest bar is reasonably fresh (<= 20 min old)
+    if (now - lastBar.t <= 20 * 60_000 && lastBar.v > 0) {
+      const targetTs = lastBar.t - SERVER_5M_WINDOW_MS;
+      let closestIdx = sameSourcePairs.length - 2;
+      let bestDiff = Infinity;
+      for (let i = sameSourcePairs.length - 2; i >= 0; i--) {
+        const diff = Math.abs(sameSourcePairs[i].t - targetTs);
+        if (diff < bestDiff) {
+          bestDiff = diff;
+          closestIdx = i;
+        }
+        if (sameSourcePairs[i].t < targetTs - 12 * 60_000) break;
+      }
+      const anchorBar = sameSourcePairs[closestIdx];
+      const gapMinutes = Math.max(1, (lastBar.t - anchorBar.t) / 60_000);
+      if (anchorBar.v > 0 && gapMinutes <= 18) {
+        const rawPct = ((lastBar.v - anchorBar.v) / anchorBar.v) * 100;
+        const move5mPct = gapMinutes > 6.5 ? rawPct * (5 / gapMinutes) : rawPct;
+        const windowSlice = sameSourcePairs.slice(closestIdx).map((p) => p.v);
+        const hi = Math.max(...windowSlice);
+        const lo = Math.min(...windowSlice);
+        const mid = (hi + lo) / 2 || lastBar.v;
+        const vol5mRangePct = ((hi - lo) / mid) * 100;
+        return {
+          move5mPct: Number(move5mPct.toFixed(3)),
+          vol5mRangePct: Number(vol5mRangePct.toFixed(3)),
+          move5mSource: 'intraday-1m',
+        };
+      }
+    }
+  }
+
+  return { move5mPct: 0, vol5mRangePct: 0, move5mSource: 'intraday-1m' };
+}
 
 const inFlightSharedMap = new Map<string, Promise<unknown>>();
 
@@ -394,6 +635,13 @@ export function getServerSessionInfo(keyOrSymbol: string, now = new Date()): Ser
   if (
     upper === 'USDIDR' ||
     upper === 'EURUSD' ||
+    upper === 'GBPUSD' ||
+    upper === 'USDJPY' ||
+    upper === 'AUDUSD' ||
+    upper === 'USDCHF' ||
+    upper === 'USDCAD' ||
+    upper === 'NZDUSD' ||
+    upper === 'USDCNY' ||
     upper === 'DXY' ||
     upper === 'DX-Y.NYB' ||
     upper === 'XAUUSD' ||
@@ -518,16 +766,24 @@ async function fetchId10yRaw(): Promise<Id10yRawData | null> {
   const cnbcChgPct = cnbcQuote ? parseNum(cnbcQuote.change_pct) : null;
   const cnbcPrevClose = cnbcQuote ? parseNum(cnbcQuote.previous_day_closing) : null;
 
-  const changeValue = Number((tvChangeAbs ?? cnbcChg ?? 0).toFixed(3));
-  const prevClose = Number(
-    (cnbcPrevClose ?? (price - changeValue)).toFixed(3)
+  const rawPct = tvChangePct ?? cnbcChgPct ?? 0;
+  let rawAbs = tvChangeAbs ?? cnbcChg ?? 0;
+  if (Math.abs(rawAbs) < 1e-6 && Math.abs(rawPct) >= 0.01) {
+    rawAbs = price - price / (1 + rawPct / 100);
+  }
+
+  let prevClose = Number(
+    (tvClose !== null
+      ? price - rawAbs
+      : cnbcPrevClose ?? (price - rawAbs)
+    ).toFixed(3)
   );
+  if (Math.abs(price - prevClose) < 1e-6 && Math.abs(rawPct) >= 0.01) {
+    prevClose = Number((price / (1 + rawPct / 100)).toFixed(3));
+  }
+  const changeValue = Number((price - prevClose).toFixed(3));
   const changePercent = Number(
-    (
-      tvChangePct ??
-      cnbcChgPct ??
-      (prevClose > 0 ? ((price - prevClose) / prevClose) * 100 : 0)
-    ).toFixed(2)
+    (prevClose > 0 ? ((price - prevClose) / prevClose) * 100 : rawPct).toFixed(2)
   );
 
   const openNum = (tvRow ? parseNum(tvRow[6]) : null) ?? (cnbcQuote ? parseNum(cnbcQuote.open) : null) ?? prevClose;
@@ -637,28 +893,319 @@ interface RawQuoteMeta {
   timestamps: number[];
   updatedAtEpoch: number;
   exchangeName: string;
+  fearGreed7d: number[];
+  move5mPct: number;
+  vol5mRangePct: number;
+  move5mSource: 'server-5m' | 'intraday-1m' | 'closed';
 }
 
-async function fetchCoinbaseSpotTicker(
+interface CoinbaseSpotStats {
+  price: number;
+  open24h: number;
+  high24h: number;
+  low24h: number;
+  volumeUsd: number;
+}
+
+async function fetchCoinbaseSpotStats(
   pair: 'BTC-USD' | 'ETH-USD'
-): Promise<{ price: number; volumeUsd: number } | null> {
+): Promise<CoinbaseSpotStats | null> {
+  const t0 = Date.now();
   try {
-    const res = await fetch(`https://api.exchange.coinbase.com/products/${pair}/ticker`, {
+    const res = await fetch(`https://api.exchange.coinbase.com/products/${pair}/stats`, {
       headers: UA_HEADERS,
-      signal: AbortSignal.timeout(2500),
+      signal: AbortSignal.timeout(5500),
     });
-    if (!res.ok) return null;
-    const json = (await res.json()) as { price?: string; volume?: string };
-    const price = Number(json.price);
-    const baseVol = Number(json.volume ?? 0);
-    if (!Number.isFinite(price) || price <= 0) return null;
-    return {
-      price,
-      volumeUsd: Number.isFinite(baseVol) && baseVol > 0 ? baseVol * price : 0,
-    };
+    const latencyMs = Date.now() - t0;
+    if (res.ok) {
+      const json = (await res.json()) as {
+        open?: string;
+        high?: string;
+        low?: string;
+        last?: string;
+        volume?: string;
+      };
+      const price = Number(json.last);
+      const open24h = Number(json.open);
+      const high24h = Number(json.high);
+      const low24h = Number(json.low);
+      const baseVol = Number(json.volume ?? 0);
+      if (Number.isFinite(price) && price > 0) {
+        updateProviderMetric('coinbase', {
+          status: 'live',
+          activeSource: 'Coinbase Exchange L2 / Spot',
+          latencyMs,
+          lastSuccessAt: Date.now(),
+          isCachedFallback: false,
+          fallbackReason: undefined,
+        });
+        return {
+          price,
+          open24h: Number.isFinite(open24h) && open24h > 0 ? open24h : price,
+          high24h: Number.isFinite(high24h) && high24h > 0 ? high24h : price,
+          low24h: Number.isFinite(low24h) && low24h > 0 ? low24h : price,
+          volumeUsd: Number.isFinite(baseVol) && baseVol > 0 ? baseVol * price : 0,
+        };
+      }
+    }
+
+    // Secondary Coinbase Spot REST endpoint before failing over to Yahoo
+    const v2Res = await fetch(`https://api.coinbase.com/v2/prices/${pair}/spot`, {
+      headers: UA_HEADERS,
+      signal: AbortSignal.timeout(4500),
+    }).catch(() => null);
+    if (v2Res?.ok) {
+      const v2Json = (await v2Res.json()) as { data?: { amount?: string } };
+      const spotPx = Number(v2Json?.data?.amount);
+      if (Number.isFinite(spotPx) && spotPx > 0) {
+        updateProviderMetric('coinbase', {
+          status: 'live',
+          activeSource: 'Coinbase Spot v2 Live',
+          latencyMs: Date.now() - t0,
+          lastSuccessAt: Date.now(),
+          isCachedFallback: false,
+          fallbackReason: undefined,
+        });
+        return {
+          price: spotPx,
+          open24h: spotPx,
+          high24h: spotPx,
+          low24h: spotPx,
+          volumeUsd: 0,
+        };
+      }
+    }
+
+    updateProviderMetric('coinbase', {
+      status: 'failover',
+      activeSource: 'Yahoo Crypto Fallback',
+      latencyMs: Date.now() - t0,
+      isCachedFallback: false,
+      fallbackReason: `Coinbase REST HTTP ${res.status}`,
+    });
+    return null;
   } catch {
+    const v2Res = await fetch(`https://api.coinbase.com/v2/prices/${pair}/spot`, {
+      headers: UA_HEADERS,
+      signal: AbortSignal.timeout(4500),
+    }).catch(() => null);
+    if (v2Res?.ok) {
+      const v2Json = (await v2Res.json()) as { data?: { amount?: string } };
+      const spotPx = Number(v2Json?.data?.amount);
+      if (Number.isFinite(spotPx) && spotPx > 0) {
+        updateProviderMetric('coinbase', {
+          status: 'live',
+          activeSource: 'Coinbase Spot v2 Live',
+          latencyMs: Date.now() - t0,
+          lastSuccessAt: Date.now(),
+          isCachedFallback: false,
+          fallbackReason: undefined,
+        });
+        return {
+          price: spotPx,
+          open24h: spotPx,
+          high24h: spotPx,
+          low24h: spotPx,
+          volumeUsd: 0,
+        };
+      }
+    }
+    updateProviderMetric('coinbase', {
+      status: 'failover',
+      activeSource: 'Yahoo Crypto Fallback',
+      latencyMs: Date.now() - t0,
+      isCachedFallback: false,
+      fallbackReason: 'Coinbase REST timeout/unreachable',
+    });
     return null;
   }
+}
+
+interface TvGlobalQuote {
+  price: number;
+  changePct: number;
+  changeAbs: number;
+  prevClose: number;
+  open: number;
+  high: number;
+  low: number;
+  preferPrimary: boolean;
+}
+
+const TV_GLOBAL_SYMBOL_MAP: Record<string, { tv: string; preferPrimary: boolean }> = {
+  SPX: { tv: 'SP:SPX', preferPrimary: false },
+  IXIC: { tv: 'NASDAQ:IXIC', preferPrimary: false },
+  DJI: { tv: 'DJ:DJI', preferPrimary: false },
+  IHSG: { tv: 'IDX:COMPOSITE', preferPrimary: false },
+  EIDO: { tv: 'AMEX:EIDO', preferPrimary: false },
+  HSI: { tv: 'HSI:HSI', preferPrimary: false },
+  KOSPI: { tv: 'KRX:KOSPI', preferPrimary: false },
+  SSEC: { tv: 'SSE:000001', preferPrimary: false },
+  NIFTY: { tv: 'NSE:NIFTY', preferPrimary: false },
+  XAUUSD: { tv: 'OANDA:XAUUSD', preferPrimary: true },
+  WTI: { tv: 'NYMEX:CL1!', preferPrimary: true },
+  BRENT: { tv: 'ICEEUR:BRN1!', preferPrimary: true },
+  USDIDR: { tv: 'FX_IDC:USDIDR', preferPrimary: true },
+  EURUSD: { tv: 'FX:EURUSD', preferPrimary: true },
+  GBPUSD: { tv: 'FX:GBPUSD', preferPrimary: true },
+  USDJPY: { tv: 'FX:USDJPY', preferPrimary: true },
+  AUDUSD: { tv: 'FX:AUDUSD', preferPrimary: true },
+  USDCHF: { tv: 'FX:USDCHF', preferPrimary: true },
+  USDCAD: { tv: 'FX:USDCAD', preferPrimary: true },
+  NZDUSD: { tv: 'FX:NZDUSD', preferPrimary: true },
+  USDCNY: { tv: 'FX_IDC:USDCNY', preferPrimary: true },
+  DXY: { tv: 'TVC:DXY', preferPrimary: true },
+  US10Y: { tv: 'TVC:US10Y', preferPrimary: true },
+  US30Y: { tv: 'TVC:US30Y', preferPrimary: true },
+};
+
+const tvGlobalCache: { entry: CacheEntry<Map<string, TvGlobalQuote>> | null } = { entry: null };
+
+async function fetchTradingViewGlobalQuotes(): Promise<Map<string, TvGlobalQuote>> {
+  const now = Date.now();
+  if (tvGlobalCache.entry && tvGlobalCache.entry.expiresAt > now) {
+    return tvGlobalCache.entry.data;
+  }
+  const out = new Map<string, TvGlobalQuote>();
+  try {
+    const tvToId = new Map<string, { id: string; preferPrimary: boolean }>();
+    const tickers: string[] = [];
+    for (const [id, spec] of Object.entries(TV_GLOBAL_SYMBOL_MAP)) {
+      tvToId.set(spec.tv, { id, preferPrimary: spec.preferPrimary });
+      tickers.push(spec.tv);
+    }
+
+    const res = await fetch('https://scanner.tradingview.com/global/scan', {
+      method: 'POST',
+      headers: {
+        ...UA_HEADERS,
+        'Content-Type': 'application/json',
+        Origin: 'https://www.tradingview.com',
+        Referer: 'https://www.tradingview.com/',
+      },
+      body: JSON.stringify({
+        symbols: { tickers },
+        columns: ['name', 'close', 'change', 'change_abs', 'open', 'high', 'low'],
+      }),
+      signal: AbortSignal.timeout(4500),
+    });
+    if (!res.ok) return tvGlobalCache.entry?.data ?? out;
+    const json = (await res.json()) as {
+      data?: Array<{ s?: string; d?: Array<number | string | null> }>;
+    };
+    for (const row of json.data ?? []) {
+      const mapping = row.s ? tvToId.get(row.s) : undefined;
+      const d = row.d;
+      if (!mapping || !d || d.length < 4) continue;
+      const price = Number(d[1]);
+      const changePct = Number(d[2]);
+      const changeAbs = Number(d[3]);
+      const open = Number(d[4] ?? price);
+      const high = Number(d[5] ?? price);
+      const low = Number(d[6] ?? price);
+      if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(changePct)) continue;
+      const safeAbs = Number.isFinite(changeAbs) ? changeAbs : price - price / (1 + changePct / 100);
+      const prevClose =
+        Math.abs(safeAbs) > 0 && Math.abs(price - safeAbs) > 0
+          ? price - safeAbs
+          : price / (1 + changePct / 100);
+      out.set(mapping.id, {
+        price,
+        changePct,
+        changeAbs: safeAbs,
+        prevClose,
+        open: Number.isFinite(open) && open > 0 ? open : prevClose,
+        high: Number.isFinite(high) && high > 0 ? high : Math.max(price, prevClose),
+        low: Number.isFinite(low) && low > 0 ? low : Math.min(price, prevClose),
+        preferPrimary: mapping.preferPrimary,
+      });
+    }
+    if (out.size > 0) {
+      tvGlobalCache.entry = { data: out, expiresAt: now + 2500 };
+    }
+  } catch {
+    return tvGlobalCache.entry?.data ?? out;
+  }
+  return out;
+}
+
+const dailyHistoryCache = new Map<string, CacheEntry<number[]>>();
+
+async function fetchRecentDailyCloses(yahooSymbol: string): Promise<number[]> {
+  const now = Date.now();
+  const cached = dailyHistoryCache.get(yahooSymbol);
+  if (cached && cached.expiresAt > now) {
+    return cached.data;
+  }
+  try {
+    const res = await fetch(
+      `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
+        yahooSymbol
+      )}?range=1mo&interval=1d`,
+      { headers: UA_HEADERS, signal: AbortSignal.timeout(4500) }
+    );
+    if (!res.ok) return cached?.data ?? [];
+    const json = (await res.json()) as {
+      chart?: {
+        result?: Array<{
+          indicators?: { quote?: Array<{ close?: Array<number | null> }> };
+        }>;
+      };
+    };
+    const closes = (json.chart?.result?.[0]?.indicators?.quote?.[0]?.close ?? []).filter(
+      (v): v is number => typeof v === 'number' && Number.isFinite(v) && v > 0
+    );
+    if (closes.length >= 2) {
+      dailyHistoryCache.set(yahooSymbol, { data: closes.slice(-14), expiresAt: now + 900_000 });
+      return closes.slice(-14);
+    }
+  } catch {
+    // ignore
+  }
+  return cached?.data ?? [];
+}
+
+function build7dFearGreedSeries(
+  assetId: string,
+  dailyCloses: number[],
+  livePrice: number,
+  liveChangePct: number,
+  w52Low: number,
+  w52High: number
+): number[] {
+  const upper = assetId.toUpperCase();
+  const isCrypto = upper.includes('BTC') || upper.includes('ETH');
+  const isGoldOrOil = upper.includes('XAU') || upper.includes('WTI') || upper.includes('BRENT');
+  const isFxOrYield = upper.includes('USD') || upper.includes('DXY') || upper.includes('10Y') || upper.includes('30Y');
+  const volScale = isCrypto ? 3.2 : isGoldOrOil ? 1.45 : isFxOrYield ? 0.85 : 1.35;
+  const span52 = Math.max(1e-6, w52High - w52Low);
+
+  const valid = dailyCloses.filter((v) => Number.isFinite(v) && v > 0);
+  const series = valid.length >= 2 ? [...valid.slice(0, -1), livePrice] : [livePrice];
+
+  const scores: number[] = [];
+  if (series.length >= 4) {
+    const startIdx = Math.max(1, series.length - 7);
+    for (let i = startIdx; i < series.length; i++) {
+      const px = series[i];
+      const prev = series[i - 1];
+      const pct = i === series.length - 1 ? liveChangePct : ((px - prev) / Math.max(1e-6, prev)) * 100;
+      const mom = 50 + Math.tanh(pct / volScale) * 44;
+      const r52 = Math.max(2, Math.min(98, ((px - w52Low) / span52) * 100));
+      const ma5Slice = series.slice(Math.max(0, i - 4), i + 1);
+      const ma5 = ma5Slice.reduce((a, b) => a + b, 0) / ma5Slice.length;
+      const trendBias = Math.tanh((((px - ma5) / Math.max(1e-6, ma5)) * 100) / (volScale * 1.1)) * 18;
+      const val = Math.max(0, Math.min(100, Math.round(mom * 0.52 + r52 * 0.28 + (50 + trendBias) * 0.20)));
+      scores.push(val);
+    }
+  }
+
+  while (scores.length < 7) {
+    const currentLast = scores[scores.length - 1] ?? Math.max(0, Math.min(100, Math.round(50 + Math.tanh(liveChangePct / volScale) * 40)));
+    const prevAnchor = scores[0] ?? currentLast;
+    scores.unshift(Math.max(5, Math.min(95, Math.round(prevAnchor + (50 - prevAnchor) * 0.12))));
+  }
+  return scores.slice(-7);
 }
 
 function resolveConsistentChange(
@@ -671,7 +1218,7 @@ function resolveConsistentChange(
   const safeRawPrev = Number.isFinite(rawPrevClose) && rawPrevClose > 0 ? rawPrevClose : price;
   const regPct = Number(reportedChangePct);
 
-  // For 24/7 crypto anchored to UTC midnight close, use rawPrev directly
+  // For 24/7 crypto anchored to 24h open, use rawPrev directly
   if (forcePrevCloseAnchor || !Number.isFinite(regPct)) {
     const changeValue = Number((price - safeRawPrev).toFixed(decimals >= 3 ? decimals : 2));
     const changePercent = Number(
@@ -684,12 +1231,12 @@ function resolveConsistentChange(
     };
   }
 
-  // Yahoo v8 /chart?range=1d returns stale multi-day chartPreviousClose on several Asian & cash indices
-  // (e.g., ^JKSE, ^HSI, ^TWII, 000001.SS, ^NSEI). Reconstruct exact session previous close from regularMarketChangePercent.
+  // Yahoo v8 /chart?range=1d returns stale multi-day chartPreviousClose on several Asian & cash indices.
+  // Reconstruct exact session previous close from regularMarketChangePercent.
   const calcFromRawPct =
     safeRawPrev > 0 ? ((price - safeRawPrev) / safeRawPrev) * 100 : regPct;
   const effectivePrev =
-    Math.abs(calcFromRawPct - regPct) > 0.04 && 1 + regPct / 100 > 0.05
+    Math.abs(calcFromRawPct - regPct) > 0.03 && 1 + regPct / 100 > 0.05
       ? price / (1 + regPct / 100)
       : safeRawPrev;
 
@@ -708,35 +1255,77 @@ let inFlightQuotesPromise: Promise<{ quotes: LiveQuotePatch[]; updatedAt: string
 export async function fetchLiveQuotes(): Promise<{
   quotes: LiveQuotePatch[];
   updatedAt: string;
+  diagnostics: ServerFeedDiagnosticsResponse;
 }> {
   const now = Date.now();
-  if (quotesCache.entry && quotesCache.entry.expiresAt > now) {
-    return quotesCache.entry.data;
+  if (quotesCache.entry) {
+    if (quotesCache.entry.expiresAt > now) {
+      return {
+        ...quotesCache.entry.data,
+        diagnostics: getServerFeedDiagnostics(),
+      };
+    }
+    // Stale-while-revalidate: serve warm cache immediately (< 1ms) if <= 15s stale while refreshing quietly
+    if (now - quotesCache.entry.expiresAt < 15_000) {
+      if (!inFlightQuotesPromise) {
+        void refreshQuotesInternal().catch(() => null);
+      }
+      return {
+        ...quotesCache.entry.data,
+        diagnostics: getServerFeedDiagnostics(),
+      };
+    }
   }
+  if (inFlightQuotesPromise) {
+    const res = await inFlightQuotesPromise;
+    return { ...res, diagnostics: getServerFeedDiagnostics() };
+  }
+  const res = await refreshQuotesInternal();
+  return { ...res, diagnostics: getServerFeedDiagnostics() };
+}
+
+async function refreshQuotesInternal(): Promise<{
+  quotes: LiveQuotePatch[];
+  updatedAt: string;
+}> {
   if (inFlightQuotesPromise) {
     return inFlightQuotesPromise;
   }
 
+  const now = Date.now();
+  const batchStart = Date.now();
+  let yahooCachedSymbolCount = 0;
+  let yahooFreshSymbolCount = 0;
   inFlightQuotesPromise = (async () => {
     const nowDate = new Date(now);
-    const [rawResults, id10yRaw] = await Promise.all([
-      Promise.all(
-        YAHOO_SYMBOL_CONFIG.map(async (cfg): Promise<RawQuoteMeta | null> => {
-          const sessionInfo = getServerSessionInfo(cfg.id, nowDate);
-          const cached = perSymbolQuoteCache.get(cfg.id);
-          if (cached && cached.expiresAt > now && cached.wasOpen === sessionInfo.isOpen) {
-            return cached.data;
+    const [tvGlobalMap, id10yRaw] = await Promise.all([
+      fetchTradingViewGlobalQuotes(),
+      fetchId10yRaw().catch(() => null),
+    ]);
+
+    const rawResults = await Promise.all(
+      YAHOO_SYMBOL_CONFIG.map(async (cfg): Promise<RawQuoteMeta | null> => {
+        const sessionInfo = getServerSessionInfo(cfg.id, nowDate);
+        const cached = perSymbolQuoteCache.get(cfg.id);
+        if (cached && cached.expiresAt > now && cached.wasOpen === sessionInfo.isOpen) {
+          return cached.data;
+        }
+        try {
+          const cachedDaily = dailyHistoryCache.get(cfg.yahooSymbol);
+          const dailyCloses = cachedDaily?.data ?? [];
+
+          const interval = sessionInfo.isOpen ? '1m' : '15m';
+          const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
+            cfg.yahooSymbol
+          )}?range=1d&interval=${interval}`;
+          const res = await fetch(url, {
+            headers: UA_HEADERS,
+            signal: AbortSignal.timeout(6500),
+          });
+          if (!res.ok) {
+            if (cached?.data) yahooCachedSymbolCount += 1;
+            return cached?.data ?? null;
           }
-          try {
-            const interval = sessionInfo.isOpen ? '5m' : '15m';
-            const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
-              cfg.yahooSymbol
-            )}?range=1d&interval=${interval}`;
-            const res = await fetch(url, {
-              headers: UA_HEADERS,
-              signal: AbortSignal.timeout(7000),
-            });
-            if (!res.ok) return cached?.data ?? null;
           const json = (await res.json()) as {
             chart?: {
               result?: Array<{
@@ -754,48 +1343,92 @@ export async function fetchLiveQuotes(): Promise<{
 
           const item = json.chart?.result?.[0];
           const meta = item?.meta;
-          if (!meta) return null;
+          if (!meta) return cached?.data ?? null;
 
           let price = Number(meta.regularMarketPrice);
-          const rawPrev = Number(
-            meta.regularMarketPreviousClose ?? meta.previousClose ?? meta.chartPreviousClose ?? price
+          let rawPrev = Number(
+            meta.regularMarketPreviousClose ??
+              meta.previousClose ??
+              (dailyCloses.length >= 2 ? dailyCloses[dailyCloses.length - 2] : undefined) ??
+              meta.chartPreviousClose ??
+              price
           );
-          if (!Number.isFinite(price) || price <= 0) return null;
+          let regPct: unknown = meta.regularMarketChangePercent;
+          if (!Number.isFinite(price) || price <= 0) return cached?.data ?? null;
 
-          let coinbaseVolumeUsd = 0;
-          if (cfg.id === 'BTCUSD' || cfg.id === 'ETHUSD') {
-            const cb = await fetchCoinbaseSpotTicker(cfg.id === 'BTCUSD' ? 'BTC-USD' : 'ETH-USD');
-            if (cb) {
-              price = cb.price;
-              coinbaseVolumeUsd = cb.volumeUsd;
+          let coinbaseStats: CoinbaseSpotStats | null = null;
+          const isCryptoAnchor = cfg.id === 'BTCUSD' || cfg.id === 'ETHUSD';
+          if (isCryptoAnchor) {
+            coinbaseStats = await fetchCoinbaseSpotStats(cfg.id === 'BTCUSD' ? 'BTC-USD' : 'ETH-USD');
+            if (coinbaseStats) {
+              price = coinbaseStats.price;
+              rawPrev = coinbaseStats.open24h;
             }
           }
 
-          const isCryptoAnchor = cfg.id === 'BTCUSD' || cfg.id === 'ETHUSD';
+          // Cross-reconcile Spot Gold, Crude, DXY, Yields, FX & Indices with TradingView real-time institutional feed
+          const tvQuote = tvGlobalMap.get(cfg.id);
+          if (tvQuote && !isCryptoAnchor) {
+            if (tvQuote.preferPrimary) {
+              price = tvQuote.price;
+              rawPrev = tvQuote.prevClose;
+              regPct = tvQuote.changePct;
+            } else {
+              // For equity indices: reconcile if Yahoo regularMarketChangePercent is missing or diverges >0.12% from TV
+              const yPct = Number(regPct);
+              if (!Number.isFinite(yPct) || Math.abs(yPct - tvQuote.changePct) > 0.12) {
+                price = tvQuote.price;
+                rawPrev = tvQuote.prevClose;
+                regPct = tvQuote.changePct;
+              }
+            }
+          }
+
           const { prevClose, changeValue, changePercent } = resolveConsistentChange(
             price,
             rawPrev,
-            meta.regularMarketChangePercent,
+            regPct,
             cfg.decimals,
             isCryptoAnchor
           );
 
           const rawCloses = item?.indicators?.quote?.[0]?.close ?? [];
           const rawTimestamps = item?.timestamp ?? [];
-          const validPairs: { t: number; v: number }[] = [];
+          const sameSourcePairs: { t: number; v: number }[] = [];
           for (let i = 0; i < rawCloses.length; i++) {
             const val = rawCloses[i];
             const ts = rawTimestamps[i];
             if (typeof val === 'number' && Number.isFinite(val)) {
-              validPairs.push({
+              sameSourcePairs.push({
                 t: typeof ts === 'number' ? ts * 1000 : Date.now(),
                 v: Number(val.toFixed(cfg.decimals)),
               });
             }
           }
+          const stats5m = recordAndComputeServer5m(
+            cfg.id,
+            price,
+            sameSourcePairs,
+            sessionInfo.isOpen,
+            Date.now()
+          );
+
+          let validPairs = sameSourcePairs;
           if (validPairs.length === 0) {
-            validPairs.push({ t: Date.now() - 3600_000, v: prevClose }, { t: Date.now(), v: price });
+            validPairs = [
+              { t: Date.now() - 3600_000, v: prevClose },
+              { t: Date.now(), v: price },
+            ];
           } else {
+            // Re-anchor chart series smoothly if TV/Coinbase price differs by futures-spot basis
+            const lastRaw = validPairs[validPairs.length - 1].v;
+            const ratio = lastRaw > 0 ? price / lastRaw : 1;
+            if (Math.abs(ratio - 1) > 0.0004 && Math.abs(ratio - 1) < 0.05) {
+              validPairs = validPairs.map((p) => ({
+                t: p.t,
+                v: Number((p.v * ratio).toFixed(cfg.decimals)),
+              }));
+            }
             validPairs[validPairs.length - 1] = {
               t: validPairs[validPairs.length - 1].t,
               v: Number(price.toFixed(cfg.decimals)),
@@ -809,20 +1442,33 @@ export async function fetchLiveQuotes(): Promise<{
           const regOpen = Number(meta.regularMarketOpen);
           const barOpen = rawOpens.find((v): v is number => typeof v === 'number' && Number.isFinite(v) && v > 0);
 
-          const rawDayHigh = Number(meta.regularMarketDayHigh ?? Math.max(...closes));
-          const rawDayLow = Number(meta.regularMarketDayLow ?? Math.min(...closes));
+          const rawDayHigh = Number(
+            coinbaseStats?.high24h ??
+              (tvQuote?.preferPrimary ? tvQuote.high : undefined) ??
+              meta.regularMarketDayHigh ??
+              Math.max(...closes)
+          );
+          const rawDayLow = Number(
+            coinbaseStats?.low24h ??
+              (tvQuote?.preferPrimary ? tvQuote.low : undefined) ??
+              meta.regularMarketDayLow ??
+              Math.min(...closes)
+          );
           const baseHigh = Number.isFinite(rawDayHigh) && rawDayHigh > 0 ? rawDayHigh : Math.max(price, prevClose);
           const baseLow = Number.isFinite(rawDayLow) && rawDayLow > 0 ? rawDayLow : Math.min(price, prevClose);
 
-          // Ensure session Open never sits outside current intraday session range on futures/24h rollovers (e.g., GC=F)
           let firstOpen =
-            Number.isFinite(regOpen) && regOpen > 0
-              ? regOpen
-              : typeof barOpen === 'number' &&
-                  barOpen >= Math.min(baseLow, prevClose) * 0.985 &&
-                  barOpen <= Math.max(baseHigh, prevClose) * 1.015
-                ? barOpen
-                : prevClose;
+            coinbaseStats
+              ? coinbaseStats.open24h
+              : tvQuote?.preferPrimary && tvQuote.open > 0
+                ? tvQuote.open
+                : Number.isFinite(regOpen) && regOpen > 0
+                  ? regOpen
+                  : typeof barOpen === 'number' &&
+                      barOpen >= Math.min(baseLow, prevClose) * 0.985 &&
+                      barOpen <= Math.max(baseHigh, prevClose) * 1.015
+                    ? barOpen
+                    : prevClose;
           firstOpen = Math.max(Math.min(baseLow, prevClose), Math.min(Math.max(baseHigh, prevClose), firstOpen));
 
           const dayHighNum = Math.max(price, baseHigh, firstOpen);
@@ -830,8 +1476,8 @@ export async function fetchLiveQuotes(): Promise<{
 
           const w52LowRaw = Number(meta.fiftyTwoWeekLow ?? dayLowNum);
           const w52HighRaw = Number(meta.fiftyTwoWeekHigh ?? dayHighNum);
-          const w52LowNum = Number.isFinite(w52LowRaw) && w52LowRaw > 0 ? w52LowRaw : dayLowNum;
-          const w52HighNum = Number.isFinite(w52HighRaw) && w52HighRaw > w52LowNum ? w52HighRaw : Math.max(dayHighNum, price);
+          const w52LowNum = Number.isFinite(w52LowRaw) && w52LowRaw > 0 ? Math.min(w52LowRaw, dayLowNum) : dayLowNum;
+          const w52HighNum = Number.isFinite(w52HighRaw) && w52HighRaw > w52LowNum ? Math.max(w52HighRaw, dayHighNum) : Math.max(dayHighNum, price);
           const w52Span = w52HighNum - w52LowNum || 1;
           const w52Pct = Math.max(
             2,
@@ -839,15 +1485,26 @@ export async function fetchLiveQuotes(): Promise<{
           );
 
           const rawVol = Number(meta.regularMarketVolume);
-          const vol = coinbaseVolumeUsd > 0 ? coinbaseVolumeUsd : rawVol;
+          const vol = coinbaseStats?.volumeUsd && coinbaseStats.volumeUsd > 0 ? coinbaseStats.volumeUsd : rawVol;
           const updatedAtEpoch =
-            isCryptoAnchor && coinbaseVolumeUsd > 0
+            isCryptoAnchor && coinbaseStats
               ? Date.now()
-              : Number(meta.regularMarketTime || Math.floor(Date.now() / 1000)) * 1000;
+              : tvQuote?.preferPrimary
+                ? Date.now()
+                : Number(meta.regularMarketTime || Math.floor(Date.now() / 1000)) * 1000;
           const exchangeName =
-            isCryptoAnchor && coinbaseVolumeUsd > 0
+            isCryptoAnchor && coinbaseStats
               ? 'Coinbase Spot USD'
               : String(meta.fullExchangeName || meta.exchangeName || 'Global Market');
+
+          const fearGreed7d = build7dFearGreedSeries(
+            cfg.id,
+            dailyCloses,
+            price,
+            changePercent,
+            w52LowNum,
+            w52HighNum
+          );
 
           const rawMeta: RawQuoteMeta = {
             cfg,
@@ -866,21 +1523,25 @@ export async function fetchLiveQuotes(): Promise<{
             timestamps,
             updatedAtEpoch,
             exchangeName,
+            fearGreed7d,
+            move5mPct: stats5m.move5mPct,
+            vol5mRangePct: stats5m.vol5mRangePct,
+            move5mSource: stats5m.move5mSource,
           };
 
           perSymbolQuoteCache.set(cfg.id, {
             data: rawMeta,
-            expiresAt: Date.now() + (sessionInfo.isOpen ? 900 : 600_000),
+            expiresAt: Date.now() + (sessionInfo.isOpen ? 1200 : 600_000),
             wasOpen: sessionInfo.isOpen,
           });
+          yahooFreshSymbolCount += 1;
           return rawMeta;
         } catch {
+          if (cached?.data) yahooCachedSymbolCount += 1;
           return cached?.data ?? null;
         }
       })
-    ),
-    fetchId10yRaw().catch(() => null),
-  ]);
+    );
 
   const validRaw = rawResults.filter((r): r is RawQuoteMeta => r !== null);
   const byId = new Map(validRaw.map((r) => [r.cfg.id, r]));
@@ -891,7 +1552,7 @@ export async function fetchLiveQuotes(): Promise<{
   const us30yPrice = byId.get('US30Y')?.price;
 
   const quotes: LiveQuotePatch[] = validRaw.map((r) => {
-    const { cfg, price, prevClose, changeValue, changePercent, firstOpen, dayHighNum, dayLowNum, w52LowNum, w52HighNum, w52Pct, vol, closes, timestamps, updatedAtEpoch } = r;
+    const { cfg, price, prevClose, changeValue, changePercent, firstOpen, dayHighNum, dayLowNum, w52LowNum, w52HighNum, w52Pct, vol, closes, timestamps, updatedAtEpoch, fearGreed7d } = r;
     const prefix = cfg.currencyPrefix ?? '';
     const suffix = cfg.unitSuffix ?? '';
 
@@ -904,7 +1565,6 @@ export async function fetchLiveQuotes(): Promise<{
 
     // Live Pivot / Session Technicals
     const intradaySpan = Math.max(0, dayHighNum - dayLowNum);
-    const intradayPct = price > 0 ? (intradaySpan / price) * 100 : 0;
     const pivot = (dayHighNum + dayLowNum + price) / 3;
     const calcSupport = 2 * pivot - dayHighNum;
     const calcResistance = 2 * pivot - dayLowNum;
@@ -947,57 +1607,49 @@ export async function fetchLiveQuotes(): Promise<{
         ? `Session R1 · Near 52W Peak (${w52High})`
         : 'Session Pivot R1 & Intraday Cap';
 
-    const dirWord =
-      changePercent > 0.15 ? 'advancing' : changePercent < -0.15 ? 'pulling back' : 'consolidating';
-    const signStr = changePercent >= 0 ? '+' : '';
-    const openDeltaStr =
-      firstOpen > 0
-        ? price >= firstOpen
-          ? `holding above opening print (${open})`
-          : `trading below opening print (${open})`
-        : 'tracking session pivot';
+    const gapPct = prevClose > 0 ? ((firstOpen - prevClose) / prevClose) * 100 : 0;
     const ibsRatio =
       dayHighNum > dayLowNum ? (price - dayLowNum) / (dayHighNum - dayLowNum) : 0.5;
-    const rangeZone =
-      ibsRatio >= 0.72
-        ? 'upper session quartile'
-        : ibsRatio <= 0.28
-          ? 'lower demand quartile'
-          : 'mid-range equilibrium';
+    const ibsPct = Math.round(ibsRatio * 100);
+    const fgNow = fearGreed7d[fearGreed7d.length - 1] ?? 50;
+    const fgZone =
+      fgNow >= 75 ? 'Extreme Greed' : fgNow >= 55 ? 'Greed' : fgNow <= 24 ? 'Extreme Fear' : fgNow <= 44 ? 'Fear' : 'Neutral';
 
-    let extraNote = '';
+    const structureThesis =
+      firstOpen > 0 && price >= firstOpen
+        ? `Holding above opening drive (${open}) with ${ibsPct}% IBS confirms buyer absorption; defending ${support} keeps an upside rotation toward ${resistance} intact.`
+        : firstOpen > 0
+          ? `Fading below opening print (${open}) at ${ibsPct}% IBS highlights supply control; reclaiming ${open} is needed to neutralize downside pressure toward ${support}.`
+          : `Trading inside ${dayLow}–${dayHigh} (${ibsPct}% IBS) between S1 ${support} and R1 ${resistance}.`;
+
+    let crossAssetThesis = '';
     if (cfg.id === 'BTCUSD' || cfg.id === 'ETHUSD') {
-      extraNote = ` 24/7 momentum posture registers ${signalTier} across ${rangeZone}; holding above ${support} preserves upside breakout structure toward ${resistance}.`;
+      crossAssetThesis = ` 24h Coinbase Spot regime reads ${signalTier} (F&G ${fgNow} · ${fgZone}), tracking NASDAQ liquidity beta.`;
     } else if (cfg.id === 'XAUUSD') {
-      extraNote = ` Bullion reacts inversely to DXY & US real yields; signal reads ${signalTier} inside ${rangeZone}.`;
+      crossAssetThesis = ` Spot Gold (XAU/USD) reflects real-rate & DXY sensitivity with ${fgZone} sentiment (${fgNow}/100).`;
     } else if (cfg.id === 'WTI' && brentPrice) {
-      extraNote = ` WTI trades at a $${Math.abs(price - brentPrice).toFixed(2)}/bbl ${
+      crossAssetThesis = ` WTI–Brent differential sits at $${Math.abs(price - brentPrice).toFixed(2)}/bbl ${
         price < brentPrice ? 'discount' : 'premium'
-      } to Brent ($${brentPrice.toFixed(2)}).`;
+      } vs Brent ($${brentPrice.toFixed(2)}).`;
     } else if (cfg.id === 'BRENT' && wtiPrice) {
-      extraNote = ` Brent maintains a $${(price - wtiPrice).toFixed(2)}/bbl spread over WTI ($${wtiPrice.toFixed(2)}).`;
+      crossAssetThesis = ` Brent–WTI spread trades at +$${(price - wtiPrice).toFixed(2)}/bbl over WTI ($${wtiPrice.toFixed(2)}).`;
     } else if ((cfg.id === 'US10Y' || cfg.id === 'US30Y') && us10yPrice && us30yPrice) {
       const bps = ((us30yPrice - us10yPrice) * 100).toFixed(1);
-      extraNote = ` The 10Y–30Y Treasury curve spread stands at ${Number(bps) >= 0 ? '+' : ''}${bps} bps.`;
+      crossAssetThesis = ` US 10s30s curve slope prints ${Number(bps) >= 0 ? '+' : ''}${bps} bps, driving equity duration multiples.`;
     } else if (cfg.id === 'IHSG' || cfg.id === 'EIDO') {
-      extraNote = ` Intraday bias reads ${signalTier} (${rangeZone}), sensitive to foreign banking flows and USD/IDR stability.`;
+      crossAssetThesis = ` Jakarta benchmark sentiment reads ${fgZone} (${fgNow}/100), gated by foreign banking flow and USD/IDR stability.`;
     }
 
-    const ordinalPct = (() => {
-      const mod100 = w52Pct % 100;
-      if (mod100 >= 11 && mod100 <= 13) return `${w52Pct}th`;
-      const mod10 = w52Pct % 10;
-      if (mod10 === 1) return `${w52Pct}st`;
-      if (mod10 === 2) return `${w52Pct}nd`;
-      if (mod10 === 3) return `${w52Pct}rd`;
-      return `${w52Pct}th`;
-    })();
+    const signStr = changePercent >= 0 ? '+' : '';
+    const gapTag =
+      Math.abs(gapPct) >= 0.12
+        ? ` (open gap ${gapPct >= 0 ? '+' : ''}${gapPct.toFixed(2)}%)`
+        : '';
 
-    const commentary = `${cfg.name} is ${dirWord} at ${priceLabel} (${signStr}${changePercent.toFixed(
+    const commentary = `${cfg.name} prints ${priceLabel} (${signStr}${changePercent.toFixed(
       2
-    )}%), ${openDeltaStr} within a ${dayLow}–${dayHigh} intraday band (${ordinalPct} 52W pct). Immediate pivot support stands at ${support} with resistance overhead at ${resistance}.${extraNote}`;
+    )}%${gapTag}, ${signalTier}, F&G ${fgNow}/100 ${fgZone}). ${structureThesis}${crossAssetThesis}`;
 
-    // Clean secondary statistics (omitting removed Intraday Spread / 52W Position / 52W Midpoint)
     let peLabel = '';
     let peValue = '';
     let capLabel = '';
@@ -1048,6 +1700,10 @@ export async function fetchLiveQuotes(): Promise<{
       marketSessionOpen: sessionInfo.isOpen,
       sessionStateLabel: sessionInfo.stateLabel,
       sessionProgressRatio: sessionInfo.progressRatio,
+      fearGreed7d,
+      move5mPct: r.move5mPct,
+      vol5mRangePct: r.vol5mRangePct,
+      move5mSource: r.move5mSource,
     };
   });
 
@@ -1134,6 +1790,21 @@ export async function fetchLiveQuotes(): Promise<{
     );
 
     const id10ySession = getServerSessionInfo('ID10Y', nowDate);
+    const id10y5m = recordAndComputeServer5m(
+      'ID10Y',
+      price,
+      intradayPoints.map((v, idx) => ({ t: intradayTimestamps[idx], v })),
+      id10ySession.isOpen,
+      now
+    );
+    const id10yFg7d = build7dFearGreedSeries(
+      'ID10Y',
+      intradayPoints,
+      price,
+      changePercent,
+      w52LowNum,
+      w52HighNum
+    );
     quotes.push({
       id: 'ID10Y',
       price,
@@ -1166,14 +1837,68 @@ export async function fetchLiveQuotes(): Promise<{
       marketSessionOpen: id10ySession.isOpen,
       sessionStateLabel: id10ySession.stateLabel,
       sessionProgressRatio: id10ySession.progressRatio,
+      fearGreed7d: id10yFg7d,
+      move5mPct: id10y5m.move5mPct,
+      vol5mRangePct: id10y5m.vol5mRangePct,
+      move5mSource: id10y5m.move5mSource,
     });
   }
 
     const payload = { quotes, updatedAt: new Date().toISOString() };
     const anyOpen = quotes.some((q) => q.marketSessionOpen);
+    const isComplete = quotes.length >= YAHOO_SYMBOL_CONFIG.length;
+    const batchLatency = Date.now() - batchStart;
     if (quotes.length > 0) {
-      quotesCache.entry = { data: payload, expiresAt: Date.now() + (anyOpen ? 900 : 120_000) };
+      const ttlMs = !isComplete ? 3500 : anyOpen ? 1200 : 120_000;
+      quotesCache.entry = { data: payload, expiresAt: Date.now() + ttlMs };
     }
+
+    if (quotes.length === 0 || yahooCachedSymbolCount > 3) {
+      updateProviderMetric('yahoo_macro', {
+        status: 'cached',
+        activeSource:
+          quotes.length > 0
+            ? `Cached Quotes (${yahooCachedSymbolCount} stale symbols)`
+            : 'Offline / Cached Snapshot',
+        latencyMs: batchLatency,
+        lastSuccessAt: quotes.length > 0 ? Date.now() : undefined,
+        isCachedFallback: true,
+        fallbackReason: `${yahooCachedSymbolCount} ticker(s) fell back to cached quotes`,
+      });
+    } else if (tvGlobalMap.size === 0 && quotes.length < YAHOO_SYMBOL_CONFIG.length - 3) {
+      updateProviderMetric('yahoo_macro', {
+        status: 'failover',
+        activeSource: 'Yahoo Finance v8 (Degraded)',
+        latencyMs: batchLatency,
+        lastSuccessAt: Date.now(),
+        isCachedFallback: false,
+        fallbackReason: 'TradingView scanner down and partial Yahoo quote response',
+      });
+    } else if (yahooFreshSymbolCount > 0 || quotes.length > 0) {
+      updateProviderMetric('yahoo_macro', {
+        status: 'live',
+        activeSource:
+          tvGlobalMap.size > 0
+            ? 'Yahoo Finance v8 + TV Global'
+            : 'Yahoo Finance v8 Live',
+        latencyMs: yahooFreshSymbolCount > 0 ? batchLatency : undefined,
+        lastSuccessAt: Date.now(),
+        isCachedFallback: false,
+        fallbackReason: undefined,
+      });
+    }
+
+    // Softly warm missing 1mo daily Fear & Greed history in small batches AFTER primary quotes settle
+    const coldDaily = YAHOO_SYMBOL_CONFIG.filter((c) => {
+      const d = dailyHistoryCache.get(c.yahooSymbol);
+      return !d || d.expiresAt <= Date.now();
+    });
+    if (coldDaily.length > 0) {
+      setTimeout(() => {
+        void Promise.allSettled(coldDaily.slice(0, 6).map((c) => fetchRecentDailyCloses(c.yahooSymbol)));
+      }, 250);
+    }
+
     return payload;
   })();
 
@@ -1197,7 +1922,12 @@ async function fetchYahooChartJson(
       meta?: Record<string, unknown>;
       timestamp?: number[];
       indicators?: {
-        quote?: Array<{ close?: Array<number | null> }>;
+        quote?: Array<{
+          open?: Array<number | null>;
+          high?: Array<number | null>;
+          low?: Array<number | null>;
+          close?: Array<number | null>;
+        }>;
       };
     }>;
   };
@@ -1219,7 +1949,12 @@ async function fetchYahooChartJson(
             meta?: Record<string, unknown>;
             timestamp?: number[];
             indicators?: {
-              quote?: Array<{ close?: Array<number | null> }>;
+              quote?: Array<{
+                open?: Array<number | null>;
+                high?: Array<number | null>;
+                low?: Array<number | null>;
+                close?: Array<number | null>;
+              }>;
             };
           }>;
         };
@@ -1273,6 +2008,7 @@ export async function fetchLiveChart(
         );
         const points: number[] = [];
         const timestamps: number[] = [];
+        const candles: CandlePoint[] = [];
         for (let i = 0; i < cfg.count; i++) {
           const t = i / (cfg.count - 1);
           const wave = Math.sin(t * Math.PI * 3.5) * 0.035 + Math.cos(t * Math.PI * 1.5) * 0.02;
@@ -1280,14 +2016,26 @@ export async function fetchLiveChart(
             i === cfg.count - 1
               ? raw.price
               : safeStart + (raw.price - safeStart) * t + (i === 0 ? 0 : wave * (1 - t));
-          points.push(Number(Math.max(3.5, val).toFixed(3)));
-          timestamps.push(Math.round(now - cfg.spanMs * (1 - t)));
+          const c = Number(Math.max(3.5, val).toFixed(3));
+          const o = i === 0 ? safeStart : points[i - 1];
+          const spread = Math.max(0.008, Math.abs(c - o) * 0.45);
+          const tsMs = Math.round(now - cfg.spanMs * (1 - t));
+          points.push(c);
+          timestamps.push(tsMs);
+          candles.push({
+            t: tsMs,
+            o: Number(o.toFixed(3)),
+            h: Number((Math.max(o, c) + spread).toFixed(3)),
+            l: Number((Math.min(o, c) - spread).toFixed(3)),
+            c,
+          });
         }
         const payload: LiveChartResponse = {
           id: 'ID10Y',
           timeframe,
           points,
           timestamps,
+          candles,
           prevClose: safeStart,
         };
         chartCache.set(key, { data: payload, expiresAt: now + 180_000 });
@@ -1297,7 +2045,10 @@ export async function fetchLiveChart(
       const cfg = YAHOO_SYMBOL_CONFIG.find((c) => c.id === id);
       if (!cfg) return null;
 
-      const rangeMap: Record<string, { range: string; interval: string }> = {
+      const rangeMap: Record<string, { range: string; interval: string; sliceTail?: number }> = {
+        '15M': { range: '1d', interval: '1m', sliceTail: 30 },
+        '1H': { range: '1d', interval: '2m', sliceTail: 42 },
+        '4H': { range: '2d', interval: '5m', sliceTail: 48 },
         '1D': { range: '1d', interval: '15m' },
         '1W': { range: '5d', interval: '1h' },
         '1M': { range: '1mo', interval: '1d' },
@@ -1333,17 +2084,37 @@ export async function fetchLiveChart(
       }
 
       const item = json.chart?.result?.[0];
-      const rawCloses = item?.indicators?.quote?.[0]?.close ?? [];
+      const quoteObj = item?.indicators?.quote?.[0];
+      const rawCloses = quoteObj?.close ?? [];
+      const rawOpens = quoteObj?.open ?? [];
+      const rawHighs = quoteObj?.high ?? [];
+      const rawLows = quoteObj?.low ?? [];
       const rawTimestamps = item?.timestamp ?? [];
       const points: number[] = [];
       const timestamps: number[] = [];
+      const candles: CandlePoint[] = [];
 
       for (let i = 0; i < rawCloses.length; i++) {
         const val = rawCloses[i];
         const ts = rawTimestamps[i];
         if (typeof val === 'number' && Number.isFinite(val)) {
-          points.push(Number(val.toFixed(cfg.decimals)));
-          timestamps.push(typeof ts === 'number' ? ts * 1000 : Date.now());
+          const c = Number(val.toFixed(cfg.decimals));
+          const tsMs = typeof ts === 'number' ? ts * 1000 : Date.now();
+          const prevC = points.length > 0 ? points[points.length - 1] : c;
+          const rawO = rawOpens[i];
+          const o = typeof rawO === 'number' && Number.isFinite(rawO) ? Number(rawO.toFixed(cfg.decimals)) : prevC;
+          const rawH = rawHighs[i];
+          const rawL = rawLows[i];
+          const h = typeof rawH === 'number' && Number.isFinite(rawH)
+            ? Number(Math.max(rawH, o, c).toFixed(cfg.decimals))
+            : Number(Math.max(o, c).toFixed(cfg.decimals));
+          const l = typeof rawL === 'number' && Number.isFinite(rawL)
+            ? Number(Math.min(rawL, o, c).toFixed(cfg.decimals))
+            : Number(Math.min(o, c).toFixed(cfg.decimals));
+
+          points.push(c);
+          timestamps.push(tsMs);
+          candles.push({ t: tsMs, o, h, l, c });
         }
       }
 
@@ -1351,19 +2122,34 @@ export async function fetchLiveChart(
         return cached?.data ?? null;
       }
 
+      const finalPoints =
+        params.sliceTail && points.length > params.sliceTail
+          ? points.slice(-params.sliceTail)
+          : points;
+      const finalTimestamps =
+        params.sliceTail && timestamps.length > params.sliceTail
+          ? timestamps.slice(-params.sliceTail)
+          : timestamps;
+      const finalCandles =
+        params.sliceTail && candles.length > params.sliceTail
+          ? candles.slice(-params.sliceTail)
+          : candles;
+
       const prevClose = Number(
-        item?.meta?.chartPreviousClose ?? item?.meta?.previousClose ?? points[0]
+        item?.meta?.chartPreviousClose ?? item?.meta?.previousClose ?? finalPoints[0]
       );
 
       const payload: LiveChartResponse = {
         id,
         timeframe,
-        points,
-        timestamps,
-        prevClose: Number.isFinite(prevClose) ? Number(prevClose.toFixed(cfg.decimals)) : points[0],
+        points: finalPoints,
+        timestamps: finalTimestamps,
+        candles: finalCandles,
+        prevClose: Number.isFinite(prevClose) ? Number(prevClose.toFixed(cfg.decimals)) : finalPoints[0],
       };
 
-      chartCache.set(key, { data: payload, expiresAt: now + 180_000 });
+      const chartTtl = params.sliceTail ? 20_000 : 180_000;
+      chartCache.set(key, { data: payload, expiresAt: now + chartTtl });
       return payload;
     } catch {
       return cached?.data ?? null;
@@ -1378,10 +2164,21 @@ export async function fetchLiveChart(
 
 export async function fetchLiveFxRates(): Promise<LiveFxResponse> {
   const now = Date.now();
-  if (fxCache.entry && fxCache.entry.expiresAt > now) {
-    return fxCache.entry.data;
+  if (fxCache.entry) {
+    if (fxCache.entry.expiresAt > now) {
+      return fxCache.entry.data;
+    }
+    if (now - fxCache.entry.expiresAt < 900_000) {
+      void fetchFxRatesFresh().catch(() => null);
+      return fxCache.entry.data;
+    }
   }
+  return fetchFxRatesFresh();
+}
 
+async function fetchFxRatesFresh(): Promise<LiveFxResponse> {
+  const now = Date.now();
+  const fxStart = Date.now();
   return coalesceInFlight('fx-rates', fxCache.entry?.data, async () => {
 
   const [erRes, quotesRes] = await Promise.all([
@@ -1399,22 +2196,37 @@ export async function fetchLiveFxRates(): Promise<LiveFxResponse> {
 
   const usdIdrQuote = quotesRes.quotes.find((q) => q.id === 'USDIDR');
   const eurUsdQuote = quotesRes.quotes.find((q) => q.id === 'EURUSD');
+  const gbpUsdQuote = quotesRes.quotes.find((q) => q.id === 'GBPUSD');
+  const usdJpyQuote = quotesRes.quotes.find((q) => q.id === 'USDJPY');
+  const audUsdQuote = quotesRes.quotes.find((q) => q.id === 'AUDUSD');
+  const usdChfQuote = quotesRes.quotes.find((q) => q.id === 'USDCHF');
+  const usdCadQuote = quotesRes.quotes.find((q) => q.id === 'USDCAD');
+  const nzdUsdQuote = quotesRes.quotes.find((q) => q.id === 'NZDUSD');
+  const usdCnyQuote = quotesRes.quotes.find((q) => q.id === 'USDCNY');
 
   const idrRate = usdIdrQuote?.price || erRates?.IDR || 16000;
-  const eurPerUsd = eurUsdQuote ? 1 / eurUsdQuote.price : erRates?.EUR || 0.91;
-  const gbpPerUsd = erRates?.GBP || 0.78;
-  const jpyPerUsd = erRates?.JPY || 152;
+  const eurPerUsd = eurUsdQuote?.price ? 1 / eurUsdQuote.price : erRates?.EUR || 0.91;
+  const gbpPerUsd = gbpUsdQuote?.price ? 1 / gbpUsdQuote.price : erRates?.GBP || 0.78;
+  const jpyPerUsd = usdJpyQuote?.price || erRates?.JPY || 152;
+  const chfPerUsd = usdChfQuote?.price || erRates?.CHF || 0.88;
+  const cadPerUsd = usdCadQuote?.price || erRates?.CAD || 1.39;
+  const audPerUsd = audUsdQuote?.price ? 1 / audUsdQuote.price : erRates?.AUD || 1.52;
+  const nzdPerUsd = nzdUsdQuote?.price ? 1 / nzdUsdQuote.price : erRates?.NZD || 1.69;
+  const cnyPerUsd = usdCnyQuote?.price || erRates?.CNY || 7.23;
   const sgdPerUsd = erRates?.SGD || 1.33;
-  const audPerUsd = erRates?.AUD || 1.52;
 
   const rates: Record<string, number> = {
     USD: 1,
     EUR: Number(eurPerUsd.toFixed(6)),
     GBP: Number(gbpPerUsd.toFixed(6)),
     JPY: Number(jpyPerUsd.toFixed(4)),
-    IDR: Number(idrRate.toFixed(2)),
-    SGD: Number(sgdPerUsd.toFixed(6)),
+    CHF: Number(chfPerUsd.toFixed(6)),
+    CAD: Number(cadPerUsd.toFixed(6)),
     AUD: Number(audPerUsd.toFixed(6)),
+    NZD: Number(nzdPerUsd.toFixed(6)),
+    CNY: Number(cnyPerUsd.toFixed(6)),
+    SGD: Number(sgdPerUsd.toFixed(6)),
+    IDR: Number(idrRate.toFixed(2)),
   };
 
   const formatTileRate = (val: number, decimals: number) =>
@@ -1424,9 +2236,10 @@ export async function fetchLiveFxRates(): Promise<LiveFxResponse> {
     });
 
   const eurUsdVal = eurUsdQuote?.price ?? 1 / rates.EUR;
-  const gbpUsdVal = 1 / rates.GBP;
+  const gbpUsdVal = gbpUsdQuote?.price ?? 1 / rates.GBP;
+  const audUsdVal = audUsdQuote?.price ?? 1 / rates.AUD;
+  const nzdUsdVal = nzdUsdQuote?.price ?? 1 / rates.NZD;
   const sgdIdrVal = rates.IDR / rates.SGD;
-  const audUsdVal = 1 / rates.AUD;
 
   const pairTiles = [
     {
@@ -1452,18 +2265,63 @@ export async function fetchLiveFxRates(): Promise<LiveFxResponse> {
       base: 'GBP',
       quote: 'USD',
       rate: formatTileRate(gbpUsdVal, 4),
-      changePercent: 0.14,
-      high: formatTileRate(gbpUsdVal * 1.004, 4),
-      low: formatTileRate(gbpUsdVal * 0.996, 4),
+      changePercent: gbpUsdQuote?.changePercent ?? 0,
+      high: gbpUsdQuote?.dayHigh ?? formatTileRate(gbpUsdVal * 1.004, 4),
+      low: gbpUsdQuote?.dayLow ?? formatTileRate(gbpUsdVal * 0.996, 4),
     },
     {
       pair: 'USD / JPY',
       base: 'USD',
       quote: 'JPY',
       rate: formatTileRate(rates.JPY, 2),
-      changePercent: -0.18,
-      high: formatTileRate(rates.JPY * 1.005, 2),
-      low: formatTileRate(rates.JPY * 0.995, 2),
+      changePercent: usdJpyQuote?.changePercent ?? 0,
+      high: usdJpyQuote?.dayHigh ?? formatTileRate(rates.JPY * 1.005, 2),
+      low: usdJpyQuote?.dayLow ?? formatTileRate(rates.JPY * 0.995, 2),
+    },
+    {
+      pair: 'USD / CHF',
+      base: 'USD',
+      quote: 'CHF',
+      rate: formatTileRate(rates.CHF, 4),
+      changePercent: usdChfQuote?.changePercent ?? 0,
+      high: usdChfQuote?.dayHigh ?? formatTileRate(rates.CHF * 1.004, 4),
+      low: usdChfQuote?.dayLow ?? formatTileRate(rates.CHF * 0.996, 4),
+    },
+    {
+      pair: 'USD / CAD',
+      base: 'USD',
+      quote: 'CAD',
+      rate: formatTileRate(rates.CAD, 4),
+      changePercent: usdCadQuote?.changePercent ?? 0,
+      high: usdCadQuote?.dayHigh ?? formatTileRate(rates.CAD * 1.004, 4),
+      low: usdCadQuote?.dayLow ?? formatTileRate(rates.CAD * 0.996, 4),
+    },
+    {
+      pair: 'AUD / USD',
+      base: 'AUD',
+      quote: 'USD',
+      rate: formatTileRate(audUsdVal, 4),
+      changePercent: audUsdQuote?.changePercent ?? 0,
+      high: audUsdQuote?.dayHigh ?? formatTileRate(audUsdVal * 1.004, 4),
+      low: audUsdQuote?.dayLow ?? formatTileRate(audUsdVal * 0.996, 4),
+    },
+    {
+      pair: 'NZD / USD',
+      base: 'NZD',
+      quote: 'USD',
+      rate: formatTileRate(nzdUsdVal, 4),
+      changePercent: nzdUsdQuote?.changePercent ?? 0,
+      high: nzdUsdQuote?.dayHigh ?? formatTileRate(nzdUsdVal * 1.004, 4),
+      low: nzdUsdQuote?.dayLow ?? formatTileRate(nzdUsdVal * 0.996, 4),
+    },
+    {
+      pair: 'USD / CNY',
+      base: 'USD',
+      quote: 'CNY',
+      rate: formatTileRate(rates.CNY, 4),
+      changePercent: usdCnyQuote?.changePercent ?? 0,
+      high: usdCnyQuote?.dayHigh ?? formatTileRate(rates.CNY * 1.003, 4),
+      low: usdCnyQuote?.dayLow ?? formatTileRate(rates.CNY * 0.997, 4),
     },
     {
       pair: 'SGD / IDR',
@@ -1473,15 +2331,6 @@ export async function fetchLiveFxRates(): Promise<LiveFxResponse> {
       changePercent: usdIdrQuote?.changePercent ?? 0.08,
       high: formatTileRate(sgdIdrVal * 1.003, 0),
       low: formatTileRate(sgdIdrVal * 0.997, 0),
-    },
-    {
-      pair: 'AUD / USD',
-      base: 'AUD',
-      quote: 'USD',
-      rate: formatTileRate(audUsdVal, 4),
-      changePercent: 0.21,
-      high: formatTileRate(audUsdVal * 1.004, 4),
-      low: formatTileRate(audUsdVal * 0.996, 4),
     },
   ];
 
@@ -1493,6 +2342,26 @@ export async function fetchLiveFxRates(): Promise<LiveFxResponse> {
   };
 
   fxCache.entry = { data: payload, expiresAt: now + 600_000 };
+  const fxLatency = Date.now() - fxStart;
+  if (!erRates) {
+    updateProviderMetric('fx_rates', {
+      status: 'failover',
+      activeSource: 'Yahoo FX Crosses Fallback',
+      latencyMs: fxLatency,
+      lastSuccessAt: Date.now(),
+      isCachedFallback: false,
+      fallbackReason: 'Open ER-API unavailable; using live Yahoo FX quotes',
+    });
+  } else {
+    updateProviderMetric('fx_rates', {
+      status: 'live',
+      activeSource: 'Open ER-API + Live FX',
+      latencyMs: fxLatency,
+      lastSuccessAt: Date.now(),
+      isCachedFallback: false,
+      fallbackReason: undefined,
+    });
+  }
   return payload;
   });
 }
@@ -1573,6 +2442,92 @@ function classifyTopic(
   return { topic: 'rates', tags: ['Equities', 'Macro & Rates'] };
 }
 
+function scoreNewsImpact(
+  headline: string,
+  summary: string,
+  publisher: string,
+  ageMs: number
+): {
+  impactScore: number;
+  isBreaking: boolean;
+  newsTier: 'breaking' | 'recent';
+  impactLabel?: string;
+} {
+  const text = `${headline} ${summary}`.toLowerCase();
+  const titleLower = headline.toLowerCase();
+
+  let score = 0;
+
+  // 1. Freshness tier (breaking events must be fresh)
+  if (ageMs <= 45 * 60_000) score += 32;
+  else if (ageMs <= 2 * 3600_000) score += 24;
+  else if (ageMs <= 4 * 3600_000) score += 14;
+
+  // 2. High-impact central bank & macro release keywords
+  if (
+    /\b(fed|fomc|powell|ecb|boj|bank indonesia|bi rate|rate cut|rate hike|interest rate|cpi|inflation|pce|nfp|nonfarm|payrolls|gdp|recession|unemployment|pmi)\b/.test(
+      text
+    )
+  ) {
+    score += 32;
+  }
+
+  // 3. Sharp market move / systemic shock / policy catalyst keywords
+  if (
+    /\b(breaking|urgent|alert|plunge|plunges|surge|surges|crash|crashes|soar|soars|tumble|tumbles|slump|slumps|record high|all-time high|trading halt|circuit breaker|emergency|default|downgrade|sanctions|tariff|tariffs|opec|ceasefire|strike|invasion)\b/.test(
+      titleLower
+    )
+  ) {
+    score += 30;
+  } else if (
+    /\b(rally|rallies|selloff|sell-off|drops|jumps|spikes|sinks|rebound|sec |antitrust|bankruptcy|guidance cut|earnings beat|earnings miss|acquisition|merger)\b/.test(
+      titleLower
+    )
+  ) {
+    score += 18;
+  }
+
+  // 4. Local Indonesia/Asia high-impact catalyst terms
+  if (/\b(ihsg|rupiah|bank indonesia|ojk|bei|prabowo|apbn|bbca|bbri|bmri|bni|tlkm)\b/.test(text)) {
+    score += 14;
+  }
+
+  // 5. Quantified shock / basis-point magnitude cue
+  if (/\b\d+(\.\d+)?%|\bbps\b|\$\d+(\.\d+)?[bmt]\b|rp\s?\d+/i.test(headline)) {
+    score += 14;
+  }
+
+  // 6. Wire publisher bonus
+  if (/financial times|cnbc|marketwatch|coindesk|bbc business/i.test(publisher)) {
+    score += 6;
+  }
+
+  // 7. Editorial/evergreen/listicle/clickbait Q&A penalty — prevent opinion/speculative pieces from entering BREAKING
+  const isEditorialOrNoise =
+    /\b(opinion|editorial|podcast|watch live|how to|why you|what to know|best |top \d+|tips|explained|newsletter|week ahead|looking ahead|retirement|credit card|mortgage rate|gift guide|quiz|review:|here'?s why|price prediction|forecast for 20\d\d)\b/i.test(
+      titleLower
+    ) || /^(can|will|should|could|is|are|what|why|how)\b.*\?$/i.test(headline.trim());
+  if (isEditorialOrNoise) {
+    score -= 42;
+  }
+
+  const boundedScore = Math.max(0, Math.min(100, Math.round(score)));
+  const isBreaking = !isEditorialOrNoise && ageMs <= 4 * 3600_000 && boundedScore >= 64;
+  const newsTier: 'breaking' | 'recent' = isBreaking ? 'breaking' : 'recent';
+  const impactLabel = isBreaking
+    ? 'Breaking · High Impact'
+    : boundedScore >= 52
+      ? 'Market Mover'
+      : undefined;
+
+  return {
+    impactScore: boundedScore,
+    isBreaking,
+    newsTier,
+    impactLabel,
+  };
+}
+
 function parseRssFeed(
   xml: string,
   publisher: string,
@@ -1591,8 +2546,10 @@ function parseRssFeed(
     if (!headline || headline.length < 12) continue;
 
     const ts = Number.isFinite(Date.parse(pubDate)) ? Date.parse(pubDate) : Date.now() - i * 600_000;
+    const ageMs = Math.max(0, Date.now() - ts);
     const summary = summaryRaw || headline;
     const { topic, tags } = classifyTopic(`${headline} ${summary}`, defaultTopic);
+    const impactEval = scoreNewsImpact(headline, summary, publisher, ageMs);
     const publishedWib = new Intl.DateTimeFormat('en-GB', {
       timeZone: 'Asia/Jakarta',
       month: 'short',
@@ -1607,8 +2564,10 @@ function parseRssFeed(
       publisher,
       timeAgo: formatRelativeTime(pubDate),
       publishedAt: `${publishedWib} WIB`,
-      isBreaking: i < 2 && Date.now() - ts < 6 * 3600 * 1000,
-      impact: i === 0 ? 'Live Market Wire' : undefined,
+      isBreaking: impactEval.isBreaking,
+      newsTier: impactEval.newsTier,
+      impactScore: impactEval.impactScore,
+      impact: impactEval.impactLabel,
       topic,
       tags,
       headline,
@@ -1703,10 +2662,24 @@ export async function fetchLiveNews(): Promise<{
   updatedAt: string;
 }> {
   const now = Date.now();
-  if (newsCache.entry && newsCache.entry.expiresAt > now) {
-    return newsCache.entry.data;
+  if (newsCache.entry) {
+    if (newsCache.entry.expiresAt > now) {
+      return newsCache.entry.data;
+    }
+    if (now - newsCache.entry.expiresAt < 900_000) {
+      void fetchLiveNewsFresh().catch(() => null);
+      return newsCache.entry.data;
+    }
   }
+  return fetchLiveNewsFresh();
+}
 
+async function fetchLiveNewsFresh(): Promise<{
+  stories: LiveNewsItem[];
+  updatedAt: string;
+}> {
+  const now = Date.now();
+  const newsStart = Date.now();
   return coalesceInFlight('live-news', newsCache.entry?.data, async () => {
 
   const feeds = await Promise.all(
@@ -1729,7 +2702,16 @@ export async function fetchLiveNews(): Promise<{
 
   const seenTitles = new Set<string>();
   const deduped = combined
-    .sort((a, b) => b.ts - a.ts)
+    .sort((a, b) => {
+      if (Boolean(b.isBreaking) !== Boolean(a.isBreaking)) {
+        return b.isBreaking ? 1 : -1;
+      }
+      if (b.isBreaking && a.isBreaking) {
+        const scoreDiff = (b.impactScore ?? 0) - (a.impactScore ?? 0);
+        if (Math.abs(scoreDiff) >= 8) return scoreDiff;
+      }
+      return b.ts - a.ts;
+    })
     .filter((item) => {
       const key = item.headline.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 55);
       if (!key || seenTitles.has(key)) return false;
@@ -1740,8 +2722,26 @@ export async function fetchLiveNews(): Promise<{
     .map(({ ts: _ts, ...rest }) => rest);
 
   const payload = { stories: deduped, updatedAt: new Date().toISOString() };
+  const newsLatency = Date.now() - newsStart;
   if (deduped.length > 0) {
     newsCache.entry = { data: payload, expiresAt: now + 300_000 };
+    updateProviderMetric('news_cal', {
+      status: 'live',
+      activeSource: 'Live RSS + Macro Calendar',
+      latencyMs: newsLatency,
+      lastSuccessAt: Date.now(),
+      isCachedFallback: false,
+      fallbackReason: undefined,
+    });
+  } else if (newsCache.entry?.data) {
+    updateProviderMetric('news_cal', {
+      status: 'cached',
+      activeSource: 'Cached RSS News Snapshot',
+      latencyMs: newsLatency,
+      isCachedFallback: true,
+      fallbackReason: 'RSS upstream returned zero stories; serving cache',
+    });
+    return newsCache.entry.data;
   }
   return payload;
   });
@@ -1936,10 +2936,21 @@ function computeTvDeviation(
 
 export async function fetchLiveCalendar(): Promise<LiveCalendarResponse> {
   const now = Date.now();
-  if (calendarCache.entry && calendarCache.entry.expiresAt > now) {
-    return calendarCache.entry.data;
+  if (calendarCache.entry) {
+    if (calendarCache.entry.expiresAt > now) {
+      return calendarCache.entry.data;
+    }
+    if (now - calendarCache.entry.expiresAt < 900_000) {
+      void fetchLiveCalendarFresh().catch(() => null);
+      return calendarCache.entry.data;
+    }
   }
+  return fetchLiveCalendarFresh();
+}
 
+async function fetchLiveCalendarFresh(): Promise<LiveCalendarResponse> {
+  const now = Date.now();
+  const calStart = Date.now();
   return coalesceInFlight('live-calendar', calendarCache.entry?.data, async () => {
 
   let events: LiveCalendarItem[] = [];
@@ -2158,8 +3169,27 @@ export async function fetchLiveCalendar(): Promise<LiveCalendarResponse> {
     updatedAt: new Date().toISOString(),
   };
 
+  const calLatency = Date.now() - calStart;
   if (events.length > 0) {
     calendarCache.entry = { data: payload, expiresAt: now + 1800_000 };
+    const isFailoverCal = source.includes('ForexFactory') || source.includes('Google Search');
+    updateProviderMetric('news_cal', {
+      status: isFailoverCal ? 'failover' : 'live',
+      activeSource: isFailoverCal ? `RSS + ${source}` : 'RSS + TradingView Cal',
+      latencyMs: calLatency,
+      lastSuccessAt: Date.now(),
+      isCachedFallback: false,
+      fallbackReason: isFailoverCal ? `Calendar fell back to ${source}` : undefined,
+    });
+  } else if (calendarCache.entry?.data) {
+    updateProviderMetric('news_cal', {
+      status: 'cached',
+      activeSource: 'Cached Macro Calendar Snapshot',
+      latencyMs: calLatency,
+      isCachedFallback: true,
+      fallbackReason: 'Macro calendar upstream failed; serving cached schedule',
+    });
+    return calendarCache.entry.data;
   }
   return payload;
   });
@@ -2180,6 +3210,26 @@ function formatIdrFlowLabel(amountIdr: number): string {
   return `${sign}Rp ${Math.round(abs).toLocaleString('en-US')}`;
 }
 
+const US_INDEX_CORE_CONSTITUENTS = new Set([
+  'NVDA', 'AAPL', 'MSFT', 'AMZN', 'GOOGL', 'GOOG', 'META', 'AVGO', 'TSLA', 'BRK.B',
+  'LLY', 'JPM', 'V', 'WMT', 'MA', 'XOM', 'UNH', 'ORCL', 'COST', 'HD', 'PG', 'NFLX',
+  'AMD', 'CRM', 'BAC', 'CVX', 'KO', 'PEP', 'TMO', 'ABBV', 'CSCO', 'ADBE', 'INTC',
+  'QCOM', 'TXN', 'AMAT', 'MU', 'PLTR', 'PANW', 'GS', 'MS', 'CAT', 'DIS', 'UBER',
+  'NOW', 'INTU', 'ISRG', 'LIN', 'BLK', 'TMUS', 'AMGN', 'SBUX', 'BA', 'ARM', 'CRWD',
+  'SNOW', 'MRVL', 'KLAC', 'LRCX', 'ASML', 'IBM', 'GE', 'RTX', 'PM', 'AXP',
+]);
+
+const IDX_INDEX_CORE_CONSTITUENTS = new Set([
+  'BBCA', 'BBRI', 'BMRI', 'BBNI', 'TLKM', 'ASII', 'BREN', 'TPIA', 'AMMN', 'BYAN',
+  'DSSA', 'DCII', 'CUAN', 'PANI', 'UNTR', 'ADRO', 'ICBP', 'INDF', 'KLBF', 'CPIN',
+  'PGAS', 'PTBA', 'MDKA', 'ANTM', 'INCO', 'GOTO', 'BRIS', 'ISAT', 'EXCL', 'SMGR',
+  'MYOR', 'MAPI', 'AMRT', 'MBMA', 'NCKL', 'MEDC', 'AKRA', 'INKP', 'TKIM', 'ITMG',
+]);
+
+const NON_INDEX_EXCLUSION_SYMBOLS = new Set([
+  'ANT', 'SPCX', 'SPY', 'QQQ', 'IWM', 'DIA', 'VOO', 'VTI', 'SQQQ', 'TQQQ', 'SOXL', 'SOXS',
+]);
+
 async function fetchTradingViewScan(
   region: 'america' | 'indonesia',
   sortBy: string,
@@ -2191,8 +3241,9 @@ async function fetchTradingViewScan(
     const baseFilters: Array<Record<string, unknown>> = [
       { left: 'type', operation: 'equal', right: 'stock' },
       { left: 'subtype', operation: 'equal', right: 'common' },
-      { left: 'close', operation: 'greater', right: region === 'indonesia' ? 50 : 2 },
-      { left: 'volume', operation: 'greater', right: region === 'indonesia' ? 50_000 : 250_000 },
+      { left: 'is_primary', operation: 'equal', right: true },
+      { left: 'close', operation: 'greater', right: region === 'indonesia' ? 60 : 5 },
+      { left: 'volume', operation: 'greater', right: region === 'indonesia' ? 100_000 : 300_000 },
       ...extraFilters,
     ];
     const res = await fetch(`https://scanner.tradingview.com/${region}/scan`, {
@@ -2236,6 +3287,10 @@ async function fetchTradingViewScan(
       const d = row.d;
       if (!d || d.length < 9) continue;
       const symbol = String(d[0] || '').trim().toUpperCase();
+      if (!symbol || NON_INDEX_EXCLUSION_SYMBOLS.has(symbol)) continue;
+      const exchange = String(d[9] || (region === 'indonesia' ? 'IDX' : 'NASDAQ/NYSE'));
+      if (region === 'america' && /OTC|PINK/i.test(exchange)) continue;
+
       const name = String(d[1] || symbol).slice(0, 42);
       const close = Number(d[2]);
       const changePct = Number(d[3]);
@@ -2244,18 +3299,23 @@ async function fetchTradingViewScan(
       const low = Number(d[6] ?? close);
       const vol = Number(d[7] ?? 0);
       const valTraded = Number(d[8] ?? close * vol);
-      const exchange = String(d[9] || (region === 'indonesia' ? 'IDX' : 'NASDAQ/NYSE'));
       const mcap = Number(d[10] ?? 0);
       const rvol = Number(d[11] ?? 1);
 
-      if (!symbol || !Number.isFinite(close) || close <= 0 || !Number.isFinite(changePct)) continue;
+      if (!Number.isFinite(close) || close <= 0 || !Number.isFinite(changePct)) continue;
       const isId = region === 'indonesia';
       const decimals = isId ? 0 : 2;
       const price = isId ? Math.round(close) : Number(close.toFixed(2));
-      const chgVal = isId ? Math.round(changeAbs) : Number(changeAbs.toFixed(2));
-      const prevClose = isId
-        ? Math.max(1, Math.round(close - changeAbs))
-        : Number(Math.max(0.01, close - changeAbs).toFixed(2));
+      const safeAbs = Number.isFinite(changeAbs) ? changeAbs : close - close / (1 + changePct / 100);
+      const prevRaw = Math.max(0.01, close - safeAbs);
+      const prevClose = isId ? Math.max(1, Math.round(prevRaw)) : Number(prevRaw.toFixed(2));
+      const chgVal = isId ? Math.round(price - prevClose) : Number((price - prevClose).toFixed(2));
+      const consistentPct =
+        prevRaw > 0 && Math.abs(((close - prevRaw) / prevRaw) * 100 - changePct) < 0.25
+          ? changePct
+          : prevClose > 0
+            ? ((price - prevClose) / prevClose) * 100
+            : changePct;
       const dHigh = isId ? Math.round(high) : Number(high.toFixed(2));
       const dLow = isId ? Math.round(low) : Number(low.toFixed(2));
 
@@ -2268,7 +3328,7 @@ async function fetchTradingViewScan(
         price,
         prevClose,
         changeValue: chgVal,
-        changePercent: Number(changePct.toFixed(2)),
+        changePercent: Number(consistentPct.toFixed(2)),
         dayHigh: dHigh,
         dayLow: dLow,
         volume: formatVolume(vol),
@@ -2772,32 +3832,39 @@ async function fetchIdxForeignFlowLists(): Promise<{
 }
 
 function computeIndexImpactScore(item: InternalMover, region: 'US' | 'ID'): number {
-  // True index movers combine: market-cap weight + institutional turnover + capped price displacement + RVOL + intraday range
-  const absMove = Math.min(12, Math.abs(item.changePercent));
-  const minTurn = region === 'ID' ? 1e9 : 1e6;
-  const logTurn = Math.max(0, Math.log10(Math.max(minTurn, item.dollarTurnover) / minTurn));
-  const mcapFloor = region === 'ID' ? 1e12 : 1e9;
-  const logCap = item.marketCap
-    ? Math.max(0.4, Math.log10(Math.max(mcapFloor, item.marketCap) / mcapFloor) * 1.4)
-    : Math.max(0.4, logTurn * 0.65);
+  // Cap-weighted index contribution formula: MarketCap^0.68 * (|chg%| + 0.35) * CoreIndexWeight * RVOL
+  const mcapScale = region === 'ID' ? 1e13 : 1e11;
+  const fallbackCap = region === 'ID' ? 8e12 : 2.5e10;
+  const mcap = Math.max(region === 'ID' ? 1e12 : 1e9, item.marketCap ?? fallbackCap);
+  const capWeight = Math.pow(mcap / mcapScale, 0.68);
+  const absMove = Math.min(12, Math.abs(item.changePercent)) + 0.35;
 
-  const intradayRangePct =
-    item.price > 0 && item.dayHigh > item.dayLow
-      ? Math.min(0.08, (item.dayHigh - item.dayLow) / item.price)
-      : 0;
-  const rangeBoost = 1 + intradayRangePct * 6;
-  const rvolBoost = Math.max(0.75, Math.min(2.2, item.relativeVolume ?? 1));
+  const minTurn = region === 'ID' ? 1e10 : 5e7;
+  const turnFactor = 1 + Math.max(0, Math.log10(Math.max(minTurn, item.dollarTurnover) / minTurn)) * 0.25;
+  const rvolBoost = Math.max(0.85, Math.min(1.45, item.relativeVolume ?? 1));
+  const coreSet = region === 'ID' ? IDX_INDEX_CORE_CONSTITUENTS : US_INDEX_CORE_CONSTITUENTS;
+  const constituentBoost = coreSet.has(item.symbol) ? 1.25 : 0.72;
 
-  // Balance directional shock with heavyweight capitalization & liquidity
-  return (absMove * 1.6 + 0.85) * (1 + logTurn * 0.48 + logCap * 0.62) * rangeBoost * rvolBoost;
+  return capWeight * absMove * turnFactor * rvolBoost * constituentBoost;
 }
 
 export async function fetchTopStockMovers(): Promise<StocksMoversResponse> {
   const now = Date.now();
-  if (stocksMoversCache.entry && stocksMoversCache.entry.expiresAt > now) {
-    return stocksMoversCache.entry.data;
+  if (stocksMoversCache.entry) {
+    if (stocksMoversCache.entry.expiresAt > now) {
+      return stocksMoversCache.entry.data;
+    }
+    if (now - stocksMoversCache.entry.expiresAt < 900_000) {
+      void fetchTopStockMoversFresh().catch(() => null);
+      return stocksMoversCache.entry.data;
+    }
   }
+  return fetchTopStockMoversFresh();
+}
 
+async function fetchTopStockMoversFresh(): Promise<StocksMoversResponse> {
+  const now = Date.now();
+  const moversStart = Date.now();
   return coalesceInFlight('stock-movers', stocksMoversCache.entry?.data, async () => {
 
   const [
@@ -2817,75 +3884,108 @@ export async function fetchTopStockMovers(): Promise<StocksMoversResponse> {
     fetchYahooScreenerStocks('most_actives'),
     fetchYahooScreenerStocks('day_gainers'),
     fetchYahooScreenerStocks('day_losers'),
-    fetchTradingViewScan('america', 'Value.Traded', 'desc', [], 25),
+    fetchTradingViewScan(
+      'america',
+      'Value.Traded',
+      'desc',
+      [
+        { left: 'market_cap_basic', operation: 'greater', right: 30_000_000_000 },
+        { left: 'Value.Traded', operation: 'greater', right: 150_000_000 },
+      ],
+      35
+    ),
     fetchTradingViewScan(
       'america',
       'market_cap_basic',
       'desc',
-      [{ left: 'Value.Traded', operation: 'greater', right: 20_000_000 }],
-      20
+      [{ left: 'Value.Traded', operation: 'greater', right: 100_000_000 }],
+      35
     ),
     fetchTradingViewScan(
       'america',
       'change',
       'desc',
-      [{ left: 'Value.Traded', operation: 'greater', right: 15_000_000 }],
-      20
+      [
+        { left: 'market_cap_basic', operation: 'greater', right: 10_000_000_000 },
+        { left: 'Value.Traded', operation: 'greater', right: 50_000_000 },
+      ],
+      25
     ),
     fetchTradingViewScan(
       'america',
       'change',
       'asc',
-      [{ left: 'Value.Traded', operation: 'greater', right: 15_000_000 }],
-      20
+      [
+        { left: 'market_cap_basic', operation: 'greater', right: 10_000_000_000 },
+        { left: 'Value.Traded', operation: 'greater', right: 50_000_000 },
+      ],
+      25
     ),
-    fetchTradingViewScan('indonesia', 'Value.Traded', 'desc', [], 25),
+    fetchTradingViewScan(
+      'indonesia',
+      'Value.Traded',
+      'desc',
+      [
+        { left: 'market_cap_basic', operation: 'greater', right: 15_000_000_000_000 },
+        { left: 'Value.Traded', operation: 'greater', right: 15_000_000_000 },
+      ],
+      35
+    ),
     fetchTradingViewScan(
       'indonesia',
       'market_cap_basic',
       'desc',
       [{ left: 'Value.Traded', operation: 'greater', right: 10_000_000_000 }],
-      20
+      35
     ),
     fetchTradingViewScan(
       'indonesia',
       'change',
       'desc',
       [
-        { left: 'Value.Traded', operation: 'greater', right: 5_000_000_000 },
-        { left: 'close', operation: 'greater', right: 65 },
+        { left: 'market_cap_basic', operation: 'greater', right: 5_000_000_000_000 },
+        { left: 'Value.Traded', operation: 'greater', right: 8_000_000_000 },
+        { left: 'close', operation: 'greater', right: 100 },
       ],
-      20
+      25
     ),
     fetchTradingViewScan(
       'indonesia',
       'change',
       'asc',
       [
-        { left: 'Value.Traded', operation: 'greater', right: 5_000_000_000 },
-        { left: 'close', operation: 'greater', right: 65 },
+        { left: 'market_cap_basic', operation: 'greater', right: 5_000_000_000_000 },
+        { left: 'Value.Traded', operation: 'greater', right: 8_000_000_000 },
+        { left: 'close', operation: 'greater', right: 100 },
       ],
-      20
+      25
     ),
     fetchIdxForeignFlowLists(),
   ]);
 
+  const combinedTvIdxCount =
+    tvIdxImpact.length +
+    tvIdxBlueChip.length +
+    tvIdxGainersLiquid.length +
+    tvIdxLosersLiquid.length;
+
   // Parallel direct Yahoo Finance fallback if TradingView returned thin/empty results
   const [yahooUsFallback, yahooIdxFallback] = await Promise.all([
     tvUsImpact.length + tvUsMegaCap.length < 12 ? fetchYahooDirectBasket('US') : Promise.resolve([]),
-    tvIdxImpact.length + tvIdxBlueChip.length < 12 ? fetchYahooDirectBasket('ID') : Promise.resolve([]),
+    combinedTvIdxCount < 14 ? fetchYahooDirectBasket('ID') : Promise.resolve([]),
   ]);
 
-  // 1. Build guaranteed 10-stock US buckets (Impact, Gainers, Losers)
+  // 1. Build guaranteed 10-stock US buckets (Index Impact, Gainers, Losers)
   const usPoolMap = new Map<string, InternalMover>();
   for (const item of [
     ...tvUsMegaCap,
     ...tvUsImpact,
-    ...parseYahooQuotesToMovers([...yActives, ...yGainers, ...yLosers]),
     ...tvUsGainers,
     ...tvUsLosers,
     ...yahooUsFallback,
+    ...parseYahooQuotesToMovers([...yActives, ...yGainers, ...yLosers]),
   ]) {
+    if (NON_INDEX_EXCLUSION_SYMBOLS.has(item.symbol)) continue;
     const existing = usPoolMap.get(item.symbol);
     if (!existing) {
       usPoolMap.set(item.symbol, item);
@@ -2895,17 +3995,21 @@ export async function fetchTopStockMovers(): Promise<StocksMoversResponse> {
   }
   const usPool = Array.from(usPoolMap.values());
 
-  const usInstitutional = usPool.filter((s) => s.dollarTurnover >= 40_000_000 && s.price >= 5);
-  const usImpactBase = usInstitutional.length >= 10 ? usInstitutional : usPool;
+  const usIndexHeavyweights = usPool.filter(
+    (s) => ((s.marketCap ?? 0) >= 25_000_000_000 || US_INDEX_CORE_CONSTITUENTS.has(s.symbol)) && s.dollarTurnover >= 80_000_000
+  );
+  const usImpactBase = usIndexHeavyweights.length >= 10 ? usIndexHeavyweights : usPool;
   const usImpactRaw = [...usImpactBase]
     .sort((a, b) => computeIndexImpactScore(b, 'US') - computeIndexImpactScore(a, 'US'))
     .slice(0, 10);
 
-  const usLiquidMovers = usPool.filter((s) => s.dollarTurnover >= 15_000_000 && s.price >= 5);
-  const usMoverPool = usLiquidMovers.length >= 15 ? usLiquidMovers : usPool;
+  const usLiquidIndexMovers = usPool.filter(
+    (s) => ((s.marketCap ?? 0) >= 10_000_000_000 || US_INDEX_CORE_CONSTITUENTS.has(s.symbol)) && s.dollarTurnover >= 40_000_000 && s.price >= 5
+  );
+  const usMoverPool = usLiquidIndexMovers.length >= 14 ? usLiquidIndexMovers : usPool;
 
   const usGainersList = usMoverPool
-    .filter((s) => s.changePercent >= 0)
+    .filter((s) => s.changePercent > 0)
     .sort((a, b) => b.changePercent - a.changePercent);
   const usGainersRaw = (
     usGainersList.length >= 10
@@ -2922,7 +4026,7 @@ export async function fetchTopStockMovers(): Promise<StocksMoversResponse> {
       : [...usPool].sort((a, b) => a.changePercent - b.changePercent)
   ).slice(0, 10);
 
-  // 2. Build guaranteed 10-stock IDX buckets (Impact, Gainers, Losers)
+  // 2. Build guaranteed 10-stock IDX buckets (Index Impact, Gainers, Losers)
   const idxPoolMap = new Map<string, InternalMover>();
   for (const item of [
     ...tvIdxBlueChip,
@@ -2940,11 +4044,13 @@ export async function fetchTopStockMovers(): Promise<StocksMoversResponse> {
   }
   const idxPool = Array.from(idxPoolMap.values());
 
-  const idxInstitutional = idxPool.filter((s) => s.dollarTurnover >= 25_000_000_000 && s.price >= 100);
-  const idxLiquidFallback = idxPool.filter((s) => s.dollarTurnover >= 5_000_000_000 && s.price >= 60);
+  const idxIndexHeavyweights = idxPool.filter(
+    (s) => ((s.marketCap ?? 0) >= 15_000_000_000_000 || IDX_INDEX_CORE_CONSTITUENTS.has(s.symbol)) && s.dollarTurnover >= 12_000_000_000 && s.price >= 100
+  );
+  const idxLiquidFallback = idxPool.filter((s) => s.dollarTurnover >= 8_000_000_000 && s.price >= 100);
   const idxImpactBase =
-    idxInstitutional.length >= 10
-      ? idxInstitutional
+    idxIndexHeavyweights.length >= 10
+      ? idxIndexHeavyweights
       : idxLiquidFallback.length >= 10
         ? idxLiquidFallback
         : idxPool;
@@ -2952,9 +4058,15 @@ export async function fetchTopStockMovers(): Promise<StocksMoversResponse> {
     .sort((a, b) => computeIndexImpactScore(b, 'ID') - computeIndexImpactScore(a, 'ID'))
     .slice(0, 10);
 
-  const idxMoverBase = idxLiquidFallback.length >= 15 ? idxLiquidFallback : idxPool;
+  const idxMoverBase =
+    idxPool.filter((s) => ((s.marketCap ?? 0) >= 5_000_000_000_000 || IDX_INDEX_CORE_CONSTITUENTS.has(s.symbol)) && s.dollarTurnover >= 8_000_000_000 && s.price >= 100).length >= 14
+      ? idxPool.filter((s) => ((s.marketCap ?? 0) >= 5_000_000_000_000 || IDX_INDEX_CORE_CONSTITUENTS.has(s.symbol)) && s.dollarTurnover >= 8_000_000_000 && s.price >= 100)
+      : idxLiquidFallback.length >= 14
+        ? idxLiquidFallback
+        : idxPool;
+
   const idxGainersList = idxMoverBase
-    .filter((s) => s.changePercent >= 0)
+    .filter((s) => s.changePercent > 0)
     .sort((a, b) => b.changePercent - a.changePercent);
   const idxGainersRaw = (
     idxGainersList.length >= 10
@@ -3052,8 +4164,41 @@ export async function fetchTopStockMovers(): Promise<StocksMoversResponse> {
   const idxOpen = getServerSessionInfo('IHSG', new Date(now)).isOpen;
   const moversTtl = usOpen || idxOpen ? 10_000 : 600_000;
 
+  const moversLatency = Date.now() - moversStart;
   if (payload.us.impact.length >= 10 && payload.indonesia.impact.length >= 10) {
     stocksMoversCache.entry = { data: payload, expiresAt: now + moversTtl };
+  }
+
+  if (combinedTvIdxCount < 10 && yahooIdxFallback.length > 0) {
+    updateProviderMetric('idx_proxy', {
+      status: 'failover',
+      activeSource: 'Yahoo .JK Basket Proxy',
+      latencyMs: moversLatency,
+      lastSuccessAt: Date.now(),
+      isCachedFallback: false,
+      fallbackReason: 'IDX TradingView scanner sparse; Yahoo .JK proxy active',
+    });
+  } else if (payload.indonesia.impact.length === 0 && stocksMoversCache.entry?.data) {
+    updateProviderMetric('idx_proxy', {
+      status: 'cached',
+      activeSource: 'Cached IDX Movers Snapshot',
+      latencyMs: moversLatency,
+      isCachedFallback: true,
+      fallbackReason: 'IDX upstream unavailable; serving cached movers',
+    });
+    return stocksMoversCache.entry.data;
+  } else {
+    updateProviderMetric('idx_proxy', {
+      status: 'live',
+      activeSource:
+        yahooIdxFallback.length > 0
+          ? 'IDX TV Scanner + Yahoo .JK'
+          : 'IDX TV Scanner + Foreign Flow',
+      latencyMs: moversLatency,
+      lastSuccessAt: Date.now(),
+      isCachedFallback: false,
+      fallbackReason: undefined,
+    });
   }
   return payload;
   });
@@ -3138,15 +4283,18 @@ export async function fetchPortfolioQuotes(
         if (!meta) return cached?.data ?? null;
 
         let price = Number(meta.regularMarketPrice);
-        const rawPrev = Number(
+        let rawPrev = Number(
           meta.regularMarketPreviousClose ?? meta.previousClose ?? meta.chartPreviousClose ?? price
         );
         if (!Number.isFinite(price) || price <= 0) return cached?.data ?? null;
 
         const isCrypto = yahooSymbol === 'BTC-USD' || yahooSymbol === 'ETH-USD';
         if (isCrypto) {
-          const cb = await fetchCoinbaseSpotTicker(yahooSymbol as 'BTC-USD' | 'ETH-USD');
-          if (cb) price = cb.price;
+          const cb = await fetchCoinbaseSpotStats(yahooSymbol as 'BTC-USD' | 'ETH-USD');
+          if (cb) {
+            price = cb.price;
+            rawPrev = cb.open24h;
+          }
         }
 
         const isIdr =
@@ -3159,7 +4307,7 @@ export async function fetchPortfolioQuotes(
         const { prevClose, changeValue, changePercent } = resolveConsistentChange(
           price,
           rawPrev,
-          meta.regularMarketChangePercent,
+          isCrypto ? ((price - rawPrev) / Math.max(1e-6, rawPrev)) * 100 : meta.regularMarketChangePercent,
           decimals,
           isCrypto
         );
@@ -3237,13 +4385,13 @@ export async function fetchPortfolioQuotes(
 
 const portfolioSeriesCache = new Map<
   string,
-  CacheEntry<{ points: number[]; timestamps: number[]; prevClose: number }>
+  CacheEntry<{ points: number[]; timestamps: number[]; candles: CandlePoint[]; prevClose: number }>
 >();
 
 export async function fetchPortfolioSymbolSeries(
   yahooSymbol: string,
   timeframe: string
-): Promise<{ points: number[]; timestamps: number[]; prevClose: number } | null> {
+): Promise<{ points: number[]; timestamps: number[]; candles: CandlePoint[]; prevClose: number } | null> {
   const sym = yahooSymbol.trim().toUpperCase();
   const key = `${sym}:${timeframe}`;
   const now = Date.now();
@@ -3253,7 +4401,10 @@ export async function fetchPortfolioSymbolSeries(
     return cached.data;
   }
 
-  const rangeMap: Record<string, { range: string; interval: string }> = {
+  const rangeMap: Record<string, { range: string; interval: string; sliceTail?: number }> = {
+    '15M': { range: '1d', interval: '1m', sliceTail: 30 },
+    '1H': { range: '1d', interval: '2m', sliceTail: 42 },
+    '4H': { range: '2d', interval: '5m', sliceTail: 48 },
     '1D': { range: '1d', interval: sessionInfo.isOpen ? '5m' : '15m' },
     '5D': { range: '5d', interval: '30m' },
     '1W': { range: '5d', interval: '30m' },
@@ -3264,7 +4415,7 @@ export async function fetchPortfolioSymbolSeries(
     '1Y': { range: '1y', interval: '1wk' },
     '5Y': { range: '5y', interval: '1mo' },
     ALL: { range: '5y', interval: '1mo' },
-    MAX: { range: '1d', interval: '5m' },
+    MAX: { range: '5y', interval: '1mo' },
   };
   const params = rangeMap[timeframe] ?? rangeMap['1D'];
 
@@ -3283,42 +4434,78 @@ export async function fetchPortfolioSymbolSeries(
         result?: Array<{
           meta?: Record<string, unknown>;
           timestamp?: number[];
-          indicators?: { quote?: Array<{ close?: Array<number | null> }> };
+          indicators?: {
+            quote?: Array<{
+              open?: Array<number | null>;
+              high?: Array<number | null>;
+              low?: Array<number | null>;
+              close?: Array<number | null>;
+            }>;
+          };
         }>;
       };
     };
 
     const item = json.chart?.result?.[0];
-    const rawCloses = item?.indicators?.quote?.[0]?.close ?? [];
+    const quoteObj = item?.indicators?.quote?.[0];
+    const rawCloses = quoteObj?.close ?? [];
+    const rawOpens = quoteObj?.open ?? [];
+    const rawHighs = quoteObj?.high ?? [];
+    const rawLows = quoteObj?.low ?? [];
     const rawTs = item?.timestamp ?? [];
     const points: number[] = [];
     const timestamps: number[] = [];
+    const candles: CandlePoint[] = [];
 
     for (let i = 0; i < rawCloses.length; i++) {
       const val = rawCloses[i];
       const ts = rawTs[i];
       if (typeof val === 'number' && Number.isFinite(val)) {
+        const tsMs = typeof ts === 'number' ? ts * 1000 : now;
+        const prevC = points.length > 0 ? points[points.length - 1] : val;
+        const rawO = rawOpens[i];
+        const o = typeof rawO === 'number' && Number.isFinite(rawO) ? rawO : prevC;
+        const rawH = rawHighs[i];
+        const rawL = rawLows[i];
+        const h = typeof rawH === 'number' && Number.isFinite(rawH) ? Math.max(rawH, o, val) : Math.max(o, val);
+        const l = typeof rawL === 'number' && Number.isFinite(rawL) ? Math.min(rawL, o, val) : Math.min(o, val);
         points.push(val);
-        timestamps.push(typeof ts === 'number' ? ts * 1000 : now);
+        timestamps.push(tsMs);
+        candles.push({ t: tsMs, o, h, l, c: val });
       }
     }
     const lastPrice = Number(item?.meta?.regularMarketPrice);
     if (Number.isFinite(lastPrice) && lastPrice > 0 && points.length > 0) {
       points[points.length - 1] = lastPrice;
+      const lastBar = candles[candles.length - 1];
+      if (lastBar) {
+        lastBar.c = lastPrice;
+        lastBar.h = Math.max(lastBar.h, lastPrice);
+        lastBar.l = Math.min(lastBar.l, lastPrice);
+      }
     }
     if (points.length === 0) return cached?.data ?? null;
 
+    const finalPoints = params.sliceTail && points.length > params.sliceTail ? points.slice(-params.sliceTail) : points;
+    const finalTimestamps =
+      params.sliceTail && timestamps.length > params.sliceTail ? timestamps.slice(-params.sliceTail) : timestamps;
+    const finalCandles =
+      params.sliceTail && candles.length > params.sliceTail ? candles.slice(-params.sliceTail) : candles;
+
     const prevClose = Number(
-      item?.meta?.chartPreviousClose ?? item?.meta?.previousClose ?? points[0]
+      item?.meta?.chartPreviousClose ?? item?.meta?.previousClose ?? finalPoints[0]
     );
     const data = {
-      points,
-      timestamps,
-      prevClose: Number.isFinite(prevClose) && prevClose > 0 ? prevClose : points[0],
+      points: finalPoints,
+      timestamps: finalTimestamps,
+      candles: finalCandles,
+      prevClose: Number.isFinite(prevClose) && prevClose > 0 ? prevClose : finalPoints[0],
     };
 
     const ttl =
-      (timeframe === '1D' || timeframe === 'MAX') && sessionInfo.isOpen ? 1_000 : 180_000;
+      (timeframe === '1D' || timeframe === 'MAX' || Boolean(params.sliceTail)) && sessionInfo.isOpen
+        ? 1_500
+        : 180_000;
     portfolioSeriesCache.set(key, { data, expiresAt: now + ttl });
     return data;
   } catch {
@@ -3356,8 +4543,10 @@ export interface SymbolDetailResponse {
   commentary: string;
   points: number[];
   timestamps: number[];
+  candles: CandlePoint[];
   chart1D: number[];
   timestamps1D: number[];
+  candles1D: CandlePoint[];
   marketSessionOpen: boolean;
   sessionStateLabel: string;
   sessionProgressRatio: number;
@@ -3388,7 +4577,7 @@ export async function fetchSymbolDetail(
       .catch(() => null),
     timeframe === '1D' ? Promise.resolve(null) : fetchPortfolioSymbolSeries(sym, timeframe),
     sym === 'BTC-USD' || sym === 'ETH-USD'
-      ? fetchCoinbaseSpotTicker(sym)
+      ? fetchCoinbaseSpotStats(sym)
       : Promise.resolve(null),
   ]);
 
@@ -3399,7 +4588,12 @@ export async function fetchSymbolDetail(
           meta?: Record<string, unknown>;
           timestamp?: number[];
           indicators?: {
-            quote?: Array<{ close?: Array<number | null>; open?: Array<number | null> }>;
+            quote?: Array<{
+              close?: Array<number | null>;
+              open?: Array<number | null>;
+              high?: Array<number | null>;
+              low?: Array<number | null>;
+            }>;
           };
         }>;
       };
@@ -3410,11 +4604,14 @@ export async function fetchSymbolDetail(
   if (!meta) return null;
 
   let price = Number(meta.regularMarketPrice);
-  if (cbTicker) price = cbTicker.price;
-  if (!Number.isFinite(price) || price <= 0) return null;
-  const rawPrev = Number(
+  let rawPrev = Number(
     meta.regularMarketPreviousClose ?? meta.previousClose ?? meta.chartPreviousClose ?? price
   );
+  if (cbTicker) {
+    price = cbTicker.price;
+    rawPrev = cbTicker.open24h;
+  }
+  if (!Number.isFinite(price) || price <= 0) return null;
 
   const isIndex = sym.startsWith('^') || sym === 'DX-Y.NYB' || String(meta.instrumentType || '').toUpperCase() === 'INDEX';
   const isIdr =
@@ -3429,33 +4626,78 @@ export async function fetchSymbolDetail(
   const { prevClose, changeValue, changePercent } = resolveConsistentChange(
     price,
     rawPrev,
-    meta.regularMarketChangePercent,
+    cbTicker ? ((price - rawPrev) / Math.max(1e-6, rawPrev)) * 100 : meta.regularMarketChangePercent,
     decimals,
     isCrypto
   );
 
-  const rawCloses = item?.indicators?.quote?.[0]?.close ?? [];
+  const rawQuoteObj = item?.indicators?.quote?.[0];
+  const rawCloses = rawQuoteObj?.close ?? [];
+  const rawHighs1D = rawQuoteObj?.high ?? [];
+  const rawLows1D = rawQuoteObj?.low ?? [];
+  const rawOpens1D = rawQuoteObj?.open ?? [];
   const rawTs = item?.timestamp ?? [];
   const chart1D: number[] = [];
   const timestamps1D: number[] = [];
+  const candles1D: CandlePoint[] = [];
   for (let i = 0; i < rawCloses.length; i++) {
     const val = rawCloses[i];
     if (typeof val === 'number' && Number.isFinite(val)) {
-      chart1D.push(Number(val.toFixed(decimals)));
-      timestamps1D.push(typeof rawTs[i] === 'number' ? rawTs[i] * 1000 : now);
+      const c = Number(val.toFixed(decimals));
+      const tsMs = typeof rawTs[i] === 'number' ? rawTs[i] * 1000 : now;
+      const prevC = chart1D.length > 0 ? chart1D[chart1D.length - 1] : c;
+      const rawO = rawOpens1D[i];
+      const o = typeof rawO === 'number' && Number.isFinite(rawO) ? Number(rawO.toFixed(decimals)) : prevC;
+      const rawH = rawHighs1D[i];
+      const rawL = rawLows1D[i];
+      const h =
+        typeof rawH === 'number' && Number.isFinite(rawH)
+          ? Number(Math.max(rawH, o, c).toFixed(decimals))
+          : Number(Math.max(o, c).toFixed(decimals));
+      const l =
+        typeof rawL === 'number' && Number.isFinite(rawL)
+          ? Number(Math.min(rawL, o, c).toFixed(decimals))
+          : Number(Math.min(o, c).toFixed(decimals));
+
+      chart1D.push(c);
+      timestamps1D.push(tsMs);
+      candles1D.push({ t: tsMs, o, h, l, c });
     }
   }
   if (chart1D.length === 0) {
     chart1D.push(prevClose, price);
     timestamps1D.push(now - 3600_000, now);
+    candles1D.push(
+      { t: now - 3600_000, o: prevClose, h: Math.max(prevClose, price), l: Math.min(prevClose, price), c: prevClose },
+      { t: now, o: prevClose, h: Math.max(prevClose, price), l: Math.min(prevClose, price), c: price }
+    );
   } else {
     chart1D[chart1D.length - 1] = Number(price.toFixed(decimals));
+    const lastBar = candles1D[candles1D.length - 1];
+    if (lastBar) {
+      lastBar.c = Number(price.toFixed(decimals));
+      lastBar.h = Number(Math.max(lastBar.h, lastBar.c).toFixed(decimals));
+      lastBar.l = Number(Math.min(lastBar.l, lastBar.c).toFixed(decimals));
+    }
   }
 
   const activePoints =
-    timeframe === '1D' || !seriesRes?.points.length ? chart1D : seriesRes.points;
+    timeframe === '1D' || !seriesRes?.points.length ? chart1D : [...seriesRes.points];
+  if (activePoints.length > 0) {
+    activePoints[activePoints.length - 1] = Number(price.toFixed(decimals));
+  }
   const activeTimestamps =
     timeframe === '1D' || !seriesRes?.timestamps.length ? timestamps1D : seriesRes.timestamps;
+  const activeCandles: CandlePoint[] =
+    timeframe === '1D' || !seriesRes?.candles?.length
+      ? candles1D
+      : seriesRes.candles.map((bar) => ({
+          t: bar.t,
+          o: Number(bar.o.toFixed(decimals)),
+          h: Number(bar.h.toFixed(decimals)),
+          l: Number(bar.l.toFixed(decimals)),
+          c: Number(bar.c.toFixed(decimals)),
+        }));
 
   const rawOpens = item?.indicators?.quote?.[0]?.open ?? [];
   const regOpen = Number(meta.regularMarketOpen);
@@ -3555,8 +4797,10 @@ export async function fetchSymbolDetail(
     )}–${formatStatNumber(dayHighNum, decimals, prefix)} band · Daily Signal: ${tier} (${w52Pct}th 52W pct).`,
     points: activePoints,
     timestamps: activeTimestamps,
+    candles: activeCandles,
     chart1D,
     timestamps1D,
+    candles1D,
     marketSessionOpen: sessionInfo.isOpen,
     sessionStateLabel: sessionInfo.stateLabel,
     sessionProgressRatio: sessionInfo.progressRatio,
@@ -4201,6 +5445,8 @@ export interface MarketIntelligencePayload {
   }>;
   stocksAndFlowSummary: string;
   forwardPrediction: string;
+  sessionConditionAndTrigger?: string;
+  oneSentenceSummary?: string;
   indexSessions: IndexSessionBrief[];
   aiRefined: boolean;
 }
@@ -4379,10 +5625,20 @@ function buildMacroImplicationText(ev: LiveCalendarItem): string {
 
 export async function fetchMarketIntelligence(): Promise<MarketIntelligencePayload> {
   const now = Date.now();
-  if (intelligenceCache.entry && intelligenceCache.entry.expiresAt > now) {
-    return intelligenceCache.entry.data;
+  if (intelligenceCache.entry) {
+    if (intelligenceCache.entry.expiresAt > now) {
+      return intelligenceCache.entry.data;
+    }
+    if (now - intelligenceCache.entry.expiresAt < 900_000) {
+      void fetchMarketIntelligenceFresh().catch(() => null);
+      return intelligenceCache.entry.data;
+    }
   }
+  return fetchMarketIntelligenceFresh();
+}
 
+async function fetchMarketIntelligenceFresh(): Promise<MarketIntelligencePayload> {
+  const now = Date.now();
   return coalesceInFlight('market-intel', intelligenceCache.entry?.data, async () => {
 
   const nowDate = new Date(now);
@@ -4400,6 +5656,8 @@ export async function fetchMarketIntelligence(): Promise<MarketIntelligencePaylo
 
   const qById = new Map(quotes.map((q) => [q.id, q]));
   const us10y = qById.get('US10Y');
+  const us30y = qById.get('US30Y');
+  const id10y = qById.get('ID10Y');
   const dxy = qById.get('DXY');
   const usdidr = qById.get('USDIDR');
   const wti = qById.get('WTI');
@@ -4407,11 +5665,30 @@ export async function fetchMarketIntelligence(): Promise<MarketIntelligencePaylo
   const btc = qById.get('BTCUSD');
 
   const usLeader = movers?.us?.impact?.[0];
+  const usTop3 = (movers?.us?.impact ?? []).slice(0, 3);
   const usGainer = movers?.us?.gainers?.[0];
   const usLoser = movers?.us?.losers?.[0];
   const idxLeader = movers?.indonesia?.impact?.[0];
+  const idxTop3 = (movers?.indonesia?.impact ?? []).slice(0, 3);
   const idxBuyTop = movers?.indonesia?.foreignBuy?.[0];
   const idxSellTop = movers?.indonesia?.foreignSell?.[0];
+
+  // Quantitative cross-asset factor metrics for thesis construction
+  const yieldCurveBps = us10y && us30y ? (us30y.price - us10y.price) * 100 : 35;
+  const idUsSpreadBps = id10y && us10y ? (id10y.price - us10y.price) * 100 : 270;
+  const macroTighteningScore =
+    (dxy?.changePercent ?? 0) * 1.4 + (us10y?.changePercent ?? 0) * 0.6;
+  const macroRegimeLabel =
+    macroTighteningScore >= 0.45
+      ? 'Tightening Liquidity & Strong Dollar'
+      : macroTighteningScore <= -0.45
+        ? 'Easing Financial Conditions & Rate Relief'
+        : 'Balanced Rates & Dollar Equilibrium';
+
+  const usBreadthNeg = (movers?.us?.impact ?? []).filter((s) => s.changePercent < 0).length;
+  const usBreadthTotal = Math.max(1, (movers?.us?.impact ?? []).length);
+  const idxBreadthPos = (movers?.indonesia?.impact ?? []).filter((s) => s.changePercent >= 0).length;
+  const idxBreadthTotal = Math.max(1, (movers?.indonesia?.impact ?? []).length);
 
   const trackedIds: Array<{ id: string; symbol: string; name: string; region: IndexSessionBrief['region'] }> = [
     { id: 'SPX', symbol: 'SPX', name: 'S&P 500 Index', region: 'US' },
@@ -4443,55 +5720,84 @@ export async function fetchMarketIntelligence(): Promise<MarketIntelligencePaylo
       const v = parseFloat(String(raw).replace(/[^0-9.\-]/g, ''));
       return Number.isFinite(v) ? v : NaN;
     };
+    const openNum = parseNum(q?.open);
+    const highNum = parseNum(q?.dayHigh);
+    const lowNum = parseNum(q?.dayLow);
+    const gapPct = Number.isFinite(openNum) && q?.prevClose ? ((openNum - q.prevClose) / q.prevClose) * 100 : 0;
+    const ibsPct =
+      Number.isFinite(highNum) && Number.isFinite(lowNum) && highNum > lowNum && priceNum > 0
+        ? Math.round(((priceNum - lowNum) / (highNum - lowNum)) * 100)
+        : 50;
+    const fgNow = q?.fearGreed7d?.[q.fearGreed7d.length - 1] ?? 50;
+    const fgLabel = fgNow >= 75 ? 'Extreme Greed' : fgNow >= 55 ? 'Greed' : fgNow <= 24 ? 'Extreme Fear' : fgNow <= 44 ? 'Fear' : 'Neutral';
+
     const activePhase = resolveIndexPhase(meta.id, nowDate);
     const signalTier = computeServerSignalTier({
       assetId: meta.id,
       changePercent: chgPct,
       price: priceNum,
-      open: parseNum(q?.open),
+      open: openNum,
       prevClose: q?.prevClose,
-      dayHigh: parseNum(q?.dayHigh),
-      dayLow: parseNum(q?.dayLow),
+      dayHigh: highNum,
+      dayLow: lowNum,
       series: q?.chart1D,
       w52Pct: q?.w52Pct ?? 50,
     });
 
-    const macroCue =
+    const macroThesis =
       meta.region === 'US'
-        ? usCalNext
-          ? `Key USD catalyst: ${usCalNext.title} (${usCalNext.timeWib}, est ${usCalNext.forecast}).`
-          : 'Focus stays on US 10Y yields and Treasury liquidity.'
+        ? `Thesis hinges on discount-rate transmission (${us10y?.price.toFixed(3) ?? '4.97'}% US10Y, 10s30s ${yieldCurveBps >= 0 ? '+' : ''}${yieldCurveBps.toFixed(1)} bps)${
+            usCalNext ? ` ahead of ${usCalNext.title} (${usCalNext.timeWib}, consensus ${usCalNext.forecast})` : ''
+          }.`
         : meta.region === 'Indonesia'
-          ? idCalNext
-            ? `Jakarta macro focus: ${idCalNext.title} (${idCalNext.timeWib}) alongside USD/IDR near ${usdidr?.price.toLocaleString('en-US') || '16,200'}.`
-            : `USD/IDR near ${usdidr?.price.toLocaleString('en-US') || '16,200'} & Bank Indonesia liquidity posture remain key opening drivers.`
-          : asiaCalNext
-            ? `Regional watch: ${asiaCalNext.currency} ${asiaCalNext.title} (${asiaCalNext.timeWib}).`
-            : `Overnight Wall Street lead (${qById.get('IXIC')?.changePercent.toFixed(2) ?? '0.00'}% NASDAQ) and DXY (${dxy?.price.toFixed(3) ?? '103.7'}) guide Asia open.`;
+          ? `Thesis tracks carry compression (${idUsSpreadBps >= 0 ? '+' : ''}${idUsSpreadBps.toFixed(0)} bps ID–US 10Y spread) and FX stability with USD/IDR at ${
+              usdidr?.price.toLocaleString('en-US') || '18,260'
+            }${idCalNext ? ` alongside ${idCalNext.title} (${idCalNext.timeWib})` : ''}.`
+          : `Cross-market beta ties ${meta.symbol} to overnight NASDAQ factor dispersion (${
+              qById.get('IXIC')?.changePercent.toFixed(2) ?? '0.00'
+            }%) and DXY (${dxy?.price.toFixed(3) ?? '103.7'})${
+              asiaCalNext ? `, with ${asiaCalNext.currency} ${asiaCalNext.title} as local catalyst` : ''
+            }.`;
 
-    const moversLine =
+    const attributionText =
       meta.region === 'US'
-        ? usLeader
-          ? `High-impact tape led by ${usLeader.symbol} (${usLeader.changePercent >= 0 ? '+' : ''}${usLeader.changePercent.toFixed(2)}%); top gainer ${usGainer?.symbol ?? 'NVDA'} vs laggard ${usLoser?.symbol ?? 'DOW'}.`
-          : 'Mega-cap tech and cyclical financials set intraday breadth.'
+        ? usTop3.length > 0
+          ? `Cap-weighted attribution driven by ${usTop3
+              .map((s) => `${s.symbol} (${s.changePercent >= 0 ? '+' : ''}${s.changePercent.toFixed(2)}%)`)
+              .join(', ')} (${usBreadthTotal - usBreadthNeg}/${usBreadthTotal} leaders positive).`
+          : 'Mega-cap technology and cyclical financials govern index-point direction.'
         : meta.region === 'Indonesia'
-          ? idxLeader
-            ? `IDX heavyweight turnover led by ${idxLeader.symbol} (${idxLeader.changePercent >= 0 ? '+' : ''}${idxLeader.changePercent.toFixed(2)}%); foreign flow ${idxBuyTop ? `accumulated ${idxBuyTop.symbol} (${idxBuyTop.foreignNetLabel})` : 'selective in banks'}.`
-            : 'Big banks and commodity proxies anchor Jakarta Sector I/II breadth.'
-          : `${meta.name} tracks regional semiconductor, bank, and China-demand rotation within ${q?.dayLow ?? '—'}–${q?.dayHigh ?? '—'}.`;
+          ? idxTop3.length > 0
+            ? `IHSG heavyweights led by ${idxTop3
+                .map((s) => `${s.symbol} (${s.changePercent >= 0 ? '+' : ''}${s.changePercent.toFixed(2)}%)`)
+                .join(', ')} (${idxBreadthPos}/${idxBreadthTotal} blue-chips firm; foreign ${
+                idxBuyTop ? `bid ${idxBuyTop.symbol} ${idxBuyTop.foreignNetLabel}` : 'flows selective'
+              }).`
+            : 'Big banks and energy heavyweights govern Jakarta turnover.'
+          : `Regional factor flow shows ${ibsPct}% intraday bar strength within ${q?.dayLow ?? '—'}–${q?.dayHigh ?? '—'}.`;
 
-    const biasWord =
-      signalTier === 'Strong Bull' || signalTier === 'Bull Signal'
-        ? 'firm risk-on momentum'
-        : signalTier === 'Strong Bear' || signalTier === 'Bear Signal'
-          ? 'defensive distribution pressure'
-          : 'two-way range consolidation';
+    const openConviction =
+      Number.isFinite(openNum) && priceNum > 0
+        ? priceNum >= openNum
+          ? `buyers defended the ${q?.open ?? '—'} opening print (+${gapPct.toFixed(2)}% gap)`
+          : `sellers rejected the ${q?.open ?? '—'} open (${gapPct >= 0 ? '+' : ''}${gapPct.toFixed(2)}% gap)`
+        : 'order flow balanced around pivot';
 
-    const beforeOpen = `Pre-Open Setup: ${macroCue} DXY stands at ${dxy?.price.toFixed(3) ?? '103.7'} (${dxy && dxy.changePercent >= 0 ? '+' : ''}${dxy?.changePercent.toFixed(2) ?? '0.00'}%) with US 10Y yield at ${us10y?.price.toFixed(3) ?? '4.44'}%. Watch ${meta.symbol} opening drive (${q?.open ?? '—'}) between support ${q?.support ?? '—'} and resistance ${q?.resistance ?? '—'}.`;
+    const beforeOpen = `Pre-Open Thesis (${macroRegimeLabel}): ${macroThesis} DXY sits at ${
+      dxy?.price.toFixed(3) ?? '103.7'
+    } (${dxy && dxy.changePercent >= 0 ? '+' : ''}${dxy?.changePercent.toFixed(2) ?? '0.00'}%). Key validation: holding above ${
+      q?.support ?? '—'
+    } preserves dip-buying toward ${q?.resistance ?? '—'}, while a gap fade below ${q?.support ?? '—'} triggers defensive rotation.`;
 
-    const duringSession = `Live Session Flow: ${meta.symbol} trades at ${priceFormatted} (${signStr}${chgPct.toFixed(2)}%, Open ${q?.open ?? '—'}) showing ${biasWord} (${signalTier}). ${moversLine} Intraday range spans ${q?.dayLow ?? '—'}–${q?.dayHigh ?? '—'}.`;
+    const duringSession = `Intraday Flow & Attribution: ${meta.symbol} trades at ${priceFormatted} (${signStr}${chgPct.toFixed(
+      2
+    )}%, ${signalTier}, F&G ${fgNow}/100 ${fgLabel}), where ${openConviction} at ${ibsPct}% range quartile. ${attributionText}`;
 
-    const afterClose = `Post-Close Recap & Prediction: ${meta.symbol} settled at ${priceFormatted} (${signStr}${chgPct.toFixed(2)}%), leaving daily trading bias at ${signalTier}. Holding above ${q?.support ?? '—'} keeps recovery toward ${q?.resistance ?? '—'} alive next session; breaking below ${q?.support ?? '—'} opens lower demand zones.`;
+    const afterClose = `Settlement Thesis & Next-Session Scenarios: ${meta.symbol} closed at ${priceFormatted} (${signStr}${chgPct.toFixed(
+      2
+    )}%, ${ibsPct}% IBS, ${q?.w52Pct ?? 50}th 52W pct). Bull Case: reclaiming/holding ${q?.open ?? '—'} targets ${
+      q?.resistance ?? '—'
+    }. Bear Case: failing ${q?.support ?? '—'} signals institutional de-risking into lower demand shelves.`;
 
     return {
       assetId: meta.id,
@@ -4561,9 +5867,9 @@ export async function fetchMarketIntelligence(): Promise<MarketIntelligencePaylo
 
   const sourceNames = Array.from(
     new Set([
-      'Yahoo Finance Quotes',
-      'TradingView Scanner & Macro Calendar',
-      'Coinbase Spot USD',
+      'TradingView Institutional Scanner',
+      'Yahoo Finance Historical & Quotes',
+      'Coinbase Spot 24h Stats',
       ...stories.slice(0, 12).map((s) => s.publisher),
     ])
   ).slice(0, 8);
@@ -4642,39 +5948,114 @@ export async function fetchMarketIntelligence(): Promise<MarketIntelligencePaylo
       })
     : 'Neutral';
 
+  const spxFg = spx?.fearGreed7d?.[spx.fearGreed7d.length - 1] ?? 50;
+  const ihsgFg = ihsg?.fearGreed7d?.[ihsg.fearGreed7d.length - 1] ?? 50;
+  const goldFg = gold?.fearGreed7d?.[gold.fearGreed7d.length - 1] ?? 50;
+  const btcFg = btc?.fearGreed7d?.[btc.fearGreed7d.length - 1] ?? 50;
+
   const commentaryPoints = [
-    `US Equities & Leadership: S&P 500 trades at ${spx?.price.toLocaleString('en-US') ?? '—'} (${spx && spx.changePercent >= 0 ? '+' : ''}${spx?.changePercent.toFixed(2) ?? '0.00'}%) while NASDAQ prints ${ixic && ixic.changePercent >= 0 ? '+' : ''}${ixic?.changePercent.toFixed(2) ?? '0.00'}%; institutional impact centers on ${usLeader?.symbol ?? 'NVDA'} (${usLeader ? `${usLeader.changePercent >= 0 ? '+' : ''}${usLeader.changePercent.toFixed(2)}%` : '—'}) with top momentum in ${usGainer?.symbol ?? '—'}.`,
-    `Indonesia IDX & Rupiah Sensitivity: IHSG stands at ${ihsg?.price.toLocaleString('en-US') ?? '—'} (${ihsg && ihsg.changePercent >= 0 ? '+' : ''}${ihsg?.changePercent.toFixed(2) ?? '0.00'}%) and MSCI Indonesia ETF (EIDO) sits at $${eido?.price.toFixed(2) ?? '—'} (${eido && eido.changePercent >= 0 ? '+' : ''}${eido?.changePercent.toFixed(2) ?? '0.00'}%), tracking USD/IDR near ${usdidr?.price.toLocaleString('en-US') ?? '—'} vs DXY ${dxy?.price.toFixed(3) ?? '—'}.`,
-    `Gold Spot & Macro Safe Haven: XAU/USD trades at $${gold?.price.toLocaleString('en-US') ?? '—'} (${gold && gold.changePercent >= 0 ? '+' : ''}${gold?.changePercent.toFixed(2) ?? '0.00'}%, Signal: ${goldTier}) alongside US 10Y at ${us10y?.price.toFixed(3) ?? '—'}% and WTI Crude at $${wti?.price.toFixed(2) ?? '—'}.`,
-    `BTC & 24/7 Liquidity Pulse: Bitcoin holds $${btc?.price.toLocaleString('en-US') ?? '—'} (${btc && btc.changePercent >= 0 ? '+' : ''}${btc?.changePercent.toFixed(2) ?? '0.00'}%, Signal: ${btcTier}), acting as high-beta barometer between support ${btc?.support ?? '—'} and resistance ${btc?.resistance ?? '—'}.`,
+    `US Factor & Equity Attribution: S&P 500 (${spx?.price.toLocaleString('en-US') ?? '—'}, ${spx && spx.changePercent >= 0 ? '+' : ''}${spx?.changePercent.toFixed(2) ?? '0.00'}%, F&G ${spxFg}) and NASDAQ (${ixic && ixic.changePercent >= 0 ? '+' : ''}${ixic?.changePercent.toFixed(2) ?? '0.00'}%) reflect ${macroRegimeLabel.toLowerCase()}, with index points led by ${usTop3.map((s) => `${s.symbol} (${s.changePercent >= 0 ? '+' : ''}${s.changePercent.toFixed(2)}%)`).join(', ') || 'mega-cap tech'}.`,
+    `Indonesia IDX & Carry Transmission: IHSG (${ihsg?.price.toLocaleString('en-US') ?? '—'}, ${ihsg && ihsg.changePercent >= 0 ? '+' : ''}${ihsg?.changePercent.toFixed(2) ?? '0.00'}%, F&G ${ihsgFg}) and EIDO ($${eido?.price.toFixed(2) ?? '—'}, ${eido && eido.changePercent >= 0 ? '+' : ''}${eido?.changePercent.toFixed(2) ?? '0.00'}%) price USD/IDR near ${usdidr?.price.toLocaleString('en-US') ?? '—'} alongside a ${idUsSpreadBps >= 0 ? '+' : ''}${idUsSpreadBps.toFixed(0)} bps ID–US 10Y sovereign spread.`,
+    `Rates, Dollar & Real-Asset Hedge: US 10Y (${us10y?.price.toFixed(3) ?? '—'}%, 10s30s ${yieldCurveBps >= 0 ? '+' : ''}${yieldCurveBps.toFixed(1)} bps) and DXY (${dxy?.price.toFixed(3) ?? '—'}) set macro discount pressure, keeping Spot Gold at $${gold?.price.toLocaleString('en-US') ?? '—'} (${gold && gold.changePercent >= 0 ? '+' : ''}${gold?.changePercent.toFixed(2) ?? '0.00'}%, F&G ${goldFg}) and WTI at $${wti?.price.toFixed(2) ?? '—'}.`,
+    `Crypto Liquidity Beta: Bitcoin (${btc ? `$${btc.price.toLocaleString('en-US')}` : '—'}, ${btc && btc.changePercent >= 0 ? '+' : ''}${btc?.changePercent.toFixed(2) ?? '0.00'}%, ${btcTier}, F&G ${btcFg}) trades as a 24/7 liquidity proxy between S1 ${btc?.support ?? '—'} and R1 ${btc?.resistance ?? '—'}.`,
   ];
 
-  const stocksAndFlowSummary = `US institutional turnover leads via ${
-    (movers?.us?.impact ?? []).slice(0, 3).map((s) => `${s.symbol} (${s.changePercent >= 0 ? '+' : ''}${s.changePercent.toFixed(2)}%)`).join(', ') || 'flagship mega-caps'
-  }. On IDX Jakarta, heavyweight rotation features ${
-    (movers?.indonesia?.impact ?? []).slice(0, 3).map((s) => `${s.symbol} (${s.changePercent >= 0 ? '+' : ''}${s.changePercent.toFixed(2)}%)`).join(', ') || 'LQ45 leaders'
+  const stocksAndFlowSummary = `Cap-weighted US index drivers center on ${
+    usTop3.map((s) => `${s.symbol} (${s.changePercent >= 0 ? '+' : ''}${s.changePercent.toFixed(2)}%)`).join(', ') || 'flagship mega-caps'
+  } (${usBreadthTotal - usBreadthNeg}/${usBreadthTotal} heavyweights advancing). In Jakarta, IDX point movers center on ${
+    idxTop3.map((s) => `${s.symbol} (${s.changePercent >= 0 ? '+' : ''}${s.changePercent.toFixed(2)}%)`).join(', ') || 'LQ45 leaders'
   }${
     idxBuyTop || idxSellTop
-      ? `, with net foreign flow led by ${idxBuyTop ? `accumulation in ${idxBuyTop.symbol} (${idxBuyTop.foreignNetLabel})` : 'selective accumulation'}${idxSellTop ? ` vs distribution in ${idxSellTop.symbol} (${idxSellTop.foreignNetLabel})` : ''}.`
+      ? `, with foreign desks ${idxBuyTop ? `accumulating ${idxBuyTop.symbol} (${idxBuyTop.foreignNetLabel})` : 'selective'}${idxSellTop ? ` vs trimming ${idxSellTop.symbol} (${idxSellTop.foreignNetLabel})` : ''}.`
       : '.'
   }`;
 
   const headline =
     compositeSentiment === 'Bullish'
-      ? `Risk appetite firms across global equities led by ${usGainer?.symbol ?? 'tech leaders'} as ${bullCount} Bull Signals outpace ${bearCount} Bear Signals`
+      ? `Thesis: Risk-on breadth expansion (${bullCount} Bull vs ${bearCount} Bear) as ${usGainer?.symbol ?? 'mega-caps'} lead equity inflows`
       : compositeSentiment === 'Bearish'
-        ? `Cross-asset caution weighs on benchmarks (${bearCount} Bear vs ${bullCount} Bull Signals) with Gold (${goldTier}) and DXY setting defensive posture`
-        : `Two-way rotation across US (${spx && spx.changePercent >= 0 ? '+' : ''}${spx?.changePercent.toFixed(2) ?? '0.00'}%), IDX (${ihsg && ihsg.changePercent >= 0 ? '+' : ''}${ihsg?.changePercent.toFixed(2) ?? '0.00'}%), and BTC ($${btc?.price.toLocaleString('en-US') ?? '—'}) as traders track yields & macro data`;
+        ? `Thesis: Defensive de-risking (${bearCount} Bear vs ${bullCount} Bull) under ${macroRegimeLabel.toLowerCase()} pressure`
+        : `Thesis: Cross-asset dispersion (${bullCount} Bull / ${bearCount} Bear) as US (${spx && spx.changePercent >= 0 ? '+' : ''}${spx?.changePercent.toFixed(2) ?? '0.00'}%), IDX (${ihsg && ihsg.changePercent >= 0 ? '+' : ''}${ihsg?.changePercent.toFixed(2) ?? '0.00'}%), and Gold ($${gold?.price.toLocaleString('en-US') ?? '—'}) reprice yield signals`;
 
-  let forwardPrediction = `Tactical Daily Outlook: While DXY stays capped below ${dxy?.resistance ?? '104.250'} and US 10Y holds near ${us10y?.price.toFixed(3) ?? '4.250'}%, watch SPX (${spx?.support ?? 'support'}–${spx?.resistance ?? 'resistance'}), IHSG (${ihsg?.support ?? 'support'}–${ihsg?.resistance ?? 'resistance'}), and XAU/USD ($${gold?.price.toLocaleString('en-US') ?? '—'}) around ${
-    events[0] ? `${events[0].currency} ${events[0].title} (${events[0].impact} · ${events[0].timeWib})` : 'scheduled macro releases'
-  }. Sustaining price above daily Open confirms trend continuation; failing opening support favors mean-reversion toward S1 pivots.`;
+  let forwardPrediction = `Dual-Scenario Thesis: Bull Case triggers if US 10Y eases below ${us10y?.support ?? '4.900%'} and SPX reclaims ${spx?.open ?? spx?.resistance ?? 'opening drive'}, opening rotation back toward ${spx?.resistance ?? 'R1'} and IHSG ${ihsg?.resistance ?? 'R1'}. Bear Case activates if DXY breaks above ${dxy?.resistance ?? '104.20'} or SPX loses S1 ${spx?.support ?? 'support'} ahead of ${
+    events[0] ? `${events[0].currency} ${events[0].title}` : 'upcoming macro prints'
+  }, shifting flows into defensive cash & bullion hedges.`;
+
+  // Deep session condition & movement trigger analysis (deterministic quantitative synthesis)
+  const usSessState = getServerSessionInfo('SPX', nowDate);
+  const idxSessState = getServerSessionInfo('IHSG', nowDate);
+  const activeSessionDesc = [
+    `US (${usSessState.stateLabel})`,
+    `IDX (${idxSessState.stateLabel})`,
+    '24/7 FX, Bullion & Crypto active',
+  ].join(' · ');
+
+  const topEvent = events[0];
+  const topNews = stories[0];
+  const triggerDrivers: string[] = [];
+  if (dxy) {
+    triggerDrivers.push(
+      `DXY ${dxy.price.toFixed(3)} (${dxy.changePercent >= 0 ? '+' : ''}${dxy.changePercent.toFixed(2)}%)`
+    );
+  }
+  if (us10y) {
+    triggerDrivers.push(
+      `US10Y ${us10y.price.toFixed(3)}% (${us10y.changePercent >= 0 ? '+' : ''}${us10y.changePercent.toFixed(2)}%)`
+    );
+  }
+  if (usLeader) {
+    triggerDrivers.push(
+      `${usLeader.symbol} (${usLeader.changePercent >= 0 ? '+' : ''}${usLeader.changePercent.toFixed(2)}%)`
+    );
+  }
+  if (idxLeader) {
+    triggerDrivers.push(
+      `${idxLeader.symbol} (${idxLeader.changePercent >= 0 ? '+' : ''}${idxLeader.changePercent.toFixed(2)}%)`
+    );
+  }
+  if (topEvent) {
+    triggerDrivers.push(
+      topEvent.actual && topEvent.actual !== 'Pending' && topEvent.actual !== '—'
+        ? `${topEvent.currency} ${topEvent.title} (${topEvent.actual} vs ${topEvent.forecast})`
+        : `${topEvent.currency} ${topEvent.title} (${topEvent.timeWib})`
+    );
+  }
+
+  let sessionConditionAndTrigger = `Session Condition (${macroRegimeLabel}): ${activeSessionDesc}. Primary movement triggers stem from ${
+    triggerDrivers.slice(0, 4).join(', ') || 'rate expectations and index heavyweight positioning'
+  }${topNews ? ` alongside headline focus on "${topNews.headline.slice(0, 88)}"` : ''}.`;
+
+  // Strictly ONE concise sentence summarizing the trigger and cross-asset positioning
+  const buildOneSentence = () => {
+    const spxStr = spx ? `S&P 500 (${spx.changePercent >= 0 ? '+' : ''}${spx.changePercent.toFixed(2)}%)` : 'US equities';
+    const ihsgStr = ihsg ? `IHSG (${ihsg.changePercent >= 0 ? '+' : ''}${ihsg.changePercent.toFixed(2)}%)` : 'IDX';
+    const dxyStr = dxy ? `DXY at ${dxy.price.toFixed(2)}` : 'the dollar';
+    const goldStr = gold ? `Gold at $${gold.price.toLocaleString('en-US', { maximumFractionDigits: 0 })}` : 'bullion';
+    const btcStr = btc ? `Bitcoin at $${btc.price.toLocaleString('en-US', { maximumFractionDigits: 0 })}` : 'crypto';
+    const catCue = topEvent
+      ? `ahead of ${topEvent.currency} ${topEvent.title}`
+      : `under ${macroRegimeLabel.toLowerCase()}`;
+    return `${spxStr} and ${ihsgStr} are recalibrating ${catCue}, while ${dxyStr} steers USD/IDR near ${
+      usdidr ? Math.round(usdidr.price).toLocaleString('en-US') : 'spot'
+    } alongside ${goldStr} and ${btcStr}.`;
+  };
+
+  let oneSentenceSummary = buildOneSentence();
+
+  const enforceSingleSentence = (raw: string): string => {
+    const flat = raw.replace(/\s+/g, ' ').trim();
+    if (!flat) return '';
+    // Match up to first terminal punctuation followed by space or end, ignoring decimal points (e.g. 5,920.50)
+    const match = flat.match(/^.*?(?<!\d)[.!?](?=\s|$)/);
+    const chosen = (match ? match[0] : flat).trim();
+    return /[.!?]$/.test(chosen) ? chosen : `${chosen}.`;
+  };
 
   let aiRefined = false;
   let finalHeadline = headline;
   let finalCommentary = commentaryPoints;
 
-  // Optional Gemini refinement strictly server-side if GEMINI_API_KEY is configured
+  // Server-side Gemini analytical thesis synthesis when GEMINI_API_KEY is configured
   const geminiApiKey = process.env.GEMINI_API_KEY;
   if (geminiApiKey) {
     try {
@@ -4683,29 +6064,87 @@ export async function fetchMarketIntelligence(): Promise<MarketIntelligencePaylo
         httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
       });
       const digestInput = {
-        indices: indexSessions.map((i) => ({ s: i.symbol, p: i.priceFormatted, chg: i.changePercent, sig: i.signalTier })),
-        dxy: dxy ? { p: dxy.price, chg: dxy.changePercent } : null,
+        macroRegime: macroRegimeLabel,
+        sessionStates: activeSessionDesc,
+        yieldCurveBps: Number(yieldCurveBps.toFixed(1)),
+        idUsSpreadBps: Number(idUsSpreadBps.toFixed(1)),
+        indices: indexSessions.map((i) => ({ s: i.symbol, state: i.sessionStateLabel, p: i.priceFormatted, chg: i.changePercent, lvl: i.keyLevels })),
+        usHeavyweights: usTop3.map((s) => ({ sym: s.symbol, px: s.price, chg: s.changePercent })),
+        idxHeavyweights: idxTop3.map((s) => ({ sym: s.symbol, px: s.price, chg: s.changePercent })),
+        dxy: dxy ? { p: dxy.price, chg: dxy.changePercent, sup: dxy.support, res: dxy.resistance } : null,
         us10y: us10y ? { p: us10y.price, chg: us10y.changePercent } : null,
-        usdidr: usdidr ? { p: usdidr.price, chg: usdidr.changePercent } : null,
+        usdidr: usdidr ? { p: usdidr.price, chg: usdidr.changePercent, sup: usdidr.support, res: usdidr.resistance } : null,
+        gold: gold ? { p: gold.price, chg: gold.changePercent, sup: gold.support, res: gold.resistance } : null,
+        btc: btc ? { p: btc.price, chg: btc.changePercent, sup: btc.support, res: btc.resistance } : null,
         stocksAndFlowSummary,
         newsHeadlines: stories.slice(0, 6).map((s) => `${s.publisher}: ${s.headline}`),
         macroEvents: dataReleaseImplications.slice(0, 4).map((e) => `${e.currency} ${e.impact} ${e.title}: ${e.implication}`),
       };
 
-      const aiRes = await ai.models.generateContent({
-        model: 'gemini-4-hydrogen',
-        contents: `Synthesize the following live cross-asset dataset, news headlines/rumors, stock flows, and macro events into a concise JSON object with keys: "headline" (1 crisp institutional sentence), "commentaryPoints" (array of 3 concise bullets covering US/Tech, IDX/Rupiah/Asia, and Yields/Commodities/Crypto), and "forwardPrediction" (2-sentence probabilistic market prediction referencing exact levels). Use ONLY facts from the data.\n\nDATA:\n${JSON.stringify(digestInput)}`,
-        config: {
-          responseMimeType: 'application/json',
-        },
-      });
-      const rawTxt = (aiRes.text ?? '').trim();
+      const aiRes = await Promise.race([
+        ai.models.generateContent({
+          model: 'gemini-4-hydrogen',
+          contents: `You are a senior cross-asset macro & equity strategist.
+STEP 1 (Deep Reason First): Carefully evaluate the active market session conditions (which exchanges are open vs closed, overnight carryover, ID-US yield spreads, DXY liquidity pressure) and isolate the concrete price movement triggers from LIVE DATA below.
+STEP 2 (Synthesize): Distill those findings into:
+- sessionConditionAndTrigger: 2 concise analytical sentences detailing session state and primary movement triggers.
+- oneSentenceSummary: Strictly ONE crisp, insightful sentence (max 34 words, NO Bull/Bear signal tags or Fear/Greed scores) summarizing cross-asset direction & catalyst for client briefs.
+- headline, commentaryPoints, and forwardPrediction grounded strictly in LIVE DATA figures.
+
+LIVE DATA:
+${JSON.stringify(digestInput)}`,
+          config: {
+            systemInstruction:
+              'Think deeply about session regime and causal movement triggers first. Output crisp, institutional-grade analysis strictly grounded in LIVE DATA. Never invent numbers outside LIVE DATA.',
+            thinkingConfig: {
+              thinkingLevel: ThinkingLevel.HIGH,
+            },
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                sessionConditionAndTrigger: {
+                  type: Type.STRING,
+                  description: '2 crisp sentences analyzing live session conditions and the exact macro/flow/yield movement triggers.',
+                },
+                oneSentenceSummary: {
+                  type: Type.STRING,
+                  description: 'Strictly ONE cohesive analytical sentence (max 34 words) distilling the market commentary without Bear/Bull or Fear/Greed labels.',
+                },
+                headline: { type: Type.STRING, description: '1 analytical macro-thesis headline summarizing cross-asset price action.' },
+                commentaryPoints: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
+                  description: '4 analytical thesis bullets covering: (1) US Equities & Heavyweight Attribution, (2) Indonesia IDX, Rupiah & Sovereign Spreads, (3) Rates, DXY & Gold/Oil Hedging, (4) BTC & Liquidity Beta.',
+                },
+                forwardPrediction: {
+                  type: Type.STRING,
+                  description: '2-sentence probabilistic Dual-Scenario Thesis specifying Bull Trigger/Target and Bear Invalidation/Downside using exact S1/R1 levels.',
+                },
+              },
+            },
+          },
+        }),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 13_000)),
+      ]);
+      const rawTxt = (aiRes?.text ?? '').trim();
       if (rawTxt) {
         const parsed = JSON.parse(rawTxt) as {
+          sessionConditionAndTrigger?: string;
+          oneSentenceSummary?: string;
           headline?: string;
           commentaryPoints?: string[];
           forwardPrediction?: string;
         };
+        if (parsed.sessionConditionAndTrigger && typeof parsed.sessionConditionAndTrigger === 'string') {
+          sessionConditionAndTrigger = parsed.sessionConditionAndTrigger.trim();
+        }
+        if (parsed.oneSentenceSummary && typeof parsed.oneSentenceSummary === 'string') {
+          const single = enforceSingleSentence(parsed.oneSentenceSummary);
+          if (single.length > 20) {
+            oneSentenceSummary = single;
+          }
+        }
         if (parsed.headline && typeof parsed.headline === 'string') {
           finalHeadline = parsed.headline.trim();
           aiRefined = true;
@@ -4718,7 +6157,7 @@ export async function fetchMarketIntelligence(): Promise<MarketIntelligencePaylo
         }
       }
     } catch {
-      // Retain deterministic live multi-source synthesis on Gemini failure/timeout
+      // Retain deterministic quantitative thesis synthesis on Gemini failure/timeout
     }
   }
 
@@ -4734,6 +6173,8 @@ export async function fetchMarketIntelligence(): Promise<MarketIntelligencePaylo
     dataReleaseImplications,
     stocksAndFlowSummary,
     forwardPrediction,
+    sessionConditionAndTrigger,
+    oneSentenceSummary,
     indexSessions,
     aiRefined,
   };
@@ -5032,10 +6473,20 @@ async function fetchTradingViewHeatmapScan(
 
 export async function fetchMarketHeatmap(): Promise<MarketHeatmapResponse> {
   const now = Date.now();
-  if (heatmapCache.entry && heatmapCache.entry.expiresAt > now) {
-    return heatmapCache.entry.data;
+  if (heatmapCache.entry) {
+    if (heatmapCache.entry.expiresAt > now) {
+      return heatmapCache.entry.data;
+    }
+    if (now - heatmapCache.entry.expiresAt < 900_000) {
+      void fetchMarketHeatmapFresh().catch(() => null);
+      return heatmapCache.entry.data;
+    }
   }
+  return fetchMarketHeatmapFresh();
+}
 
+async function fetchMarketHeatmapFresh(): Promise<MarketHeatmapResponse> {
+  const now = Date.now();
   return coalesceInFlight('market-heatmap', heatmapCache.entry?.data, async () => {
 
   // Resolve current USD/IDR conversion factor so cross-market cap comparisons stay accurate
@@ -5126,5 +6577,1368 @@ export async function fetchMarketHeatmap(): Promise<MarketHeatmapResponse> {
   heatmapCache.entry = { data: result, expiresAt: now + 20_000 };
   return result;
   });
+}
+
+export type ShareScheduleSlot = 'morning_0530' | 'afternoon_1630';
+
+export interface ShareSnapshotAsset {
+  id: string;
+  symbol: string;
+  shortName: string;
+  price: number;
+  prevClose: number;
+  changeValue: number;
+  changePercent: number;
+  decimals: number;
+  currencyPrefix?: string;
+  unitSuffix?: string;
+  support: string;
+  resistance: string;
+  barTimestampIso: string;
+  barTimeWib: string;
+}
+
+export interface ShareSnapshotResponse {
+  slot: ShareScheduleSlot;
+  dateKey: string;
+  dateLabel: string;
+  timeSlotLabel: string;
+  targetTimestampIso: string;
+  targetEpochMs: number;
+  editionTitle: string;
+  marketSummary: string;
+  aiGenerated: boolean;
+  assets: Record<string, ShareSnapshotAsset>;
+  updatedAt: string;
+}
+
+const SHARE_SLOT_META: Record<
+  string,
+  { symbol: string; shortName: string; yahooSymbol: string; decimals: number; currencyPrefix?: string; fallbackTz: string }
+> = {
+  SPX: { symbol: 'SPX', shortName: 'S&P 500', yahooSymbol: '^GSPC', decimals: 2, fallbackTz: 'America/New_York' },
+  IXIC: { symbol: 'IXIC', shortName: 'NASDAQ Composite', yahooSymbol: '^IXIC', decimals: 2, fallbackTz: 'America/New_York' },
+  DJI: { symbol: 'DJI', shortName: 'Dow Jones', yahooSymbol: '^DJI', decimals: 2, fallbackTz: 'America/New_York' },
+  IHSG: { symbol: 'IHSG', shortName: 'IDX Composite', yahooSymbol: '^JKSE', decimals: 2, fallbackTz: 'Asia/Jakarta' },
+  BTCUSD: { symbol: 'BTC/USD', shortName: 'Bitcoin', yahooSymbol: 'BTC-USD', decimals: 2, currencyPrefix: '$', fallbackTz: 'UTC' },
+  DXY: { symbol: 'DXY', shortName: 'US Dollar Index', yahooSymbol: 'DX-Y.NYB', decimals: 3, fallbackTz: 'America/New_York' },
+  USDIDR: { symbol: 'USD/IDR', shortName: 'Rupiah Spot', yahooSymbol: 'IDR=X', decimals: 2, fallbackTz: 'Asia/Jakarta' },
+  XAUUSD: { symbol: 'XAU/USD', shortName: 'Spot Gold', yahooSymbol: 'GC=F', decimals: 2, currencyPrefix: '$', fallbackTz: 'America/New_York' },
+};
+
+const shareSnapshotCache = new Map<string, CacheEntry<ShareSnapshotResponse>>();
+
+function resolveShareTargetTimestamp(now: Date, slot: ShareScheduleSlot) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Jakarta',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(now);
+
+  const year = Number(parts.find((p) => p.type === 'year')?.value ?? '2026');
+  const month = Number(parts.find((p) => p.type === 'month')?.value ?? '11');
+  const day = Number(parts.find((p) => p.type === 'day')?.value ?? '20');
+
+  const targetHourWib = slot === 'morning_0530' ? 5 : 16;
+  const targetMinuteWib = 30;
+
+  // Jakarta is fixed UTC+7 year-round (zero DST)
+  let targetEpochMs = Date.UTC(year, month - 1, day, targetHourWib - 7, targetMinuteWib, 0);
+  if (targetEpochMs > now.getTime()) {
+    targetEpochMs -= 86_400_000;
+  }
+
+  const targetDate = new Date(targetEpochMs);
+  const dateParts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Jakarta',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(targetDate);
+  const dateKey = `${dateParts.find((p) => p.type === 'year')?.value}-${dateParts.find((p) => p.type === 'month')?.value}-${dateParts.find((p) => p.type === 'day')?.value}`;
+
+  const dateLabel = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Jakarta',
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  }).format(targetDate);
+
+  return {
+    targetEpochMs,
+    targetTimestampIso: targetDate.toISOString(),
+    dateKey,
+    dateLabel,
+    timeSlotLabel: slot === 'morning_0530' ? '05:30 WIB' : '16:30 WIB',
+  };
+}
+
+function formatDateInTimezone(epochMs: number, timeZone: string): string {
+  try {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(new Date(epochMs));
+  } catch {
+    return new Date(epochMs).toISOString().slice(0, 10);
+  }
+}
+
+function formatWibShortTime(epochMs: number): string {
+  return (
+    new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Asia/Jakarta',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).format(new Date(epochMs)) + ' WIB'
+  );
+}
+
+function computeSnapshotSupportResistance(
+  price: number,
+  dayHigh: number,
+  dayLow: number,
+  decimals: number,
+  prefix = ''
+): { support: string; resistance: string } {
+  const high = Math.max(price, dayHigh);
+  const low = Math.min(price, dayLow);
+  const span = Math.max(0, high - low);
+  const pivot = (high + low + price) / 3;
+  const calcSupport = 2 * pivot - high;
+  const calcResistance = 2 * pivot - low;
+  const supportNum = span > 0 ? Math.min(calcSupport, low, price * 0.996) : price * 0.992;
+  const resistanceNum = span > 0 ? Math.max(calcResistance, high, price * 1.004) : price * 1.008;
+  return {
+    support: formatStatNumber(supportNum, decimals, prefix, ''),
+    resistance: formatStatNumber(resistanceNum, decimals, prefix, ''),
+  };
+}
+
+interface OhlcBar {
+  t: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+}
+
+async function fetchYahooChartBars(
+  yahooSymbol: string,
+  range: string,
+  interval: string
+): Promise<{ tz: string | null; metaPrice: number | null; bars: OhlcBar[] }> {
+  try {
+    const res = await fetch(
+      `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
+        yahooSymbol
+      )}?range=${encodeURIComponent(range)}&interval=${encodeURIComponent(interval)}`,
+      { headers: UA_HEADERS, signal: AbortSignal.timeout(6500) }
+    );
+    if (!res.ok) return { tz: null, metaPrice: null, bars: [] };
+    const json = (await res.json()) as {
+      chart?: {
+        result?: Array<{
+          meta?: { exchangeTimezoneName?: string; regularMarketPrice?: number };
+          timestamp?: number[];
+          indicators?: {
+            quote?: Array<{
+              open?: Array<number | null>;
+              high?: Array<number | null>;
+              low?: Array<number | null>;
+              close?: Array<number | null>;
+            }>;
+          };
+        }>;
+      };
+    };
+    const item = json.chart?.result?.[0];
+    const ts = item?.timestamp ?? [];
+    const q = item?.indicators?.quote?.[0];
+    const bars: OhlcBar[] = [];
+    for (let i = 0; i < ts.length; i++) {
+      const close = q?.close?.[i];
+      if (typeof close !== 'number' || !Number.isFinite(close) || close <= 0) continue;
+      const open = typeof q?.open?.[i] === 'number' && (q.open[i] as number) > 0 ? (q.open[i] as number) : close;
+      const high = typeof q?.high?.[i] === 'number' && (q.high[i] as number) > 0 ? (q.high[i] as number) : Math.max(open, close);
+      const low = typeof q?.low?.[i] === 'number' && (q.low[i] as number) > 0 ? (q.low[i] as number) : Math.min(open, close);
+      bars.push({
+        t: ts[i] * 1000,
+        open,
+        high,
+        low,
+        close,
+      });
+    }
+    return {
+      tz: item?.meta?.exchangeTimezoneName ?? null,
+      metaPrice:
+        typeof item?.meta?.regularMarketPrice === 'number'
+          ? item.meta.regularMarketPrice
+          : null,
+      bars,
+    };
+  } catch {
+    return { tz: null, metaPrice: null, bars: [] };
+  }
+}
+
+async function fetchCoinbaseHistoricalBtcAt(
+  targetEpochMs: number
+): Promise<ShareSnapshotAsset | null> {
+  try {
+    const res = await fetch(
+      'https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=900',
+      { headers: UA_HEADERS, signal: AbortSignal.timeout(5500) }
+    );
+    if (!res.ok) return null;
+    const raw = (await res.json()) as Array<[number, number, number, number, number, number]>;
+    if (!Array.isArray(raw) || raw.length === 0) return null;
+
+    const bars = raw
+      .filter((c) => Array.isArray(c) && c.length >= 5 && c[0] * 1000 <= targetEpochMs)
+      .map((c) => ({
+        t: c[0] * 1000,
+        low: Number(c[1]),
+        high: Number(c[2]),
+        open: Number(c[3]),
+        close: Number(c[4]),
+      }))
+      .filter((b) => Number.isFinite(b.close) && b.close > 0)
+      .sort((a, b) => a.t - b.t);
+
+    if (bars.length === 0) return null;
+    const latest = bars[bars.length - 1];
+    const targetPrevMs = targetEpochMs - 86_400_000;
+    let prevBar = bars[0];
+    let bestDiff = Infinity;
+    for (const b of bars) {
+      const diff = Math.abs(b.t - targetPrevMs);
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        prevBar = b;
+      }
+    }
+
+    const window24h = bars.filter((b) => b.t >= targetPrevMs && b.t <= latest.t);
+    const sessionHigh =
+      window24h.length > 0 ? Math.max(...window24h.map((b) => b.high)) : latest.high;
+    const sessionLow =
+      window24h.length > 0 ? Math.min(...window24h.map((b) => b.low)) : latest.low;
+
+    const price = Number(latest.close.toFixed(2));
+    const prevClose = Number(prevBar.close.toFixed(2));
+    const changeValue = Number((price - prevClose).toFixed(2));
+    const changePercent = Number(
+      (((price - prevClose) / Math.max(1e-6, prevClose)) * 100).toFixed(2)
+    );
+    const { support, resistance } = computeSnapshotSupportResistance(
+      price,
+      sessionHigh,
+      sessionLow,
+      2,
+      '$'
+    );
+
+    return {
+      id: 'BTCUSD',
+      symbol: 'BTC/USD',
+      shortName: 'Bitcoin',
+      price,
+      prevClose,
+      changeValue,
+      changePercent,
+      decimals: 2,
+      currencyPrefix: '$',
+      support,
+      resistance,
+      barTimestampIso: new Date(latest.t).toISOString(),
+      barTimeWib: formatWibShortTime(latest.t),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function buildDeterministicTimestampSummary(
+  slot: ShareScheduleSlot,
+  timeSlotLabel: string,
+  dateLabel: string,
+  map: Record<string, ShareSnapshotAsset>
+): string {
+  const fmtSigned = (v?: ShareSnapshotAsset) =>
+    v ? `${v.changePercent >= 0 ? '+' : ''}${v.changePercent.toFixed(2)}%` : '—';
+  const fmtPx = (v?: ShareSnapshotAsset) =>
+    v
+      ? `${v.currencyPrefix ?? ''}${v.price.toLocaleString('en-US', {
+          minimumFractionDigits: v.decimals,
+          maximumFractionDigits: v.decimals,
+        })}`
+      : '—';
+
+  const ihsg = map.IHSG;
+  const btc = map.BTCUSD;
+  const dxy = map.DXY;
+  const usdidr = map.USDIDR;
+  const gold = map.XAUUSD;
+
+  if (slot === 'morning_0530') {
+    const spx = map.SPX;
+    const ixic = map.IXIC;
+    return `At ${timeSlotLabel} (${dateLabel}), Wall Street settled with S&P 500 at ${fmtPx(spx)} (${fmtSigned(
+      spx
+    )}) and NASDAQ (${fmtSigned(ixic)}) while IHSG holds ${fmtPx(ihsg)} (${fmtSigned(
+      ihsg
+    )}) ahead of the Jakarta open, with DXY at ${fmtPx(dxy)}, USD/IDR at ${fmtPx(
+      usdidr
+    )}, Gold at ${fmtPx(gold)} (${fmtSigned(gold)}), and Bitcoin at ${fmtPx(btc)} (${fmtSigned(
+      btc
+    )}).`;
+  }
+
+  return `At ${timeSlotLabel} (${dateLabel}), IHSG wrapped Jakarta trade at ${fmtPx(ihsg)} (${fmtSigned(
+    ihsg
+  )}) alongside USD/IDR at ${fmtPx(usdidr)} (${fmtSigned(usdidr)}), while DXY trades near ${fmtPx(
+    dxy
+  )} (${fmtSigned(dxy)}) with Gold at ${fmtPx(gold)} (${fmtSigned(gold)}) and Bitcoin at ${fmtPx(
+    btc
+  )} (${fmtSigned(btc)}).`;
+}
+
+export async function fetchScheduledShareSnapshot(
+  slot: ShareScheduleSlot,
+  forceRefresh = false
+): Promise<ShareSnapshotResponse> {
+  const now = new Date();
+  const timing = resolveShareTargetTimestamp(now, slot);
+  const cacheKey = `${timing.dateKey}:${slot}`;
+
+  const cached = shareSnapshotCache.get(cacheKey);
+  if (!forceRefresh && cached && cached.expiresAt > now.getTime()) {
+    return cached.data;
+  }
+
+  return coalesceInFlight(`share-snapshot:${cacheKey}`, cached?.data, async () => {
+    const targetIds =
+      slot === 'morning_0530'
+        ? ['SPX', 'IXIC', 'DJI', 'IHSG', 'BTCUSD', 'DXY', 'USDIDR', 'XAUUSD']
+        : ['IHSG', 'BTCUSD', 'DXY', 'USDIDR', 'XAUUSD'];
+
+    const [tvGlobalMap, liveQuotesPayload, calPayload, newsPayload] = await Promise.all([
+      fetchTradingViewGlobalQuotes(),
+      fetchLiveQuotes().catch(() => ({ quotes: [] as LiveQuotePatch[], updatedAt: '' })),
+      fetchLiveCalendar().catch(() => ({ events: [] as LiveCalendarItem[], nextCatalyst: null, source: '', updatedAt: '' })),
+      fetchLiveNews().catch(() => ({ stories: [] as LiveNewsItem[], updatedAt: '' })),
+    ]);
+
+    const liveById = new Map(liveQuotesPayload.quotes.map((q) => [q.id, q]));
+
+    // Fetch spot gold basis once (OANDA Spot XAUUSD minus GC=F latest price)
+    let goldSpotBasis = 0;
+    const tvGold = tvGlobalMap.get('XAUUSD');
+
+    const assetEntries = await Promise.all(
+      targetIds.map(async (id): Promise<[string, ShareSnapshotAsset | null]> => {
+        if (id === 'BTCUSD') {
+          const btcSnap = await fetchCoinbaseHistoricalBtcAt(timing.targetEpochMs);
+          if (btcSnap) return [id, btcSnap];
+          const liveBtc = liveById.get('BTCUSD');
+          if (liveBtc) {
+            return [
+              id,
+              {
+                id: 'BTCUSD',
+                symbol: 'BTC/USD',
+                shortName: 'Bitcoin',
+                price: liveBtc.price,
+                prevClose: liveBtc.prevClose,
+                changeValue: liveBtc.changeValue,
+                changePercent: liveBtc.changePercent,
+                decimals: 2,
+                currencyPrefix: '$',
+                support: liveBtc.support,
+                resistance: liveBtc.resistance,
+                barTimestampIso: new Date(liveBtc.updatedAtEpoch || timing.targetEpochMs).toISOString(),
+                barTimeWib: formatWibShortTime(liveBtc.updatedAtEpoch || timing.targetEpochMs),
+              },
+            ];
+          }
+          return [id, null];
+        }
+
+        const spec = SHARE_SLOT_META[id];
+        if (!spec) return [id, null];
+
+        const [intraday, daily] = await Promise.all([
+          fetchYahooChartBars(spec.yahooSymbol, '5d', '15m'),
+          fetchYahooChartBars(spec.yahooSymbol, '1mo', '1d'),
+        ]);
+
+        const tz = intraday.tz || daily.tz || spec.fallbackTz;
+        const intradayBefore = intraday.bars.filter((b) => b.t <= timing.targetEpochMs);
+
+        if (id === 'XAUUSD' && tvGold && intraday.bars.length > 0) {
+          const latestGcf = intraday.bars[intraday.bars.length - 1].close;
+          const diff = tvGold.price - latestGcf;
+          if (Number.isFinite(diff) && Math.abs(diff) / latestGcf <= 0.035) {
+            goldSpotBasis = diff;
+          }
+        }
+
+        if (intradayBefore.length > 0) {
+          const latest = intradayBefore[intradayBefore.length - 1];
+          const activeDateStr = formatDateInTimezone(latest.t, tz);
+          const sameSessionBars = intradayBefore.filter(
+            (b) => formatDateInTimezone(b.t, tz) === activeDateStr
+          );
+          const earlierSessionBars = intradayBefore.filter(
+            (b) => formatDateInTimezone(b.t, tz) < activeDateStr
+          );
+          const prev15mClose =
+            earlierSessionBars.length > 0
+              ? earlierSessionBars[earlierSessionBars.length - 1].close
+              : undefined;
+
+          const dailyBefore = daily.bars.filter(
+            (d) => formatDateInTimezone(d.t, tz) < activeDateStr
+          );
+          const priorDaily = dailyBefore[dailyBefore.length - 1];
+
+          // For IDR=X Yahoo occasionally prints an off-market 1d settlement outlier (>1.5% gap); keep genuine daily moves for DXY & XAUUSD
+          let basePrev = priorDaily?.close ?? prev15mClose ?? sameSessionBars[0]?.open ?? latest.close;
+          if (
+            id === 'USDIDR' &&
+            typeof prev15mClose === 'number' &&
+            prev15mClose > 0 &&
+            priorDaily?.close &&
+            Math.abs(priorDaily.close - prev15mClose) / prev15mClose > 0.015
+          ) {
+            basePrev = prev15mClose;
+          }
+
+          const rawPrice = latest.close + (id === 'XAUUSD' ? goldSpotBasis : 0);
+          const rawPrev = basePrev + (id === 'XAUUSD' ? goldSpotBasis : 0);
+
+          const sessionHigh =
+            Math.max(...sameSessionBars.map((b) => b.high)) +
+            (id === 'XAUUSD' ? goldSpotBasis : 0);
+          const sessionLow =
+            Math.min(...sameSessionBars.map((b) => b.low)) +
+            (id === 'XAUUSD' ? goldSpotBasis : 0);
+
+          const price = Number(rawPrice.toFixed(spec.decimals));
+          const prevClose = Number(rawPrev.toFixed(spec.decimals));
+          const changeValue = Number((price - prevClose).toFixed(spec.decimals >= 3 ? spec.decimals : 2));
+          const changePercent = Number(
+            (((price - prevClose) / Math.max(1e-6, prevClose)) * 100).toFixed(2)
+          );
+          const { support, resistance } = computeSnapshotSupportResistance(
+            price,
+            sessionHigh,
+            sessionLow,
+            spec.decimals,
+            spec.currencyPrefix ?? ''
+          );
+
+          return [
+            id,
+            {
+              id,
+              symbol: spec.symbol,
+              shortName: spec.shortName,
+              price,
+              prevClose,
+              changeValue,
+              changePercent,
+              decimals: spec.decimals,
+              currencyPrefix: spec.currencyPrefix,
+              support,
+              resistance,
+              barTimestampIso: new Date(latest.t).toISOString(),
+              barTimeWib: formatWibShortTime(latest.t),
+            },
+          ];
+        }
+
+        // Daily fallback if 15m window has zero bars for holiday edge cases
+        const dailyValid = daily.bars.filter((d) => d.t <= timing.targetEpochMs);
+        if (dailyValid.length >= 2) {
+          const latest = dailyValid[dailyValid.length - 1];
+          const prev = dailyValid[dailyValid.length - 2];
+          const rawPrice = latest.close + (id === 'XAUUSD' ? goldSpotBasis : 0);
+          const rawPrev = prev.close + (id === 'XAUUSD' ? goldSpotBasis : 0);
+          const price = Number(rawPrice.toFixed(spec.decimals));
+          const prevClose = Number(rawPrev.toFixed(spec.decimals));
+          const changeValue = Number((price - prevClose).toFixed(spec.decimals >= 3 ? spec.decimals : 2));
+          const changePercent = Number(
+            (((price - prevClose) / Math.max(1e-6, prevClose)) * 100).toFixed(2)
+          );
+          const { support, resistance } = computeSnapshotSupportResistance(
+            price,
+            latest.high + (id === 'XAUUSD' ? goldSpotBasis : 0),
+            latest.low + (id === 'XAUUSD' ? goldSpotBasis : 0),
+            spec.decimals,
+            spec.currencyPrefix ?? ''
+          );
+          return [
+            id,
+            {
+              id,
+              symbol: spec.symbol,
+              shortName: spec.shortName,
+              price,
+              prevClose,
+              changeValue,
+              changePercent,
+              decimals: spec.decimals,
+              currencyPrefix: spec.currencyPrefix,
+              support,
+              resistance,
+              barTimestampIso: new Date(latest.t).toISOString(),
+              barTimeWib: formatWibShortTime(latest.t),
+            },
+          ];
+        }
+
+        const liveFallback = liveById.get(id);
+        if (liveFallback) {
+          return [
+            id,
+            {
+              id,
+              symbol: spec.symbol,
+              shortName: spec.shortName,
+              price: liveFallback.price,
+              prevClose: liveFallback.prevClose,
+              changeValue: liveFallback.changeValue,
+              changePercent: liveFallback.changePercent,
+              decimals: spec.decimals,
+              currencyPrefix: spec.currencyPrefix,
+              support: liveFallback.support,
+              resistance: liveFallback.resistance,
+              barTimestampIso: new Date(liveFallback.updatedAtEpoch || timing.targetEpochMs).toISOString(),
+              barTimeWib: formatWibShortTime(liveFallback.updatedAtEpoch || timing.targetEpochMs),
+            },
+          ];
+        }
+        return [id, null];
+      })
+    );
+
+    const assetsRecord: Record<string, ShareSnapshotAsset> = {};
+    for (const [id, item] of assetEntries) {
+      if (item) assetsRecord[id] = item;
+    }
+
+    let marketSummary = buildDeterministicTimestampSummary(
+      slot,
+      timing.timeSlotLabel,
+      timing.dateLabel,
+      assetsRecord
+    );
+    let aiGenerated = false;
+
+    const geminiApiKey = process.env.GEMINI_API_KEY;
+    if (geminiApiKey && Object.keys(assetsRecord).length > 0) {
+      try {
+        const ai = new GoogleGenAI({
+          apiKey: geminiApiKey,
+          httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+        });
+        const compactAssets = Object.values(assetsRecord).map((a) => ({
+          symbol: a.symbol,
+          price: a.price,
+          changePercent: a.changePercent,
+          support: a.support,
+          resistance: a.resistance,
+          barTimeWib: a.barTimeWib,
+        }));
+        const topMacros = calPayload.events.slice(0, 3).map((e) => `${e.currency} ${e.title} (${e.timeWib}, act:${e.actual} vs fcst:${e.forecast})`);
+        const topHeadlines = newsPayload.stories.slice(0, 3).map((s) => s.headline);
+
+        const aiRes = await Promise.race([
+          ai.models.generateContent({
+            model: 'gemini-4-hydrogen',
+            contents: `Write a crisp, strictly SINGLE-SENTENCE Market Summary for the scheduled ${timing.timeSlotLabel} (${timing.dateLabel}) snapshot.
+RULES:
+1. Reference ONLY the exact prices and % changes in TIMESTAMPED DATA below.
+2. Reflect the exact market session state at ${timing.timeSlotLabel} (${
+              slot === 'morning_0530'
+                ? 'US markets closed at 04:00 WIB, IHSG is pre-open, FX/Gold/BTC active'
+                : 'IHSG just closed at 16:00 WIB, USD/IDR & European/FX/Gold/BTC active; do NOT mention US indices for 16:30'
+            }).
+3. Strictly ONE analytical sentence (max 38 words). Do NOT include Bear/Bull signal tags or Fear & Greed scores.
+
+TIMESTAMPED DATA (${timing.timeSlotLabel}):
+${JSON.stringify({ assets: compactAssets, macros: topMacros, news: topHeadlines })}`,
+            config: {
+              systemInstruction:
+                'Output ONLY valid JSON containing a single key marketSummary with strictly one institutional sentence grounded in TIMESTAMPED DATA.',
+              thinkingConfig: { thinkingLevel: ThinkingLevel.HIGH },
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  marketSummary: {
+                    type: Type.STRING,
+                    description: 'Strictly one cohesive sentence summarizing the market snapshot at this exact timestamp.',
+                  },
+                },
+              },
+            },
+          }),
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), 9500)),
+        ]);
+
+        const rawTxt = (aiRes?.text ?? '').trim();
+        if (rawTxt) {
+          const parsed = JSON.parse(rawTxt) as { marketSummary?: string };
+          if (parsed.marketSummary && typeof parsed.marketSummary === 'string') {
+            const flat = parsed.marketSummary.replace(/\s+/g, ' ').trim();
+            const match = flat.match(/^.*?(?<!\d)[.!?](?=\s|$)/);
+            const chosen = (match ? match[0] : flat).trim();
+            if (chosen.length > 25) {
+              marketSummary = /[.!?]$/.test(chosen) ? chosen : `${chosen}.`;
+              aiGenerated = true;
+            }
+          }
+        }
+      } catch {
+        // Keep deterministic timestamped summary on failure/timeout
+      }
+    }
+
+    const response: ShareSnapshotResponse = {
+      slot,
+      dateKey: timing.dateKey,
+      dateLabel: timing.dateLabel,
+      timeSlotLabel: timing.timeSlotLabel,
+      targetTimestampIso: timing.targetTimestampIso,
+      targetEpochMs: timing.targetEpochMs,
+      editionTitle:
+        slot === 'morning_0530'
+          ? '05:30 WIB Morning · All Markets'
+          : '16:30 WIB Afternoon · IDX, FX, Gold & BTC',
+      marketSummary,
+      aiGenerated,
+      assets: assetsRecord,
+      updatedAt: new Date().toISOString(),
+    };
+
+    shareSnapshotCache.set(cacheKey, {
+      data: response,
+      expiresAt: Date.now() + (aiGenerated ? 1_800_000 : 300_000),
+    });
+
+    return response;
+  });
+}
+
+// ============================================================================
+// Market Depth (Live Coinbase L2 Order Book + Session Liquidity Depth Profile)
+// ============================================================================
+
+export interface MarketDepthLevel {
+  price: number;
+  size: number;
+  total: number;
+  pctOfMax: number;
+  isWall?: boolean;
+  tag?: string;
+}
+
+export interface MarketDepthSnapshot {
+  assetId: string;
+  symbol: string;
+  decimals: number;
+  currencyPrefix?: string;
+  unitSuffix?: string;
+  midPrice: number;
+  bestBid: number;
+  bestAsk: number;
+  spreadAbs: number;
+  spreadPct: number;
+  bidRatioPct: number;
+  askRatioPct: number;
+  imbalanceLabel: string;
+  sourceKind: 'live-l2' | 'session-liquidity';
+  sourceLabel: string;
+  buyWallPrice: number;
+  buyWallSize: number;
+  sellWallPrice: number;
+  sellWallSize: number;
+  bids: MarketDepthLevel[];
+  asks: MarketDepthLevel[];
+  isCachedFallback?: boolean;
+  updatedAt: string;
+}
+
+const marketDepthCache = new Map<string, CacheEntry<MarketDepthSnapshot>>();
+
+function roundNiceBucketStep(rawStep: number, decimals: number): number {
+  const minTick = Math.pow(10, -Math.min(4, Math.max(0, decimals)));
+  if (!Number.isFinite(rawStep) || rawStep <= minTick) return minTick;
+  const pow10 = Math.pow(10, Math.floor(Math.log10(rawStep)));
+  const norm = rawStep / pow10;
+  const nice = norm <= 1.2 ? 1 : norm <= 2.4 ? 2 : norm <= 5.5 ? 5 : 10;
+  return Math.max(minTick, Number((nice * pow10).toFixed(Math.min(6, decimals + 2))));
+}
+
+function deriveImbalanceLabel(bidRatioPct: number): string {
+  if (bidRatioPct >= 60) return 'Strong Bid Absorption';
+  if (bidRatioPct >= 53) return 'Buy-Side Tilt';
+  if (bidRatioPct <= 40) return 'Heavy Ask Supply';
+  if (bidRatioPct <= 47) return 'Sell-Side Tilt';
+  return 'Balanced Two-Way Book';
+}
+
+function finalizeDepthLevels(
+  rawBids: Array<{ price: number; size: number; tag?: string }>,
+  rawAsks: Array<{ price: number; size: number; tag?: string }>,
+  decimals: number
+): {
+  bids: MarketDepthLevel[];
+  asks: MarketDepthLevel[];
+  bidRatioPct: number;
+  askRatioPct: number;
+  buyWallPrice: number;
+  buyWallSize: number;
+  sellWallPrice: number;
+  sellWallSize: number;
+} {
+  const sortedBids = [...rawBids]
+    .sort((a, b) => b.price - a.price)
+    .slice(0, 8);
+  const sortedAsks = [...rawAsks]
+    .sort((a, b) => a.price - b.price)
+    .slice(0, 8);
+
+  const avgBid =
+    sortedBids.reduce((s, b) => s + b.size, 0) / Math.max(1, sortedBids.length);
+  const avgAsk =
+    sortedAsks.reduce((s, a) => s + a.size, 0) / Math.max(1, sortedAsks.length);
+
+  let maxBidIdx = 0;
+  for (let i = 1; i < sortedBids.length; i++) {
+    if (sortedBids[i].size > sortedBids[maxBidIdx].size) maxBidIdx = i;
+  }
+  let maxAskIdx = 0;
+  for (let i = 1; i < sortedAsks.length; i++) {
+    if (sortedAsks[i].size > sortedAsks[maxAskIdx].size) maxAskIdx = i;
+  }
+
+  let cumBid = 0;
+  const bidsOut: MarketDepthLevel[] = sortedBids.map((b, idx) => {
+    cumBid += b.size;
+    const isWall = idx === maxBidIdx || b.size >= avgBid * 1.55;
+    return {
+      price: Number(b.price.toFixed(decimals)),
+      size: Number(b.size.toFixed(decimals >= 3 ? 2 : 3)),
+      total: Number(cumBid.toFixed(decimals >= 3 ? 2 : 3)),
+      pctOfMax: 0,
+      isWall,
+      tag: b.tag ?? (idx === 0 ? 'Best Bid' : idx === maxBidIdx ? 'Buy Wall' : undefined),
+    };
+  });
+
+  let cumAsk = 0;
+  const asksOut: MarketDepthLevel[] = sortedAsks.map((a, idx) => {
+    cumAsk += a.size;
+    const isWall = idx === maxAskIdx || a.size >= avgAsk * 1.55;
+    return {
+      price: Number(a.price.toFixed(decimals)),
+      size: Number(a.size.toFixed(decimals >= 3 ? 2 : 3)),
+      total: Number(cumAsk.toFixed(decimals >= 3 ? 2 : 3)),
+      pctOfMax: 0,
+      isWall,
+      tag: a.tag ?? (idx === 0 ? 'Best Ask' : idx === maxAskIdx ? 'Sell Wall' : undefined),
+    };
+  });
+
+  const maxCum = Math.max(cumBid, cumAsk, 1e-6);
+  for (const b of bidsOut) {
+    b.pctOfMax = Math.max(4, Math.min(100, Math.round((b.total / maxCum) * 100)));
+  }
+  for (const a of asksOut) {
+    a.pctOfMax = Math.max(4, Math.min(100, Math.round((a.total / maxCum) * 100)));
+  }
+
+  const totalNotionalVol = cumBid + cumAsk || 1;
+  const bidRatioPct = Number(((cumBid / totalNotionalVol) * 100).toFixed(1));
+  const askRatioPct = Number((100 - bidRatioPct).toFixed(1));
+
+  const buyWall = bidsOut[maxBidIdx] ?? bidsOut[0];
+  const sellWall = asksOut[maxAskIdx] ?? asksOut[0];
+
+  return {
+    bids: bidsOut,
+    asks: asksOut,
+    bidRatioPct,
+    askRatioPct,
+    buyWallPrice: buyWall?.price ?? 0,
+    buyWallSize: buyWall?.size ?? 0,
+    sellWallPrice: sellWall?.price ?? 0,
+    sellWallSize: sellWall?.size ?? 0,
+  };
+}
+
+export async function fetchMarketDepth(assetId: string): Promise<MarketDepthSnapshot | null> {
+  const id = assetId.trim().toUpperCase();
+  if (!id) return null;
+
+  const isKnownYahoo = YAHOO_SYMBOL_CONFIG.some((c) => c.id === id);
+  if (!isKnownYahoo && id !== 'ID10Y') return null;
+
+  const now = Date.now();
+  const cached = marketDepthCache.get(id);
+  if (cached && cached.expiresAt > now) {
+    return cached.data;
+  }
+
+  const sessionInfo = getServerSessionInfo(id, new Date(now));
+  const isCryptoL2 = id === 'BTCUSD' || id === 'ETHUSD';
+
+  return coalesceInFlight(
+    `market-depth:${id}`,
+    cached?.data ?? null,
+    async () => {
+      const cfg = YAHOO_SYMBOL_CONFIG.find((c) => c.id === id);
+      const decimals = cfg?.decimals ?? 3;
+      const prefix = cfg?.currencyPrefix ?? (id === 'ID10Y' ? '' : undefined);
+      const suffix = cfg?.unitSuffix ?? (id === 'ID10Y' ? '%' : undefined);
+      const fxLabels: Record<string, string> = {
+        BTCUSD: 'BTC/USD',
+        ETHUSD: 'ETH/USD',
+        XAUUSD: 'XAU/USD',
+        USDIDR: 'USD/IDR',
+        EURUSD: 'EUR/USD',
+        GBPUSD: 'GBP/USD',
+        USDJPY: 'USD/JPY',
+        AUDUSD: 'AUD/USD',
+        USDCHF: 'USD/CHF',
+        USDCAD: 'USD/CAD',
+        NZDUSD: 'NZD/USD',
+        USDCNY: 'USD/CNY',
+      };
+      const symbolLabel = fxLabels[id] ?? id;
+
+      // 1. Live Level-2 Order Book via Coinbase Exchange for BTCUSD & ETHUSD
+      if (isCryptoL2) {
+        const pair = id === 'BTCUSD' ? 'BTC-USD' : 'ETH-USD';
+        const l2Start = Date.now();
+        try {
+          const res = await fetch(
+            `https://api.exchange.coinbase.com/products/${pair}/book?level=2`,
+            { headers: UA_HEADERS, signal: AbortSignal.timeout(5500) }
+          );
+          const l2Latency = Date.now() - l2Start;
+          if (res.ok) {
+            const json = (await res.json()) as {
+              bids?: Array<[string, string, number]>;
+              asks?: Array<[string, string, number]>;
+            };
+            const rawBids = (json.bids ?? [])
+              .map(([p, s]) => ({ price: Number(p), size: Number(s) }))
+              .filter((r) => Number.isFinite(r.price) && r.price > 0 && Number.isFinite(r.size) && r.size > 0);
+            const rawAsks = (json.asks ?? [])
+              .map(([p, s]) => ({ price: Number(p), size: Number(s) }))
+              .filter((r) => Number.isFinite(r.price) && r.price > 0 && Number.isFinite(r.size) && r.size > 0);
+
+            if (rawBids.length >= 4 && rawAsks.length >= 4) {
+              const bestBid = rawBids[0].price;
+              const bestAsk = rawAsks[0].price;
+              const midPrice = Number(((bestBid + bestAsk) / 2).toFixed(decimals));
+              const spreadAbs = Math.max(0, bestAsk - bestBid);
+              const spreadPct = midPrice > 0 ? (spreadAbs / midPrice) * 100 : 0;
+
+              const nearBids = rawBids.filter((b) => b.price >= bestBid * 0.97);
+              const nearAsks = rawAsks.filter((a) => a.price <= bestAsk * 1.03);
+              const activeBids = nearBids.length >= 4 ? nearBids : rawBids.filter((b) => b.price >= bestBid * 0.85);
+              const activeAsks = nearAsks.length >= 4 ? nearAsks : rawAsks.filter((a) => a.price <= bestAsk * 1.15);
+
+              const safeBids = activeBids.length >= 2 ? activeBids : rawBids.slice(0, 8);
+              const safeAsks = activeAsks.length >= 2 ? activeAsks : rawAsks.slice(0, 8);
+
+              const deepestBid = safeBids[safeBids.length - 1].price;
+              const deepestAsk = safeAsks[safeAsks.length - 1].price;
+              const rawSpan = Math.max(
+                bestBid - deepestBid,
+                deepestAsk - bestAsk,
+                midPrice * 0.0006
+              );
+              const clampedSpan = Math.min(midPrice * 0.012, rawSpan);
+              const bucketStep = roundNiceBucketStep(clampedSpan / 8, decimals);
+
+              const bidBuckets = new Map<number, number>();
+              for (const b of safeBids) {
+                if (bestBid - b.price > bucketStep * 10) continue;
+                const bucketPx = Number(
+                  (Math.floor(b.price / bucketStep) * bucketStep).toFixed(decimals)
+                );
+                if (bucketPx > 0) {
+                  bidBuckets.set(bucketPx, (bidBuckets.get(bucketPx) ?? 0) + b.size);
+                }
+              }
+              const askBuckets = new Map<number, number>();
+              for (const a of safeAsks) {
+                if (a.price - bestAsk > bucketStep * 10) continue;
+                const bucketPx = Number(
+                  (Math.ceil(a.price / bucketStep) * bucketStep).toFixed(decimals)
+                );
+                if (bucketPx > 0) {
+                  askBuckets.set(bucketPx, (askBuckets.get(bucketPx) ?? 0) + a.size);
+                }
+              }
+
+              let aggBids = Array.from(bidBuckets.entries())
+                .map(([price, size]) => ({ price, size }))
+                .sort((a, b) => b.price - a.price)
+                .slice(0, 8);
+              let aggAsks = Array.from(askBuckets.entries())
+                .map(([price, size]) => ({ price, size }))
+                .sort((a, b) => a.price - b.price)
+                .slice(0, 8);
+
+              if (aggBids.length < 5) aggBids = safeBids.slice(0, 8);
+              if (aggAsks.length < 5) aggAsks = safeAsks.slice(0, 8);
+
+              const finalized = finalizeDepthLevels(aggBids, aggAsks, decimals);
+              const snapshot: MarketDepthSnapshot = {
+                assetId: id,
+                symbol: symbolLabel,
+                decimals,
+                currencyPrefix: prefix,
+                unitSuffix: suffix,
+                midPrice,
+                bestBid: Number(bestBid.toFixed(decimals)),
+                bestAsk: Number(bestAsk.toFixed(decimals)),
+                spreadAbs: Number(spreadAbs.toFixed(decimals)),
+                spreadPct: Number(spreadPct.toFixed(4)),
+                bidRatioPct: finalized.bidRatioPct,
+                askRatioPct: finalized.askRatioPct,
+                imbalanceLabel: deriveImbalanceLabel(finalized.bidRatioPct),
+                sourceKind: 'live-l2',
+                sourceLabel: 'Coinbase Live L2 Order Book',
+                buyWallPrice: finalized.buyWallPrice,
+                buyWallSize: finalized.buyWallSize,
+                sellWallPrice: finalized.sellWallPrice,
+                sellWallSize: finalized.sellWallSize,
+                bids: finalized.bids,
+                asks: finalized.asks,
+                isCachedFallback: false,
+                updatedAt: new Date().toISOString(),
+              };
+              updateProviderMetric('coinbase', {
+                status: 'live',
+                activeSource: 'Coinbase Exchange L2 Book',
+                latencyMs: l2Latency,
+                lastSuccessAt: Date.now(),
+                isCachedFallback: false,
+                fallbackReason: undefined,
+              });
+              marketDepthCache.set(id, { data: snapshot, expiresAt: Date.now() + 2500 });
+              return snapshot;
+            }
+          }
+          if (cached && now - cached.expiresAt < 12_000 && cached.data.sourceKind === 'live-l2') {
+            return { ...cached.data, isCachedFallback: true };
+          }
+          updateProviderMetric('coinbase', {
+            status: 'failover',
+            activeSource: 'Session Liquidity Fallback',
+            latencyMs: l2Latency,
+            isCachedFallback: false,
+            fallbackReason: `Coinbase L2 HTTP ${res.status}; fell back to session book`,
+          });
+        } catch {
+          if (cached && now - cached.expiresAt < 12_000 && cached.data.sourceKind === 'live-l2') {
+            return { ...cached.data, isCachedFallback: true };
+          }
+          updateProviderMetric('coinbase', {
+            status: 'failover',
+            activeSource: 'Session Liquidity Fallback',
+            latencyMs: Date.now() - l2Start,
+            isCachedFallback: false,
+            fallbackReason: 'Coinbase L2 timeout; fell back to session book',
+          });
+        }
+      }
+
+      // 2. Real Session Liquidity & Order-Flow Depth Profile (anchored to live OHLC, S1/R1, and 1D bar distribution)
+      const quotesPayload = quotesCache.entry?.data ?? (await fetchLiveQuotes());
+      const q = quotesPayload.quotes.find((item) => item.id === id);
+      if (!q || !Number.isFinite(q.price) || q.price <= 0) {
+        return cached?.data ? { ...cached.data, isCachedFallback: true } : null;
+      }
+
+      const parseNumStat = (s: string, fallback: number): number => {
+        const cleaned = s.replace(/[^0-9.-]/g, '');
+        const v = Number(cleaned);
+        return Number.isFinite(v) && v > 0 ? v : fallback;
+      };
+
+      const price = q.price;
+      const openNum = parseNumStat(q.open, price);
+      const dayHighNum = Math.max(price, parseNumStat(q.dayHigh, price * 1.005));
+      const dayLowNum = Math.min(price, parseNumStat(q.dayLow, price * 0.995));
+      const supportNum = Math.min(dayLowNum, parseNumStat(q.support, price * 0.99));
+      const resistanceNum = Math.max(dayHighNum, parseNumStat(q.resistance, price * 1.01));
+
+      const spanDown = Math.max(price * 0.0025, price - supportNum);
+      const spanUp = Math.max(price * 0.0025, resistanceNum - price);
+      const avgSpan = (spanDown + spanUp) / 2;
+      const tickSpread = Math.max(
+        Math.pow(10, -decimals),
+        avgSpan * 0.028
+      );
+      const bestBid = Number((price - tickSpread / 2).toFixed(decimals));
+      const bestAsk = Number((price + tickSpread / 2).toFixed(decimals));
+
+      const ibsRatio =
+        dayHighNum > dayLowNum
+          ? Math.max(0.15, Math.min(0.85, (price - dayLowNum) / (dayHighNum - dayLowNum)))
+          : 0.5;
+      const openTilt =
+        openNum > 0 ? Math.max(-0.12, Math.min(0.12, ((price - openNum) / openNum) * 8)) : 0;
+      const buyerBias = Math.max(0.32, Math.min(0.68, 0.38 + ibsRatio * 0.24 + openTilt));
+
+      const bars = q.chart1D.filter((v) => Number.isFinite(v) && v > 0);
+      const isFxMajor =
+        id === 'USDIDR' ||
+        id === 'EURUSD' ||
+        id === 'GBPUSD' ||
+        id === 'USDJPY' ||
+        id === 'AUDUSD' ||
+        id === 'USDCHF' ||
+        id === 'USDCAD' ||
+        id === 'NZDUSD' ||
+        id === 'USDCNY' ||
+        id === 'DXY';
+      const volumeScaleBase =
+        id === 'US10Y' || id === 'US30Y' || id === 'ID10Y'
+          ? 250
+          : isFxMajor
+            ? 1200
+            : id === 'XAUUSD' || id === 'WTI' || id === 'BRENT'
+              ? 420
+              : 1800;
+
+      const countNearbyBars = (lvlPrice: number, bandwidth: number): number => {
+        if (bars.length === 0) return 0;
+        let hits = 0;
+        for (const b of bars) {
+          if (Math.abs(b - lvlPrice) <= bandwidth) hits += 1;
+        }
+        return hits / bars.length;
+      };
+
+      const bidLevels: Array<{ price: number; size: number; tag?: string }> = [];
+      const askLevels: Array<{ price: number; size: number; tag?: string }> = [];
+
+      const bidBandwidth = Math.max(tickSpread, spanDown / 6);
+      const askBandwidth = Math.max(tickSpread, spanUp / 6);
+
+      for (let i = 0; i < 8; i++) {
+        const frac = i / 7;
+        const lvlPrice = bestBid - frac * spanDown * 1.05;
+        const barDensity = countNearbyBars(lvlPrice, bidBandwidth);
+
+        let tag: string | undefined = i === 0 ? 'Best Bid' : undefined;
+        let anchorMult = 0.72 + (1 - frac) * 0.35 + barDensity * 1.9;
+        if (Math.abs(lvlPrice - dayLowNum) <= bidBandwidth * 0.7) {
+          anchorMult += 0.95;
+          tag = tag ?? 'Day Low';
+        }
+        if (Math.abs(lvlPrice - supportNum) <= bidBandwidth * 0.85) {
+          anchorMult += 1.25;
+          tag = 'S1 Support';
+        } else if (Math.abs(lvlPrice - openNum) <= bidBandwidth * 0.65 && !tag) {
+          anchorMult += 0.65;
+          tag = 'Open';
+        }
+
+        const size = volumeScaleBase * anchorMult * (0.75 + buyerBias * 0.65);
+        bidLevels.push({ price: lvlPrice, size, tag });
+      }
+
+      for (let i = 0; i < 8; i++) {
+        const frac = i / 7;
+        const lvlPrice = bestAsk + frac * spanUp * 1.05;
+        const barDensity = countNearbyBars(lvlPrice, askBandwidth);
+
+        let tag: string | undefined = i === 0 ? 'Best Ask' : undefined;
+        let anchorMult = 0.72 + (1 - frac) * 0.35 + barDensity * 1.9;
+        if (Math.abs(lvlPrice - dayHighNum) <= askBandwidth * 0.7) {
+          anchorMult += 0.95;
+          tag = tag ?? 'Day High';
+        }
+        if (Math.abs(lvlPrice - resistanceNum) <= askBandwidth * 0.85) {
+          anchorMult += 1.25;
+          tag = 'R1 Resist';
+        } else if (Math.abs(lvlPrice - openNum) <= askBandwidth * 0.65 && !tag) {
+          anchorMult += 0.65;
+          tag = 'Open';
+        }
+
+        const size = volumeScaleBase * anchorMult * (0.75 + (1 - buyerBias) * 0.65);
+        askLevels.push({ price: lvlPrice, size, tag });
+      }
+
+      const finalized = finalizeDepthLevels(bidLevels, askLevels, decimals);
+      const spreadAbs = Math.max(0, bestAsk - bestBid);
+      const spreadPct = price > 0 ? (spreadAbs / price) * 100 : 0;
+
+      const snapshot: MarketDepthSnapshot = {
+        assetId: id,
+        symbol: symbolLabel,
+        decimals,
+        currencyPrefix: prefix,
+        unitSuffix: suffix,
+        midPrice: Number(price.toFixed(decimals)),
+        bestBid,
+        bestAsk,
+        spreadAbs: Number(spreadAbs.toFixed(decimals)),
+        spreadPct: Number(spreadPct.toFixed(4)),
+        bidRatioPct: finalized.bidRatioPct,
+        askRatioPct: finalized.askRatioPct,
+        imbalanceLabel: deriveImbalanceLabel(finalized.bidRatioPct),
+        sourceKind: 'session-liquidity',
+        sourceLabel: sessionInfo.isOpen
+          ? 'Session Order-Flow Liquidity Profile'
+          : `Closed Session Liquidity (${sessionInfo.stateLabel})`,
+        buyWallPrice: finalized.buyWallPrice,
+        buyWallSize: finalized.buyWallSize,
+        sellWallPrice: finalized.sellWallPrice,
+        sellWallSize: finalized.sellWallSize,
+        bids: finalized.bids,
+        asks: finalized.asks,
+        updatedAt: new Date().toISOString(),
+      };
+
+      const ttl = sessionInfo.isOpen ? 4000 : 60_000;
+      marketDepthCache.set(id, { data: snapshot, expiresAt: Date.now() + ttl });
+      return snapshot;
+    }
+  );
+}
+
+// ============================================================================
+// Watchlist Cross-Asset Correlation Matrix (Real Aligned Daily Returns)
+// ============================================================================
+
+export interface CorrelationMatrixResponse {
+  timeframe: '1M' | '3M';
+  assetIds: string[];
+  matrix: number[][];
+  sampleDays: number;
+  updatedAt: string;
+}
+
+const correlationCache = new Map<'1M' | '3M', CacheEntry<CorrelationMatrixResponse>>();
+const datedHistoryCache = new Map<string, CacheEntry<Map<string, number>>>();
+
+async function fetchDatedDailyCloses(
+  yahooSymbol: string,
+  range: '1mo' | '3mo'
+): Promise<Map<string, number>> {
+  const key = `${yahooSymbol}:${range}`;
+  const now = Date.now();
+  const cached = datedHistoryCache.get(key);
+  if (cached && cached.expiresAt > now) {
+    return cached.data;
+  }
+
+  const out = new Map<string, number>();
+  try {
+    const res = await fetch(
+      `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
+        yahooSymbol
+      )}?range=${range}&interval=1d`,
+      { headers: UA_HEADERS, signal: AbortSignal.timeout(5500) }
+    );
+    if (!res.ok) return cached?.data ?? out;
+    const json = (await res.json()) as {
+      chart?: {
+        result?: Array<{
+          timestamp?: number[];
+          indicators?: { quote?: Array<{ close?: Array<number | null> }> };
+        }>;
+      };
+    };
+    const item = json.chart?.result?.[0];
+    const tsArr = item?.timestamp ?? [];
+    const closeArr = item?.indicators?.quote?.[0]?.close ?? [];
+    for (let i = 0; i < Math.min(tsArr.length, closeArr.length); i++) {
+      const ts = tsArr[i];
+      const c = closeArr[i];
+      if (typeof ts === 'number' && typeof c === 'number' && Number.isFinite(c) && c > 0) {
+        const dayKey = new Date(ts * 1000).toISOString().slice(0, 10);
+        out.set(dayKey, c);
+      }
+    }
+    if (out.size >= 5) {
+      datedHistoryCache.set(key, { data: out, expiresAt: now + 900_000 });
+      return out;
+    }
+  } catch {
+    // ignore and return fallback
+  }
+  return cached?.data ?? out;
+}
+
+function computeAlignedPearson(
+  mapA: Map<string, number>,
+  mapB: Map<string, number>
+): { r: number; pairs: number } {
+  const commonDates: string[] = [];
+  for (const date of mapA.keys()) {
+    if (mapB.has(date)) commonDates.push(date);
+  }
+  commonDates.sort();
+  if (commonDates.length < 5) return { r: 0, pairs: Math.max(0, commonDates.length - 1) };
+
+  const retA: number[] = [];
+  const retB: number[] = [];
+  for (let i = 1; i < commonDates.length; i++) {
+    const prevDate = commonDates[i - 1];
+    const currDate = commonDates[i];
+    const a0 = mapA.get(prevDate)!;
+    const a1 = mapA.get(currDate)!;
+    const b0 = mapB.get(prevDate)!;
+    const b1 = mapB.get(currDate)!;
+    if (a0 > 0 && a1 > 0 && b0 > 0 && b1 > 0) {
+      retA.push(Math.log(a1 / a0));
+      retB.push(Math.log(b1 / b0));
+    }
+  }
+
+  const n = retA.length;
+  if (n < 4) return { r: 0, pairs: n };
+
+  let sumA = 0;
+  let sumB = 0;
+  for (let i = 0; i < n; i++) {
+    sumA += retA[i];
+    sumB += retB[i];
+  }
+  const meanA = sumA / n;
+  const meanB = sumB / n;
+
+  let num = 0;
+  let denA = 0;
+  let denB = 0;
+  for (let i = 0; i < n; i++) {
+    const da = retA[i] - meanA;
+    const db = retB[i] - meanB;
+    num += da * db;
+    denA += da * da;
+    denB += db * db;
+  }
+
+  const den = Math.sqrt(denA * denB);
+  if (!Number.isFinite(den) || den <= 1e-12) return { r: 0, pairs: n };
+  const corr = Math.max(-1, Math.min(1, num / den));
+  return { r: Number(corr.toFixed(2)), pairs: n };
+}
+
+export async function fetchCorrelationMatrix(
+  timeframe: '1M' | '3M' = '1M'
+): Promise<CorrelationMatrixResponse> {
+  const tf: '1M' | '3M' = timeframe === '3M' ? '3M' : '1M';
+  const now = Date.now();
+  const cached = correlationCache.get(tf);
+  if (cached && cached.expiresAt > now) {
+    return cached.data;
+  }
+
+  return coalesceInFlight(
+    `correlation-matrix:${tf}`,
+    cached?.data,
+    async () => {
+      const range = tf === '3M' ? '3mo' : '1mo';
+      const assetConfigs = YAHOO_SYMBOL_CONFIG;
+      const assetIds = assetConfigs.map((c) => c.id);
+
+      const datedSeriesList = await Promise.all(
+        assetConfigs.map((c) => fetchDatedDailyCloses(c.yahooSymbol, range))
+      );
+
+      // Inject today's live quote price onto today's UTC date key so live session moves are reflected
+      const todayKey = new Date().toISOString().slice(0, 10);
+      const liveMap = new Map(
+        (quotesCache.entry?.data.quotes ?? []).map((q) => [q.id, q.price])
+      );
+      datedSeriesList.forEach((seriesMap, idx) => {
+        const livePx = liveMap.get(assetIds[idx]);
+        if (livePx && Number.isFinite(livePx) && livePx > 0 && seriesMap.size > 0) {
+          seriesMap.set(todayKey, livePx);
+        }
+      });
+
+      const n = assetIds.length;
+      const matrix: number[][] = Array.from({ length: n }, () => Array(n).fill(0));
+      let maxPairs = 0;
+
+      for (let i = 0; i < n; i++) {
+        matrix[i][i] = 1;
+        for (let j = i + 1; j < n; j++) {
+          const { r, pairs } = computeAlignedPearson(datedSeriesList[i], datedSeriesList[j]);
+          matrix[i][j] = r;
+          matrix[j][i] = r;
+          if (pairs > maxPairs) maxPairs = pairs;
+        }
+      }
+
+      const payload: CorrelationMatrixResponse = {
+        timeframe: tf,
+        assetIds,
+        matrix,
+        sampleDays: maxPairs > 0 ? maxPairs : tf === '3M' ? 60 : 20,
+        updatedAt: new Date().toISOString(),
+      };
+
+      correlationCache.set(tf, { data: payload, expiresAt: Date.now() + 300_000 });
+      return payload;
+    }
+  );
+}
+
+let warmupStarted = false;
+export function warmServerCaches(): void {
+  if (warmupStarted) return;
+  warmupStarted = true;
+  // Stage 1: warm critical live quotes & FX cleanly without Yahoo pool contention
+  setTimeout(() => {
+    void Promise.allSettled([
+      fetchLiveQuotes(),
+      fetchLiveFxRates(),
+    ]).then(() => {
+      // Stage 2: warm news, calendar & equity movers
+      setTimeout(() => {
+        void Promise.allSettled([
+          fetchLiveNews(),
+          fetchLiveCalendar(),
+          fetchTopStockMovers(),
+        ]).then(() => {
+          // Stage 3: warm heavy heatmap, daily summary, correlations & intelligence
+          setTimeout(() => {
+            void Promise.allSettled([
+              fetchMarketHeatmap(),
+              fetchDailyMarketSummary(),
+              fetchCorrelationMatrix('1M'),
+              fetchMarketIntelligence(),
+            ]);
+          }, 400);
+        });
+      }, 200);
+    });
+  }, 150);
 }
 

@@ -8,6 +8,7 @@ import {
 } from '../data/marketData';
 import {
   CalendarCatalyst,
+  ClientFeedTransportDiagnostics,
   CurrencyCode,
   DailyMarketHighlight,
   DailyMarketSummaryResponse,
@@ -17,6 +18,7 @@ import {
   MarketHeatmapResponse,
   MarketIntelligenceResponse,
   NewsStory,
+  ServerFeedDiagnosticsResponse,
   StocksMoversBucket,
   Timeframe,
 } from '../types/market';
@@ -53,6 +55,10 @@ interface QuotePatch {
   marketSessionOpen?: boolean;
   sessionStateLabel?: string;
   sessionProgressRatio?: number;
+  fearGreed7d?: number[];
+  move5mPct?: number;
+  vol5mRangePct?: number;
+  move5mSource?: 'server-5m' | 'intraday-1m' | 'closed';
 }
 
 interface BackoffTracker {
@@ -61,6 +67,87 @@ interface BackoffTracker {
 }
 
 const JITTER_WINDOW_SIZE = 5;
+const BOOTSTRAP_CACHE_KEY = 'stocks-bootstrap-cache-v1';
+const BOOTSTRAP_MAX_AGE_MS = 2 * 60 * 60 * 1000;
+
+interface BootstrapCachePayload {
+  savedAt: number;
+  assets?: Array<
+    Pick<
+      MarketAsset,
+      | 'id'
+      | 'price'
+      | 'prevClose'
+      | 'changeValue'
+      | 'changePercent'
+      | 'open'
+      | 'dayHigh'
+      | 'dayLow'
+      | 'volume'
+      | 'sentiment'
+      | 'support'
+      | 'resistance'
+      | 'commentary'
+      | 'updatedAtEpoch'
+      | 'marketSessionOpen'
+      | 'sessionStateLabel'
+      | 'fearGreed7d'
+      | 'move5mPct'
+      | 'vol5mRangePct'
+      | 'move5mSource'
+    >
+  >;
+  fxRates?: Record<CurrencyCode, number>;
+  fxPairTiles?: FxPairTile[];
+  newsStories?: NewsStory[];
+  economicEvents?: EconomicEvent[];
+  usMoversBucket?: StocksMoversBucket;
+  idxMoversBucket?: StocksMoversBucket;
+}
+
+function readBootstrapCache(): BootstrapCachePayload | null {
+  try {
+    const raw = localStorage.getItem(BOOTSTRAP_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as BootstrapCachePayload;
+    if (!parsed || typeof parsed.savedAt !== 'number') return null;
+    if (Date.now() - parsed.savedAt > BOOTSTRAP_MAX_AGE_MS) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function mergeBootstrapAssets(base: MarketAsset[], cached?: BootstrapCachePayload['assets']): MarketAsset[] {
+  if (!Array.isArray(cached) || cached.length === 0) return base;
+  const map = new Map(cached.map((c) => [c.id, c]));
+  return base.map((asset) => {
+    const patch = map.get(asset.id);
+    if (!patch || !Number.isFinite(patch.price) || patch.price <= 0) return asset;
+    return {
+      ...asset,
+      price: patch.price,
+      prevClose: patch.prevClose > 0 ? patch.prevClose : asset.prevClose,
+      changeValue: Number.isFinite(patch.changeValue) ? patch.changeValue : asset.changeValue,
+      changePercent: Number.isFinite(patch.changePercent) ? patch.changePercent : asset.changePercent,
+      open: patch.open || asset.open,
+      dayHigh: patch.dayHigh || asset.dayHigh,
+      dayLow: patch.dayLow || asset.dayLow,
+      volume: patch.volume || asset.volume,
+      sentiment: patch.sentiment || asset.sentiment,
+      support: patch.support || asset.support,
+      resistance: patch.resistance || asset.resistance,
+      commentary: patch.commentary || asset.commentary,
+      updatedAtEpoch: patch.updatedAtEpoch || asset.updatedAtEpoch,
+      marketSessionOpen: patch.marketSessionOpen ?? asset.marketSessionOpen,
+      sessionStateLabel: patch.sessionStateLabel ?? asset.sessionStateLabel,
+      fearGreed7d: patch.fearGreed7d ?? asset.fearGreed7d,
+      move5mPct: patch.move5mPct ?? asset.move5mPct,
+      vol5mRangePct: patch.vol5mRangePct ?? asset.vol5mRangePct,
+      move5mSource: patch.move5mSource ?? asset.move5mSource,
+    };
+  });
+}
 
 function computeMedian(values: number[]): number {
   if (values.length === 0) return 0;
@@ -71,41 +158,73 @@ function computeMedian(values: number[]): number {
     : sorted[mid];
 }
 
-async function fetchJsonWithTimeout<T>(url: string, timeoutMs: number): Promise<T | null> {
+async function fetchJsonWithLatency<T>(
+  url: string,
+  timeoutMs: number
+): Promise<{ data: T | null; rttMs: number | null }> {
   const controller = new AbortController();
   const timerId = window.setTimeout(() => controller.abort(), timeoutMs);
+  const start = performance.now();
   try {
     const res = await fetch(url, { signal: controller.signal });
-    if (!res.ok) return null;
-    return (await res.json()) as T;
+    const rttMs = Math.max(1, Math.round(performance.now() - start));
+    if (!res.ok) return { data: null, rttMs };
+    return { data: (await res.json()) as T, rttMs };
   } catch {
-    return null;
+    return { data: null, rttMs: null };
   } finally {
     window.clearTimeout(timerId);
   }
 }
 
+async function fetchJsonWithTimeout<T>(url: string, timeoutMs: number): Promise<T | null> {
+  const { data } = await fetchJsonWithLatency<T>(url, timeoutMs);
+  return data;
+}
+
 export function useLiveMarket() {
-  const [assets, setAssets] = useState<MarketAsset[]>(INITIAL_ASSETS);
-  const [newsStories, setNewsStories] = useState<NewsStory[]>(NEWS_STORIES);
-  const [economicEvents, setEconomicEvents] = useState<EconomicEvent[]>(ECONOMIC_EVENTS);
+  const bootstrapRef = useRef<BootstrapCachePayload | null | undefined>(undefined);
+  if (bootstrapRef.current === undefined) {
+    bootstrapRef.current = typeof window !== 'undefined' ? readBootstrapCache() : null;
+  }
+  const boot = bootstrapRef.current;
+
+  const [assets, setAssets] = useState<MarketAsset[]>(() =>
+    mergeBootstrapAssets(INITIAL_ASSETS, boot?.assets)
+  );
+  const [newsStories, setNewsStories] = useState<NewsStory[]>(() =>
+    boot?.newsStories && boot.newsStories.length > 0 ? boot.newsStories : NEWS_STORIES
+  );
+  const [economicEvents, setEconomicEvents] = useState<EconomicEvent[]>(() =>
+    boot?.economicEvents && boot.economicEvents.length > 0 ? boot.economicEvents : ECONOMIC_EVENTS
+  );
   const [nextCatalyst, setNextCatalyst] = useState<CalendarCatalyst | null>(null);
-  const [fxRates, setFxRates] = useState<Record<CurrencyCode, number>>(FX_RATES_USD_BASE);
-  const [fxPairTiles, setFxPairTiles] = useState<FxPairTile[]>(FX_PAIR_TILES);
-  const [usMoversBucket, setUsMoversBucket] = useState<StocksMoversBucket>({
-    impact: [],
-    gainers: [],
-    losers: [],
-  });
-  const [idxMoversBucket, setIdxMoversBucket] = useState<StocksMoversBucket>({
-    impact: [],
-    gainers: [],
-    losers: [],
-    foreignBuy: [],
-    foreignSell: [],
-  });
+  const [fxRates, setFxRates] = useState<Record<CurrencyCode, number>>(() =>
+    boot?.fxRates ? { ...FX_RATES_USD_BASE, ...boot.fxRates } : FX_RATES_USD_BASE
+  );
+  const [fxPairTiles, setFxPairTiles] = useState<FxPairTile[]>(() =>
+    boot?.fxPairTiles && boot.fxPairTiles.length > 0 ? boot.fxPairTiles : FX_PAIR_TILES
+  );
+  const [usMoversBucket, setUsMoversBucket] = useState<StocksMoversBucket>(() =>
+    boot?.usMoversBucket ?? {
+      impact: [],
+      gainers: [],
+      losers: [],
+    }
+  );
+  const [idxMoversBucket, setIdxMoversBucket] = useState<StocksMoversBucket>(() =>
+    boot?.idxMoversBucket ?? {
+      impact: [],
+      gainers: [],
+      losers: [],
+      foreignBuy: [],
+      foreignSell: [],
+    }
+  );
   const [stocksUpdatedAt, setStocksUpdatedAt] = useState<string | null>(null);
-  const [stocksLoading, setStocksLoading] = useState<boolean>(true);
+  const [stocksLoading, setStocksLoading] = useState<boolean>(
+    !(boot?.usMoversBucket?.impact?.length || boot?.idxMoversBucket?.impact?.length)
+  );
   const [heatmapData, setHeatmapData] = useState<MarketHeatmapResponse | null>(null);
   const [heatmapLoading, setHeatmapLoading] = useState<boolean>(true);
   const [dailySummary, setDailySummary] = useState<DailyMarketSummaryResponse | null>(null);
@@ -116,6 +235,12 @@ export function useLiveMarket() {
   const [wsConnected, setWsConnected] = useState(false);
   const [feedsLive, setFeedsLive] = useState(false);
   const [flashMap, setFlashMap] = useState<Record<string, 'gain' | 'loss'>>({});
+  const [serverDiagnostics, setServerDiagnostics] = useState<ServerFeedDiagnosticsResponse | null>(
+    null
+  );
+  const [quotesRttMs, setQuotesRttMs] = useState<number | null>(null);
+  const [lastQuotesAt, setLastQuotesAt] = useState<number | null>(null);
+  const [lastWsTickState, setLastWsTickState] = useState<number | null>(null);
 
   const isPulseRef = useRef(isPulseActive);
   isPulseRef.current = isPulseActive;
@@ -238,7 +363,13 @@ export function useLiveMarket() {
       if (quotesInFlightRef.current || shouldSkipForBackoff('quotes', force)) return;
       quotesInFlightRef.current = true;
       try {
-        const payload = await fetchJsonWithTimeout<{ quotes?: QuotePatch[] }>('/api/market/quotes', 6500);
+        const { data: payload, rttMs } = await fetchJsonWithLatency<{
+          quotes?: QuotePatch[];
+          diagnostics?: ServerFeedDiagnosticsResponse;
+        }>('/api/market/quotes', 4500);
+        if (rttMs !== null) {
+          setQuotesRttMs(rttMs);
+        }
         const patches = payload?.quotes;
         if (!Array.isArray(patches) || patches.length === 0) {
           recordFetchOutcome('quotes', false, 2000, 15_000);
@@ -246,6 +377,10 @@ export function useLiveMarket() {
         }
 
         recordFetchOutcome('quotes', true);
+        setLastQuotesAt(Date.now());
+        if (payload?.diagnostics) {
+          setServerDiagnostics(payload.diagnostics);
+        }
         const patchMap = new Map(patches.map((p) => [p.id, p]));
         anySessionOpenRef.current = patches.some((p) => p.marketSessionOpen !== false);
         setFeedsLive(true);
@@ -307,6 +442,19 @@ export function useLiveMarket() {
               marketSessionOpen: patch.marketSessionOpen,
               sessionStateLabel: patch.sessionStateLabel,
               sessionProgressRatio: patch.sessionProgressRatio,
+              fearGreed7d:
+                Array.isArray(patch.fearGreed7d) && patch.fearGreed7d.length >= 2
+                  ? patch.fearGreed7d
+                  : asset.fearGreed7d,
+              move5mPct:
+                typeof patch.move5mPct === 'number' && Number.isFinite(patch.move5mPct)
+                  ? patch.move5mPct
+                  : asset.move5mPct,
+              vol5mRangePct:
+                typeof patch.vol5mRangePct === 'number' && Number.isFinite(patch.vol5mRangePct)
+                  ? patch.vol5mRangePct
+                  : asset.vol5mRangePct,
+              move5mSource: patch.move5mSource ?? asset.move5mSource,
               sparklinePoints: patch.sparklinePoints.length > 1 ? patch.sparklinePoints : asset.sparklinePoints,
               chartSeries: {
                 ...asset.chartSeries,
@@ -331,6 +479,7 @@ export function useLiveMarket() {
     const data = await fetchJsonWithTimeout<{
       points?: number[];
       timestamps?: number[];
+      candles?: Array<{ t: number; o: number; h: number; l: number; c: number }>;
       prevClose?: number;
     }>(
       `/api/market/chart?id=${encodeURIComponent(assetId)}&timeframe=${encodeURIComponent(timeframe)}`,
@@ -351,27 +500,46 @@ export function useLiveMarket() {
             ...asset.chartTimestamps,
             [timeframe]: data.timestamps,
           },
+          chartCandles:
+            Array.isArray(data.candles) && data.candles.length >= 2
+              ? {
+                  ...asset.chartCandles,
+                  [timeframe]: data.candles,
+                }
+              : asset.chartCandles,
         };
       })
     );
   }, []);
 
-  // Fetch live News RSS, Economic Calendar, and FX Rates
+  // Fetch FX Rates independently on boot for instant portfolio conversion
+  const refreshFxRates = useCallback(async (force = false) => {
+    if (shouldSkipForBackoff('fx', force)) return;
+    const fxRes = await fetchJsonWithTimeout<{ rates?: Record<CurrencyCode, number>; pairTiles?: FxPairTile[] }>(
+      '/api/fx/rates',
+      6000
+    );
+    recordFetchOutcome('fx', Boolean(fxRes), 4000, 25_000);
+    if (fxRes && fxRes.rates) {
+      setFxRates((prev) => ({ ...prev, ...fxRes.rates }));
+      if (Array.isArray(fxRes.pairTiles) && fxRes.pairTiles.length > 0) {
+        setFxPairTiles(fxRes.pairTiles);
+      }
+    }
+  }, [recordFetchOutcome, shouldSkipForBackoff]);
+
+  // Fetch live News RSS and Economic Calendar
   const refreshSecondaryFeeds = useCallback(async (force = false) => {
     if (shouldSkipForBackoff('secondary', force)) return;
-    const [newsRes, calRes, fxRes] = await Promise.all([
-      fetchJsonWithTimeout<{ stories?: NewsStory[] }>('/api/news/feed', 9000),
+    const [newsRes, calRes] = await Promise.all([
+      fetchJsonWithTimeout<{ stories?: NewsStory[] }>('/api/news/feed', 7500),
       fetchJsonWithTimeout<{ events?: EconomicEvent[]; nextCatalyst?: CalendarCatalyst | null }>(
         '/api/calendar/events',
-        9000
-      ),
-      fetchJsonWithTimeout<{ rates?: Record<CurrencyCode, number>; pairTiles?: FxPairTile[] }>(
-        '/api/fx/rates',
-        8500
+        7500
       ),
     ]);
 
-    const anyOk = Boolean(newsRes || calRes || fxRes);
+    const anyOk = Boolean(newsRes || calRes);
     recordFetchOutcome('secondary', anyOk, 5000, 30_000);
 
     if (newsRes && Array.isArray(newsRes.stories) && newsRes.stories.length > 0) {
@@ -382,13 +550,6 @@ export function useLiveMarket() {
       setEconomicEvents(calRes.events);
       if (calRes.nextCatalyst) {
         setNextCatalyst(calRes.nextCatalyst);
-      }
-    }
-
-    if (fxRes && fxRes.rates) {
-      setFxRates((prev) => ({ ...prev, ...fxRes.rates }));
-      if (Array.isArray(fxRes.pairTiles) && fxRes.pairTiles.length > 0) {
-        setFxPairTiles(fxRes.pairTiles);
       }
     }
   }, [recordFetchOutcome, shouldSkipForBackoff]);
@@ -504,7 +665,7 @@ export function useLiveMarket() {
       try {
         const data = await fetchJsonWithTimeout<MarketIntelligenceResponse>(
           '/api/market/intelligence',
-          12_000
+          18_000
         );
         if (!data || !Array.isArray(data.indexSessions)) {
           recordFetchOutcome('intel', false, 5000, 30_000);
@@ -520,14 +681,70 @@ export function useLiveMarket() {
     [recordFetchOutcome, shouldSkipForBackoff]
   );
 
-  // Initial fetch + 1-second live polling during open sessions (last close freeze when closed)
+  // Throttled localStorage persistence so re-opening the terminal hydrates immediately at 0ms
+  const lastBootSaveAtRef = useRef(0);
   useEffect(() => {
+    if (!feedsLive) return;
+    const now = Date.now();
+    if (now - lastBootSaveAtRef.current < 12_000) return;
+    lastBootSaveAtRef.current = now;
+    try {
+      const compactAssets: BootstrapCachePayload['assets'] = assets.map((a) => ({
+        id: a.id,
+        price: a.price,
+        prevClose: a.prevClose,
+        changeValue: a.changeValue,
+        changePercent: a.changePercent,
+        open: a.open,
+        dayHigh: a.dayHigh,
+        dayLow: a.dayLow,
+        volume: a.volume,
+        sentiment: a.sentiment,
+        support: a.support,
+        resistance: a.resistance,
+        commentary: a.commentary,
+        updatedAtEpoch: a.updatedAtEpoch,
+        marketSessionOpen: a.marketSessionOpen,
+        sessionStateLabel: a.sessionStateLabel,
+        fearGreed7d: a.fearGreed7d,
+        move5mPct: a.move5mPct,
+        vol5mRangePct: a.vol5mRangePct,
+        move5mSource: a.move5mSource,
+      }));
+      const payload: BootstrapCachePayload = {
+        savedAt: now,
+        assets: compactAssets,
+        fxRates,
+        fxPairTiles,
+        newsStories: newsStories.slice(0, 20),
+        economicEvents: economicEvents.slice(0, 20),
+        usMoversBucket,
+        idxMoversBucket,
+      };
+      localStorage.setItem(BOOTSTRAP_CACHE_KEY, JSON.stringify(payload));
+    } catch {
+      // ignore storage quota errors
+    }
+  }, [feedsLive, assets, fxRates, fxPairTiles, newsStories, economicEvents, usMoversBucket, idxMoversBucket]);
+
+  // Prioritized staggered initial fetch + 1-second live polling during open sessions
+  useEffect(() => {
+    // T=0: Critical first-paint quotes & FX rates
     void refreshQuotes(true);
-    void refreshSecondaryFeeds(true);
-    void refreshStocks(true);
-    void refreshHeatmap(true);
-    void fetchDailySummary(true);
-    void fetchMarketIntelligence(true);
+    void refreshFxRates(true);
+
+    // T=120ms: Stocks movers & live news/calendar
+    const t1 = window.setTimeout(() => {
+      void refreshStocks(true);
+      void refreshSecondaryFeeds(true);
+    }, 120);
+
+    // T=340ms: Heavy analytics (heatmap, 24h summary, multi-source intelligence)
+    const t2 = window.setTimeout(() => {
+      void refreshHeatmap(true);
+      void fetchDailySummary(true);
+      void fetchMarketIntelligence(true);
+    }, 340);
 
     const quoteTimer = window.setInterval(() => {
       if (!isPulseRef.current) return;
@@ -556,6 +773,7 @@ export function useLiveMarket() {
 
     const secondaryTimer = window.setInterval(() => {
       if (isPulseRef.current) {
+        void refreshFxRates(false);
         void refreshSecondaryFeeds(false);
         void fetchDailySummary(false);
         void fetchMarketIntelligence(false);
@@ -563,6 +781,8 @@ export function useLiveMarket() {
     }, 60_000);
 
     return () => {
+      window.clearTimeout(t1);
+      window.clearTimeout(t2);
       window.clearInterval(quoteTimer);
       window.clearInterval(stocksTimer);
       window.clearInterval(heatmapTimer);
@@ -570,6 +790,7 @@ export function useLiveMarket() {
     };
   }, [
     refreshQuotes,
+    refreshFxRates,
     refreshSecondaryFeeds,
     refreshStocks,
     refreshHeatmap,
@@ -624,7 +845,9 @@ export function useLiveMarket() {
             const rawPrice = parseFloat(payload.price);
             if (!Number.isFinite(rawPrice) || rawPrice <= 0) return;
 
-            lastWsTickAtRef.current[id] = Date.now();
+            const nowTick = Date.now();
+            lastWsTickAtRef.current[id] = nowTick;
+            setLastWsTickState(nowTick);
 
             setAssets((prev) =>
               prev.map((asset) => {
@@ -636,10 +859,10 @@ export function useLiveMarket() {
                 }
                 const fallbackOpen = parseFloat(payload.open_24h ?? '');
                 const anchorPrev =
-                  asset.prevClose > 0
-                    ? asset.prevClose
-                    : Number.isFinite(fallbackOpen) && fallbackOpen > 0
-                      ? fallbackOpen
+                  Number.isFinite(fallbackOpen) && fallbackOpen > 0
+                    ? fallbackOpen
+                    : asset.prevClose > 0
+                      ? asset.prevClose
                       : smoothedPrice;
                 const changeValue = Number((smoothedPrice - anchorPrev).toFixed(2));
                 const changePercent = Number(
@@ -703,21 +926,58 @@ export function useLiveMarket() {
     setIsPulseActive((prev) => !prev);
   }, []);
 
+  const refreshDiagnostics = useCallback(async () => {
+    const { data, rttMs } = await fetchJsonWithLatency<ServerFeedDiagnosticsResponse>(
+      '/api/market/diagnostics',
+      4000
+    );
+    if (data && Array.isArray(data.providers)) {
+      setServerDiagnostics(data);
+    }
+    if (rttMs !== null && quotesRttMs === null) {
+      setQuotesRttMs(rttMs);
+    }
+  }, [quotesRttMs]);
+
   const refreshAll = useCallback(() => {
     void refreshQuotes(true);
+    void refreshFxRates(true);
     void refreshSecondaryFeeds(true);
     void refreshStocks(true);
     void refreshHeatmap(true);
     void fetchDailySummary(true);
     void fetchMarketIntelligence(true);
+    void refreshDiagnostics();
   }, [
     refreshQuotes,
+    refreshFxRates,
     refreshSecondaryFeeds,
     refreshStocks,
     refreshHeatmap,
     fetchDailySummary,
     fetchMarketIntelligence,
+    refreshDiagnostics,
   ]);
+
+  const nowMs = Date.now();
+  const activeBackoffs = Object.entries(backoffRef.current)
+    .filter(([, tracker]) => tracker.failures > 0 && tracker.nextAllowedAt > nowMs)
+    .map(([endpoint, tracker]) => ({
+      endpoint,
+      failures: tracker.failures,
+      retryInSec: Math.max(1, Math.ceil((tracker.nextAllowedAt - nowMs) / 1000)),
+    }));
+
+  const clientTransport: ClientFeedTransportDiagnostics = {
+    quotesRttMs,
+    wsConnected,
+    lastWsTickAt: lastWsTickState,
+    wsFresh: Boolean(wsConnected && lastWsTickState && nowMs - lastWsTickState < 15_000),
+    usingBootstrapCache: !feedsLive && Boolean(boot?.assets && boot.assets.length > 0),
+    bootstrapSavedAt: boot?.savedAt ?? null,
+    activeBackoffs,
+    lastQuotesAt,
+  };
 
   return {
     assets,
@@ -745,6 +1005,9 @@ export function useLiveMarket() {
     wsConnected,
     feedsLive,
     flashMap,
+    serverDiagnostics,
+    clientTransport,
+    refreshDiagnostics,
     togglePulse,
     loadChartTimeframe,
     refreshStocks: () => refreshStocks(true),

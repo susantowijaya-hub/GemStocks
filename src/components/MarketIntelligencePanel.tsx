@@ -314,6 +314,28 @@ export const MarketIntelligencePanel: React.FC<MarketIntelligencePanelProps> = (
             </div>
           </div>
 
+          {/* Deep-Thought Session Condition, Movement Triggers & 1-Sentence Executive Summary */}
+          {(intelligence.sessionConditionAndTrigger || intelligence.oneSentenceSummary) && (
+            <div className="rounded-xl p-3.5 bg-[#0071E3]/[0.07] dark:bg-[#0A84FF]/[0.1] border border-[#0071E3]/25 dark:border-[#0A84FF]/30 flex flex-col gap-2">
+              {intelligence.oneSentenceSummary && (
+                <p className="text-xs sm:text-[13px] font-semibold text-[#1C1C1E] dark:text-white leading-snug">
+                  <span className="text-[#0071E3] dark:text-[#64D2FF] font-bold uppercase tracking-wider text-[10px] mr-2">
+                    Executive Takeaway
+                  </span>
+                  {intelligence.oneSentenceSummary}
+                </p>
+              )}
+              {intelligence.sessionConditionAndTrigger && (
+                <p className="text-xs text-[#3A3A3C] dark:text-[#D1D1D6] leading-relaxed">
+                  <span className="font-bold text-[#1C1C1E] dark:text-white mr-1.5">
+                    Session Condition &amp; Trigger:
+                  </span>
+                  {intelligence.sessionConditionAndTrigger}
+                </p>
+              )}
+            </div>
+          )}
+
           {/* Signal Sentiment Breadth Meter */}
           <div className="flex flex-col gap-1.5">
             <div className="flex items-center justify-between text-[11px] font-semibold text-[#6C6C70] dark:text-[#8E8E93]">
@@ -342,7 +364,7 @@ export const MarketIntelligencePanel: React.FC<MarketIntelligencePanelProps> = (
                 <button
                   type="button"
                   onClick={() => onNavigate('stocks')}
-                  className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#0071E3] dark:text-[#8AB4F8] hover:underline"
+                  className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#005BB8] dark:text-[#8AB4F8] hover:underline"
                 >
                   <span>Top Stocks</span>
                   <ArrowRight className="w-3 h-3" />
@@ -372,7 +394,7 @@ export const MarketIntelligencePanel: React.FC<MarketIntelligencePanelProps> = (
                 <button
                   type="button"
                   onClick={() => onNavigate('news')}
-                  className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#0071E3] dark:text-[#8AB4F8] hover:underline"
+                  className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#005BB8] dark:text-[#8AB4F8] hover:underline"
                 >
                   <span>News Wire</span>
                   <ArrowRight className="w-3 h-3" />
@@ -417,7 +439,7 @@ export const MarketIntelligencePanel: React.FC<MarketIntelligencePanelProps> = (
                   <button
                     type="button"
                     onClick={() => onNavigate('calendar')}
-                    className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#0071E3] dark:text-[#8AB4F8] hover:underline"
+                    className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#005BB8] dark:text-[#8AB4F8] hover:underline"
                   >
                     <span>Calendar</span>
                     <ArrowRight className="w-3 h-3" />

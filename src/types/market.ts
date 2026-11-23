@@ -1,8 +1,16 @@
 export type AppRoute = 'dashboard' | 'watchlist' | 'portfolio' | 'stocks' | 'heatmap' | 'news' | 'calendar' | 'extract';
 
-export type ThemeMode = 'light' | 'dark' | 'monochrome';
+export type ThemeMode = 'obsidian' | 'arctic' | 'parchment';
 
-export type Timeframe = '1D' | '1W' | '1M' | '3M' | 'YTD' | '1Y' | 'ALL';
+export interface CandlePoint {
+  t: number;
+  o: number;
+  h: number;
+  l: number;
+  c: number;
+}
+
+export type Timeframe = '15M' | '1H' | '4H' | '1D' | '1W' | '1M' | '3M' | 'YTD' | '1Y' | 'ALL';
 
 export type WatchlistCategory =
   | 'us-indices'
@@ -47,13 +55,18 @@ export interface MarketAsset {
   resistanceNote: string;
   commentary: string;
   sparklinePoints: number[];
-  chartSeries: Record<Timeframe, number[]>;
+  chartSeries: Partial<Record<Timeframe, number[]>> & { '1D': number[] };
   chartTimestamps?: Partial<Record<Timeframe, number[]>>;
+  chartCandles?: Partial<Record<Timeframe, CandlePoint[]>>;
   liveStreamable?: boolean;
   updatedAtEpoch?: number;
   marketSessionOpen?: boolean;
   sessionStateLabel?: string;
   sessionProgressRatio?: number;
+  fearGreed7d?: number[];
+  move5mPct?: number;
+  vol5mRangePct?: number;
+  move5mSource?: 'server-5m' | 'intraday-1m' | 'closed';
 }
 
 export interface NewsStory {
@@ -62,6 +75,8 @@ export interface NewsStory {
   timeAgo: string;
   publishedAt?: string;
   isBreaking?: boolean;
+  newsTier?: 'breaking' | 'recent';
+  impactScore?: number;
   impact?: string;
   topic: 'rates' | 'idx' | 'commodities' | 'crypto';
   tags: string[];
@@ -110,7 +125,18 @@ export interface PortfolioPosition {
   linkedAssetId?: string;
 }
 
-export type CurrencyCode = 'USD' | 'EUR' | 'GBP' | 'JPY' | 'IDR' | 'SGD' | 'AUD';
+export type CurrencyCode =
+  | 'USD'
+  | 'EUR'
+  | 'GBP'
+  | 'JPY'
+  | 'CHF'
+  | 'CAD'
+  | 'AUD'
+  | 'NZD'
+  | 'CNY'
+  | 'SGD'
+  | 'IDR';
 
 export interface FxPairTile {
   pair: string;
@@ -194,7 +220,7 @@ export type PortfolioAssetCategory = 'Equities' | 'Crypto' | 'Commodities' | 'Ca
 export interface PortfolioGroup {
   id: string;
   name: string;
-  displayCurrency: 'IDR' | 'USD';
+  displayCurrency: CurrencyCode;
   createdAt: string;
 }
 
@@ -326,6 +352,69 @@ export interface MarketSignalInfo {
   reason: string;
 }
 
+export type FearGreedZone =
+  | 'Extreme Fear'
+  | 'Fear'
+  | 'Neutral'
+  | 'Greed'
+  | 'Extreme Greed';
+
+export interface FearGreedInfo {
+  score: number;
+  zone: FearGreedZone;
+  shortLabel: string;
+  driver: string;
+  history7d: number[];
+  components: {
+    momentum: number;
+    intradayStrength: number;
+    range52w: number;
+  };
+}
+
+export interface VolatilityFearGreedInfo {
+  score: number;
+  zone: FearGreedZone;
+  shortLabel: string;
+  volRegime: 'Compressed' | 'Normal' | 'Elevated' | 'Panic';
+  avg5mRangePct: number;
+  dispersionSigma: number;
+  intradayRangePct: number;
+  downsideSkewPct: number;
+  safeHavenBidScore: number;
+  driver: string;
+  history7d: number[];
+}
+
+export interface PriceAlertItem {
+  id: string;
+  assetId: string;
+  symbol: string;
+  name: string;
+  direction: 'surge' | 'drop';
+  movePercent: number;
+  windowMinutes: number;
+  fromPrice: number;
+  toPrice: number;
+  decimals: number;
+  currencyPrefix?: string;
+  unitSuffix?: string;
+  triggeredAt: number;
+  read: boolean;
+}
+
+export interface Asset5mVolatility {
+  assetId: string;
+  pct5m: number;
+  range5mPct: number;
+  marketMean5m: number;
+  medianBaseline5m: number;
+  relDevPct: number;
+  zScore: number;
+  isSessionOpen: boolean;
+  sampleSource: 'live-5m' | 'server-5m' | 'intraday-1m' | 'closed';
+}
+
 export type SessionPhaseKey = 'beforeOpen' | 'duringSession' | 'afterClose';
 
 export interface IndexSessionBrief {
@@ -370,6 +459,8 @@ export interface MarketIntelligenceResponse {
   }>;
   stocksAndFlowSummary: string;
   forwardPrediction: string;
+  sessionConditionAndTrigger?: string;
+  oneSentenceSummary?: string;
   indexSessions: IndexSessionBrief[];
   aiRefined: boolean;
 }
@@ -399,5 +490,114 @@ export interface MarketHeatmapResponse {
   sectorsUs: string[];
   sectorsIndonesia: string[];
   updatedAt: string;
+}
+
+export type ShareScheduleSlot = 'morning_0530' | 'afternoon_1630';
+
+export interface ShareSnapshotAsset {
+  id: string;
+  symbol: string;
+  shortName: string;
+  price: number;
+  prevClose: number;
+  changeValue: number;
+  changePercent: number;
+  decimals: number;
+  currencyPrefix?: string;
+  unitSuffix?: string;
+  support: string;
+  resistance: string;
+  barTimestampIso: string;
+  barTimeWib: string;
+}
+
+export interface ShareSnapshotResponse {
+  slot: ShareScheduleSlot;
+  dateKey: string;
+  dateLabel: string;
+  timeSlotLabel: string;
+  targetTimestampIso: string;
+  targetEpochMs: number;
+  editionTitle: string;
+  marketSummary: string;
+  aiGenerated: boolean;
+  assets: Record<string, ShareSnapshotAsset>;
+  updatedAt: string;
+}
+
+export interface MarketDepthLevel {
+  price: number;
+  size: number;
+  total: number;
+  pctOfMax: number;
+  isWall?: boolean;
+  tag?: string;
+}
+
+export interface MarketDepthSnapshot {
+  assetId: string;
+  symbol: string;
+  decimals: number;
+  currencyPrefix?: string;
+  unitSuffix?: string;
+  midPrice: number;
+  bestBid: number;
+  bestAsk: number;
+  spreadAbs: number;
+  spreadPct: number;
+  bidRatioPct: number;
+  askRatioPct: number;
+  imbalanceLabel: string;
+  sourceKind: 'live-l2' | 'session-liquidity';
+  sourceLabel: string;
+  buyWallPrice: number;
+  buyWallSize: number;
+  sellWallPrice: number;
+  sellWallSize: number;
+  bids: MarketDepthLevel[];
+  asks: MarketDepthLevel[];
+  isCachedFallback?: boolean;
+  updatedAt: string;
+}
+
+export interface CorrelationMatrixResponse {
+  timeframe: '1M' | '3M';
+  assetIds: string[];
+  matrix: number[][];
+  sampleDays: number;
+  updatedAt: string;
+}
+
+export type ProviderHealthStatus = 'live' | 'failover' | 'cached' | 'offline';
+
+export interface ProviderFeedDiagnostic {
+  id: 'coinbase' | 'yahoo_macro' | 'idx_proxy' | 'fx_rates' | 'news_cal';
+  label: string;
+  primarySource: string;
+  activeSource: string;
+  status: ProviderHealthStatus;
+  latencyMs: number | null;
+  lastSuccessAt: number | null;
+  isCachedFallback: boolean;
+  fallbackReason?: string;
+}
+
+export interface ServerFeedDiagnosticsResponse {
+  overallStatus: ProviderHealthStatus;
+  hasCachedFallback: boolean;
+  hasFailover: boolean;
+  providers: ProviderFeedDiagnostic[];
+  serverTimestamp: number;
+}
+
+export interface ClientFeedTransportDiagnostics {
+  quotesRttMs: number | null;
+  wsConnected: boolean;
+  lastWsTickAt: number | null;
+  wsFresh: boolean;
+  usingBootstrapCache: boolean;
+  bootstrapSavedAt: number | null;
+  activeBackoffs: Array<{ endpoint: string; failures: number; retryInSec: number }>;
+  lastQuotesAt: number | null;
 }
 

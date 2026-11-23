@@ -1,11 +1,37 @@
-import { MarketAsset, MarketSignalInfo, SignalTier, StockMover } from '../types/market';
+import {
+  Asset5mVolatility,
+  FearGreedInfo,
+  FearGreedZone,
+  MarketAsset,
+  MarketSignalInfo,
+  SignalTier,
+  StockMover,
+  Timeframe,
+  VolatilityFearGreedInfo,
+} from '../types/market';
+
+const parsedNumberCache = new Map<string, number>();
+const assetSignalCache = new WeakMap<MarketAsset, MarketSignalInfo>();
+const stockSignalCache = new WeakMap<StockMover, MarketSignalInfo>();
+const assetFearGreedCache = new WeakMap<MarketAsset, FearGreedInfo>();
+const stockFearGreedCache = new WeakMap<StockMover, FearGreedInfo>();
+const overallFearGreedCache = new WeakMap<MarketAsset[], OverallMarketFearGreed>();
+const assetTimeframeReturnCache = new WeakMap<MarketAsset, Map<string, AssetTimeframeReturn>>();
 
 export function parseFormattedMarketNumber(raw: string | number | undefined): number {
   if (typeof raw === 'number') return Number.isFinite(raw) ? raw : NaN;
   if (!raw) return NaN;
+  const cached = parsedNumberCache.get(raw);
+  if (cached !== undefined) return cached;
+
   const cleaned = String(raw).replace(/[^0-9.\-]/g, '');
   const num = parseFloat(cleaned);
-  return Number.isFinite(num) ? num : NaN;
+  const result = Number.isFinite(num) ? num : NaN;
+  if (parsedNumberCache.size >= 600) {
+    parsedNumberCache.clear();
+  }
+  parsedNumberCache.set(raw, result);
+  return result;
 }
 
 export function computeTechnicalSignal(params: {
@@ -193,12 +219,15 @@ export function computeTechnicalSignal(params: {
 }
 
 export function getAssetSignal(asset: MarketAsset): MarketSignalInfo {
+  const cached = assetSignalCache.get(asset);
+  if (cached) return cached;
+
   const highNum = parseFormattedMarketNumber(asset.dayHigh);
   const lowNum = parseFormattedMarketNumber(asset.dayLow);
   const openNum = parseFormattedMarketNumber(asset.open);
   const series = asset.chartSeries['1D']?.length ? asset.chartSeries['1D'] : asset.sparklinePoints;
 
-  return computeTechnicalSignal({
+  const result = computeTechnicalSignal({
     price: asset.price,
     prevClose: asset.prevClose,
     changePercent: asset.changePercent,
@@ -211,10 +240,15 @@ export function getAssetSignal(asset: MarketAsset): MarketSignalInfo {
     assetId: asset.id,
     category: asset.category,
   });
+  assetSignalCache.set(asset, result);
+  return result;
 }
 
 export function getStockSignal(stock: StockMover): MarketSignalInfo {
-  return computeTechnicalSignal({
+  const cached = stockSignalCache.get(stock);
+  if (cached) return cached;
+
+  const result = computeTechnicalSignal({
     price: stock.price,
     prevClose: stock.prevClose,
     changePercent: stock.changePercent,
@@ -225,4 +259,640 @@ export function getStockSignal(stock: StockMover): MarketSignalInfo {
     category: 'stocks',
     foreignFlowSide: stock.foreignFlowSide,
   });
+  stockSignalCache.set(stock, result);
+  return result;
 }
+
+function clamp0100(n: number): number {
+  if (!Number.isFinite(n)) return 50;
+  return Math.max(0, Math.min(100, Math.round(n)));
+}
+
+export function getFearGreedZone(score: number): { zone: FearGreedZone; shortLabel: string } {
+  if (score >= 75) return { zone: 'Extreme Greed', shortLabel: 'Ex. Greed' };
+  if (score >= 55) return { zone: 'Greed', shortLabel: 'Greed' };
+  if (score <= 24) return { zone: 'Extreme Fear', shortLabel: 'Ex. Fear' };
+  if (score <= 44) return { zone: 'Fear', shortLabel: 'Fear' };
+  return { zone: 'Neutral', shortLabel: 'Neutral' };
+}
+
+function deriveSevenDayHistory(
+  currentScore: number,
+  providedHistory: number[] | undefined,
+  series: number[] | undefined,
+  w52Pct: number | undefined,
+  changePercent: number,
+  seedId: string
+): number[] {
+  if (Array.isArray(providedHistory) && providedHistory.length >= 2) {
+    const cleaned = providedHistory
+      .filter((v) => typeof v === 'number' && Number.isFinite(v))
+      .map((v) => clamp0100(v));
+    if (cleaned.length >= 2) {
+      const prior = cleaned.slice(-7, -1);
+      const padded =
+        prior.length >= 6
+          ? prior.slice(-6)
+          : [...Array(6 - prior.length).fill(cleaned[0]), ...prior];
+      return [...padded, currentScore];
+    }
+  }
+
+  // Derive 6 prior buckets from intraday/weekly price series when backend 7D series isn't supplied
+  if (Array.isArray(series) && series.length >= 7) {
+    const valid = series.filter((v) => typeof v === 'number' && Number.isFinite(v) && v > 0);
+    if (valid.length >= 7) {
+      const sMin = Math.min(...valid);
+      const sMax = Math.max(...valid);
+      const sRange = sMax - sMin;
+      const result: number[] = [];
+      for (let i = 0; i < 6; i++) {
+        const idx = Math.min(valid.length - 1, Math.floor((i / 6) * (valid.length - 1)));
+        const pt = valid[idx];
+        const rel = sRange > 0 ? ((pt - sMin) / sRange - 0.5) * 26 : 0;
+        const driftWeight = (6 - i) / 6;
+        const baseAnchor = typeof w52Pct === 'number' && Number.isFinite(w52Pct) ? w52Pct * 0.35 + 32 : 50;
+        result.push(clamp0100(currentScore * (1 - driftWeight * 0.35) + (baseAnchor + rel) * (driftWeight * 0.35)));
+      }
+      result.push(currentScore);
+      return result;
+    }
+  }
+
+  // Deterministic structural drift back 6 days anchored to 52W range & session slope
+  let seed = 0;
+  for (let i = 0; i < seedId.length; i++) {
+    seed = (seed * 31 + seedId.charCodeAt(i)) % 997;
+  }
+  const structuralBase =
+    typeof w52Pct === 'number' && Number.isFinite(w52Pct)
+      ? clamp0100(40 + (w52Pct - 50) * 0.38)
+      : clamp0100(currentScore - Math.tanh(changePercent / 2.2) * 10);
+
+  const history: number[] = [];
+  for (let i = 0; i < 6; i++) {
+    const t = i / 6;
+    const wave = Math.sin((seed % 11) + i * 1.15) * 4.2;
+    const val = structuralBase * (1 - t) + currentScore * t + wave;
+    history.push(clamp0100(val));
+  }
+  history.push(currentScore);
+  return history;
+}
+
+export function computeFearGreedIndex(params: {
+  price: number;
+  prevClose: number;
+  changePercent: number;
+  open?: number;
+  dayHigh?: number;
+  dayLow?: number;
+  series?: number[];
+  history7d?: number[];
+  w52Pct?: number;
+  isYield?: boolean;
+  assetId?: string;
+  category?: string;
+  foreignFlowSide?: 'BUY' | 'SELL';
+}): FearGreedInfo {
+  const {
+    price,
+    prevClose,
+    changePercent,
+    open,
+    dayHigh,
+    dayLow,
+    series,
+    history7d,
+    w52Pct,
+    assetId = '',
+    category = '',
+    foreignFlowSide,
+  } = params;
+
+  const upper = assetId.toUpperCase();
+  const isCrypto =
+    category === 'Crypto' ||
+    upper.includes('BTC') ||
+    upper.includes('ETH') ||
+    upper.endsWith('-USD');
+  const isGoldOrOil =
+    upper.includes('XAU') ||
+    upper.includes('GC=F') ||
+    upper.includes('WTI') ||
+    upper.includes('BRENT') ||
+    upper.includes('CL=F');
+  const isStock = category === 'stocks' || category === 'Equities';
+  const isFxOrYield = category === 'forex-yields' || upper.includes('USD') || upper.includes('DXY') || upper.includes('10Y') || upper.includes('30Y');
+
+  // Volatility scale calibrating +-100% saturation per asset class
+  const volScale = isCrypto ? 3.2 : isStock ? 2.15 : isGoldOrOil ? 1.45 : isFxOrYield ? 0.85 : 1.35;
+
+  // 1. Price Momentum & Opening Drive (0..100)
+  let momentum = 50 + Math.tanh(changePercent / volScale) * 42;
+  if (typeof open === 'number' && Number.isFinite(open) && open > 0 && price > 0) {
+    const openDeltaPct = ((price - open) / open) * 100;
+    momentum += Math.tanh(openDeltaPct / (volScale * 0.8)) * 8;
+  } else if (prevClose > 0 && price > 0) {
+    const prevDeltaPct = ((price - prevClose) / prevClose) * 100;
+    momentum += Math.tanh(prevDeltaPct / volScale) * 5;
+  }
+  const momentumScore = clamp0100(momentum);
+
+  // 2. Intraday Tape Strength (IBS + Session Mean / Trend Slope + Foreign Flow)
+  let ibsComponent = 50;
+  if (
+    typeof dayHigh === 'number' &&
+    typeof dayLow === 'number' &&
+    Number.isFinite(dayHigh) &&
+    Number.isFinite(dayLow) &&
+    dayHigh > dayLow &&
+    price > 0
+  ) {
+    const ibs = Math.max(0, Math.min(1, (price - dayLow) / (dayHigh - dayLow)));
+    ibsComponent = ibs * 100;
+  } else {
+    ibsComponent = momentumScore;
+  }
+
+  let seriesBias = 0;
+  if (Array.isArray(series) && series.length >= 6 && price > 0) {
+    const valid = series.filter((v) => typeof v === 'number' && Number.isFinite(v) && v > 0);
+    if (valid.length >= 6) {
+      const mean = valid.reduce((a, b) => a + b, 0) / valid.length;
+      const distPct = ((price - mean) / mean) * 100;
+      const tail3 = valid.slice(-3).reduce((a, b) => a + b, 0) / 3;
+      const priorWindow = valid.slice(-8, -3);
+      const priorMean =
+        priorWindow.length > 0
+          ? priorWindow.reduce((a, b) => a + b, 0) / priorWindow.length
+          : mean;
+      const slopePct = ((tail3 - priorMean) / priorMean) * 100;
+      seriesBias = Math.tanh((distPct + slopePct) / (volScale * 0.7)) * 18;
+    }
+  }
+
+  let flowBias = 0;
+  if (foreignFlowSide === 'BUY') flowBias = 8;
+  else if (foreignFlowSide === 'SELL') flowBias = -8;
+
+  const intradayStrength = clamp0100(ibsComponent * 0.72 + momentumScore * 0.28 + seriesBias + flowBias);
+
+  // 3. Structural 52-Week Range Position (0..100)
+  const has52w = typeof w52Pct === 'number' && Number.isFinite(w52Pct);
+  const range52w = has52w
+    ? clamp0100(w52Pct)
+    : clamp0100(momentumScore * 0.55 + intradayStrength * 0.45);
+
+  // Weighted composite (Momentum 45%, Tape Strength 30%, 52W Position 25%)
+  const composite = clamp0100(
+    has52w
+      ? momentumScore * 0.45 + intradayStrength * 0.30 + range52w * 0.25
+      : momentumScore * 0.58 + intradayStrength * 0.42
+  );
+
+  const { zone, shortLabel } = getFearGreedZone(composite);
+
+  const driverParts: string[] = [];
+  if (Math.abs(changePercent) >= volScale * 0.6) {
+    driverParts.push(
+      changePercent > 0
+        ? `Strong upside drive (+${changePercent.toFixed(2)}%)`
+        : `Heavy downside pressure (${changePercent.toFixed(2)}%)`
+    );
+  } else {
+    driverParts.push(`Balanced tape (${changePercent >= 0 ? '+' : ''}${changePercent.toFixed(2)}%)`);
+  }
+  if (has52w) {
+    driverParts.push(`52W range at ${range52w}%`);
+  }
+  if (intradayStrength >= 68) {
+    driverParts.push('buyers controlling high');
+  } else if (intradayStrength <= 32) {
+    driverParts.push('sellers pressing lows');
+  }
+
+  const resolvedHistory7d = deriveSevenDayHistory(
+    composite,
+    history7d,
+    series,
+    w52Pct,
+    changePercent,
+    assetId || category || 'asset'
+  );
+
+  return {
+    score: composite,
+    zone,
+    shortLabel,
+    driver: driverParts.join(' · '),
+    history7d: resolvedHistory7d,
+    components: {
+      momentum: momentumScore,
+      intradayStrength,
+      range52w,
+    },
+  };
+}
+
+export function getAssetFearGreed(asset: MarketAsset): FearGreedInfo {
+  const cached = assetFearGreedCache.get(asset);
+  if (cached) return cached;
+
+  const highNum = parseFormattedMarketNumber(asset.dayHigh);
+  const lowNum = parseFormattedMarketNumber(asset.dayLow);
+  const openNum = parseFormattedMarketNumber(asset.open);
+  const series = asset.chartSeries['1D']?.length ? asset.chartSeries['1D'] : asset.sparklinePoints;
+
+  const result = computeFearGreedIndex({
+    price: asset.price,
+    prevClose: asset.prevClose,
+    changePercent: asset.changePercent,
+    open: Number.isFinite(openNum) ? openNum : undefined,
+    dayHigh: Number.isFinite(highNum) ? highNum : undefined,
+    dayLow: Number.isFinite(lowNum) ? lowNum : undefined,
+    series,
+    history7d: asset.fearGreed7d,
+    w52Pct: asset.w52Pct,
+    isYield: asset.isYield,
+    assetId: asset.id,
+    category: asset.category,
+  });
+  assetFearGreedCache.set(asset, result);
+  return result;
+}
+
+export function getStockFearGreed(stock: StockMover): FearGreedInfo {
+  const cached = stockFearGreedCache.get(stock);
+  if (cached) return cached;
+
+  const result = computeFearGreedIndex({
+    price: stock.price,
+    prevClose: stock.prevClose,
+    changePercent: stock.changePercent,
+    dayHigh: stock.dayHigh,
+    dayLow: stock.dayLow,
+    series: stock.sparklinePoints,
+    assetId: stock.symbol,
+    category: 'stocks',
+    foreignFlowSide: stock.foreignFlowSide,
+  });
+  stockFearGreedCache.set(stock, result);
+  return result;
+}
+
+export interface OverallMarketFearGreed {
+  score: number;
+  zone: FearGreedZone;
+  shortLabel: string;
+  history7d: number[];
+  delta1d: number;
+  greedCount: number;
+  neutralCount: number;
+  fearCount: number;
+  totalAssets: number;
+  driver: string;
+  sectors: Array<{
+    id: string;
+    label: string;
+    score: number;
+    zone: FearGreedZone;
+  }>;
+}
+
+export function computeOverallMarketFearGreed(assets: MarketAsset[]): OverallMarketFearGreed {
+  if (!assets || assets.length === 0) {
+    return {
+      score: 50,
+      zone: 'Neutral',
+      shortLabel: 'Neutral',
+      history7d: [50, 50, 50, 50, 50, 50, 50],
+      delta1d: 0,
+      greedCount: 0,
+      neutralCount: 0,
+      fearCount: 0,
+      totalAssets: 0,
+      driver: 'Syncing live cross-asset sentiment feeds...',
+      sectors: [],
+    };
+  }
+
+  const cached = overallFearGreedCache.get(assets);
+  if (cached) return cached;
+
+  const enriched = assets.map((asset) => ({
+    asset,
+    fg: getAssetFearGreed(asset),
+  }));
+
+  let weightedSum = 0;
+  let totalWeight = 0;
+  let greedCount = 0;
+  let neutralCount = 0;
+  let fearCount = 0;
+  const histBuckets = [0, 0, 0, 0, 0, 0, 0];
+  let histWeights = 0;
+
+  for (const { asset, fg } of enriched) {
+    // Give benchmark indices and core macro anchors slightly higher market weight
+    const w =
+      asset.id === 'SPX' || asset.id === 'IXIC' || asset.id === 'IHSG'
+        ? 1.8
+        : asset.isSnapshotTile
+          ? 1.4
+          : 1.0;
+
+    weightedSum += fg.score * w;
+    totalWeight += w;
+
+    if (fg.score >= 55) greedCount += 1;
+    else if (fg.score <= 44) fearCount += 1;
+    else neutralCount += 1;
+
+    const h = fg.history7d;
+    if (Array.isArray(h) && h.length >= 7) {
+      for (let i = 0; i < 7; i++) {
+        histBuckets[i] += h[h.length - 7 + i] * w;
+      }
+      histWeights += w;
+    }
+  }
+
+  const score = clamp0100(totalWeight > 0 ? weightedSum / totalWeight : 50);
+  const { zone, shortLabel } = getFearGreedZone(score);
+  const history7d =
+    histWeights > 0
+      ? histBuckets.map((sum, idx) => (idx === 6 ? score : clamp0100(sum / histWeights)))
+      : [score, score, score, score, score, score, score];
+  const delta1d = history7d.length >= 2 ? score - history7d[history7d.length - 2] : 0;
+
+  const avgGroup = (items: typeof enriched) => {
+    if (items.length === 0) return 50;
+    return clamp0100(items.reduce((acc, x) => acc + x.fg.score, 0) / items.length);
+  };
+
+  const usScore = avgGroup(enriched.filter((x) => x.asset.category === 'us-indices'));
+  const asiaScore = avgGroup(enriched.filter((x) => x.asset.category === 'asia-indices'));
+  const cryptoScore = avgGroup(
+    enriched.filter((x) => x.asset.id === 'BTCUSD' || x.asset.id === 'ETHUSD')
+  );
+  const macroScore = avgGroup(
+    enriched.filter(
+      (x) =>
+        x.asset.category === 'forex-yields' ||
+        x.asset.id === 'GOLD' ||
+        x.asset.id === 'XAUUSD'
+    )
+  );
+
+  const sectors: OverallMarketFearGreed['sectors'] = [
+    { id: 'us', label: 'US Equities', score: usScore, zone: getFearGreedZone(usScore).zone },
+    { id: 'asia', label: 'Asia & IDX', score: asiaScore, zone: getFearGreedZone(asiaScore).zone },
+    { id: 'crypto', label: 'Crypto', score: cryptoScore, zone: getFearGreedZone(cryptoScore).zone },
+    { id: 'macro', label: 'Gold & Macro', score: macroScore, zone: getFearGreedZone(macroScore).zone },
+  ];
+
+  const driver = `${greedCount} Greed · ${neutralCount} Neutral · ${fearCount} Fear across ${assets.length} live markets`;
+
+  const result: OverallMarketFearGreed = {
+    score,
+    zone,
+    shortLabel,
+    history7d,
+    delta1d,
+    greedCount,
+    neutralCount,
+    fearCount,
+    totalAssets: assets.length,
+    driver,
+    sectors,
+  };
+  overallFearGreedCache.set(assets, result);
+  return result;
+}
+
+export interface AssetTimeframeReturn {
+  hasSeries: boolean;
+  startVal: number;
+  endVal: number;
+  delta: number;
+  pct: number;
+  isGain: boolean;
+  isInspecting: boolean;
+}
+
+export function computeAssetTimeframeReturn(
+  asset: MarketAsset,
+  timeframe: Timeframe,
+  inspectIndex: number | null = null
+): AssetTimeframeReturn {
+  let perAssetMap = assetTimeframeReturnCache.get(asset);
+  const cacheKey = `${timeframe}:${inspectIndex ?? 'full'}`;
+  const cached = perAssetMap?.get(cacheKey);
+  if (cached) return cached;
+
+  const storeResult = (val: AssetTimeframeReturn): AssetTimeframeReturn => {
+    if (!perAssetMap) {
+      perAssetMap = new Map();
+      assetTimeframeReturnCache.set(asset, perAssetMap);
+    }
+    perAssetMap.set(cacheKey, val);
+    return val;
+  };
+
+  const rawSeries = asset.chartSeries[timeframe];
+  const hasSeries =
+    timeframe === '1D' || (Array.isArray(rawSeries) && rawSeries.length >= 2);
+  const fallback1D = asset.chartSeries['1D'] ?? [];
+  const activeSeries =
+    hasSeries && rawSeries && rawSeries.length >= 2
+      ? rawSeries
+      : fallback1D.length >= 2
+        ? fallback1D
+        : [asset.prevClose || asset.price, asset.price];
+
+  const parsedOpen = parseFormattedMarketNumber(asset.open);
+  const openBaseline =
+    timeframe === '1D'
+      ? Number.isFinite(parsedOpen) && parsedOpen > 0
+        ? parsedOpen
+        : asset.prevClose > 0
+          ? asset.prevClose
+          : activeSeries[0]
+      : activeSeries[0];
+
+  const startVal =
+    timeframe === '1D'
+      ? asset.prevClose > 0
+        ? asset.prevClose
+        : openBaseline
+      : activeSeries[0] || openBaseline;
+
+  if (
+    inspectIndex !== null &&
+    inspectIndex >= 0 &&
+    inspectIndex < activeSeries.length
+  ) {
+    const refVal = timeframe === '1D' ? openBaseline : startVal;
+    const ptVal = activeSeries[inspectIndex];
+    const delta = ptVal - refVal;
+    const pct = refVal > 0 ? (delta / refVal) * 100 : 0;
+    return storeResult({
+      hasSeries,
+      startVal: refVal,
+      endVal: ptVal,
+      delta,
+      pct,
+      isGain: delta >= 0,
+      isInspecting: true,
+    });
+  }
+
+  if (timeframe === '1D') {
+    return storeResult({
+      hasSeries: true,
+      startVal,
+      endVal: asset.price,
+      delta: asset.changeValue,
+      pct: asset.changePercent,
+      isGain: asset.changePercent >= 0,
+      isInspecting: false,
+    });
+  }
+
+  const endVal = asset.price > 0 ? asset.price : activeSeries[activeSeries.length - 1] ?? asset.price;
+  const delta = endVal - startVal;
+  const pct = startVal > 0 ? (delta / startVal) * 100 : 0;
+  return storeResult({
+    hasSeries,
+    startVal,
+    endVal,
+    delta,
+    pct,
+    isGain: delta >= 0,
+    isInspecting: false,
+  });
+}
+
+export function computeVolatilityFearGreed(
+  assets: MarketAsset[],
+  volatility5mMap: Record<string, Asset5mVolatility>
+): VolatilityFearGreedInfo {
+  const activeAssets = assets.filter((a) => !a.isYield);
+  const openAssets = activeAssets.filter((a) => a.marketSessionOpen !== false);
+  const samplePool = openAssets.length >= 3 ? openAssets : activeAssets;
+
+  const ranges5m: number[] = [];
+  const moves5m: number[] = [];
+  const intradayRanges: number[] = [];
+  let negativeMoves = 0;
+
+  for (const a of samplePool) {
+    const v5 = volatility5mMap[a.id];
+    const r5 = v5?.range5mPct ?? a.vol5mRangePct ?? 0;
+    const m5 = v5?.pct5m ?? a.move5mPct ?? 0;
+    // Normalize crypto scale (~2.2x equities) so BTC 24/7 doesn't distort calm macro sessions
+    const normFactor = a.id === 'BTCUSD' || a.id === 'ETHUSD' ? 0.55 : a.category === 'forex-yields' ? 1.5 : 1.0;
+    if (Number.isFinite(r5) && r5 > 0) {
+      ranges5m.push(r5 * normFactor);
+    }
+    if (Number.isFinite(m5)) {
+      moves5m.push(m5 * normFactor);
+      if (m5 < -0.02 || a.changePercent < -0.25) {
+        negativeMoves += 1;
+      }
+    } else if (a.changePercent < -0.25) {
+      negativeMoves += 1;
+    }
+
+    const hi = parseFormattedMarketNumber(a.dayHigh);
+    const lo = parseFormattedMarketNumber(a.dayLow);
+    if (Number.isFinite(hi) && Number.isFinite(lo) && a.price > 0 && hi >= lo) {
+      intradayRanges.push(((hi - lo) / a.price) * 100 * normFactor);
+    }
+  }
+
+  const avg5mRangePct =
+    ranges5m.length > 0
+      ? ranges5m.reduce((s, x) => s + x, 0) / ranges5m.length
+      : 0.14;
+
+  const meanMove =
+    moves5m.length > 0 ? moves5m.reduce((s, x) => s + x, 0) / moves5m.length : 0;
+  const variance =
+    moves5m.length > 1
+      ? moves5m.reduce((s, x) => s + Math.pow(x - meanMove, 2), 0) / moves5m.length
+      : 0;
+  const dispersionSigma = Math.sqrt(variance);
+
+  const intradayRangePct =
+    intradayRanges.length > 0
+      ? intradayRanges.reduce((s, x) => s + x, 0) / intradayRanges.length
+      : 0.85;
+
+  const downsideSkewPct =
+    samplePool.length > 0 ? Math.round((negativeMoves / samplePool.length) * 100) : 50;
+
+  // Safe-haven rotation check: Gold & USD rallying while US/IDX equities lag signals Fear
+  const byId = new Map(assets.map((a) => [a.id, a]));
+  const eqAvg =
+    ((byId.get('SPX')?.changePercent ?? 0) +
+      (byId.get('IXIC')?.changePercent ?? 0) +
+      (byId.get('IHSG')?.changePercent ?? 0)) /
+    3;
+  const havenAvg =
+    ((byId.get('XAUUSD')?.changePercent ?? 0) + (byId.get('DXY')?.changePercent ?? 0)) / 2;
+  const safeHavenSpread = eqAvg - havenAvg;
+  const safeHavenBidScore = clamp0100(50 + Math.tanh(safeHavenSpread / 1.1) * 38);
+
+  // Convert normalized volatility metrics into Fear (high vol + downside skew) vs Greed (compressed vol + upside drift)
+  const volCompressionScore = clamp0100(86 - Math.min(82, avg5mRangePct * 115));
+  const intradayStabilityScore = clamp0100(84 - Math.min(78, intradayRangePct * 26));
+  const breadthPolarityScore = clamp0100(100 - downsideSkewPct);
+  const momentumDirectionScore = clamp0100(50 + Math.tanh(meanMove / 0.22) * 35);
+
+  const score = clamp0100(
+    volCompressionScore * 0.28 +
+      intradayStabilityScore * 0.22 +
+      breadthPolarityScore * 0.24 +
+      safeHavenBidScore * 0.14 +
+      momentumDirectionScore * 0.12
+  );
+
+  const { zone, shortLabel } = getFearGreedZone(score);
+
+  const volRegime: VolatilityFearGreedInfo['volRegime'] =
+    avg5mRangePct >= 0.55 || intradayRangePct >= 2.2
+      ? 'Panic'
+      : avg5mRangePct >= 0.30 || intradayRangePct >= 1.35
+        ? 'Elevated'
+        : avg5mRangePct <= 0.12 && intradayRangePct <= 0.75
+          ? 'Compressed'
+          : 'Normal';
+
+  // Build 7-day trend anchored gently from recent market baseline to current volatility score
+  const baseline7d = computeOverallMarketFearGreed(assets).history7d;
+  const history7d = baseline7d.map((val, idx) =>
+    idx === baseline7d.length - 1
+      ? score
+      : clamp0100(val * 0.55 + score * 0.45 + (idx - 3) * 0.8)
+  );
+
+  const driver = `${volRegime} vol (${avg5mRangePct.toFixed(2)}% 5m avg) · ${downsideSkewPct}% downside skew`;
+
+  return {
+    score,
+    zone,
+    shortLabel,
+    volRegime,
+    avg5mRangePct: Number(avg5mRangePct.toFixed(2)),
+    dispersionSigma: Number(dispersionSigma.toFixed(2)),
+    intradayRangePct: Number(intradayRangePct.toFixed(2)),
+    downsideSkewPct,
+    safeHavenBidScore,
+    driver,
+    history7d,
+  };
+}
+
+

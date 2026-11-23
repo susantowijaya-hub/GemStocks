@@ -22,9 +22,14 @@ import {
   StocksMoversBucket,
 } from '../types/market';
 import { getAllMarketSessions, MarketSessionStatus } from '../utils/marketSessions';
-import { getStockSignal } from '../utils/marketSignals';
+import { getStockFearGreed, getStockSignal } from '../utils/marketSignals';
 import { GoogleFinanceDeltaPill, GoogleFinanceMiniChart } from './GoogleFinanceMiniChart';
-import { SignalBadge } from './MarketUiPrimitives';
+import {
+  FearGreedInlineBar,
+  FearGreedTrendSparkline,
+  getFearGreedTextTone,
+  SignalBadge,
+} from './MarketUiPrimitives';
 
 interface TopStocksViewProps {
   usBucket: StocksMoversBucket;
@@ -223,6 +228,7 @@ function MarketMoversSection({
                   <th className="py-3 pl-5 pr-2 w-12">Rank</th>
                   <th className="py-3 px-3">Stock</th>
                   <th className="py-3 px-3">Signal</th>
+                  <th className="py-3 px-3">Fear &amp; Greed</th>
                   <th className="py-3 px-3">Trend</th>
                   {isForeignFlow && (
                     <th className="py-3 px-3 text-right">
@@ -241,6 +247,7 @@ function MarketMoversSection({
                   const isGain = stock.changePercent >= 0;
                   const isForeignBuy = (stock.foreignNetAmount ?? 0) >= 0;
                   const signal = getStockSignal(stock);
+                  const fearGreed = getStockFearGreed(stock);
                   return (
                     <tr
                       key={`${stock.market}-${stock.symbol}-${idx}`}
@@ -270,6 +277,9 @@ function MarketMoversSection({
                       </td>
                       <td className="py-3 px-3">
                         <SignalBadge signal={signal} compact />
+                      </td>
+                      <td className="py-3 px-3">
+                        <FearGreedInlineBar fearGreed={fearGreed} compact />
                       </td>
                       <td className="py-3 px-3">
                         <div className="w-20 h-8">
@@ -337,6 +347,7 @@ function MarketMoversSection({
               const isGain = stock.changePercent >= 0;
               const isForeignBuy = (stock.foreignNetAmount ?? 0) >= 0;
               const signal = getStockSignal(stock);
+              const fearGreed = getStockFearGreed(stock);
               return (
                 <div
                   key={`${stock.market}-${stock.symbol}-m-${idx}`}
@@ -359,20 +370,42 @@ function MarketMoversSection({
                       {stock.name} · Vol {stock.volume}
                     </p>
                     {isForeignFlow && stock.foreignNetLabel ? (
-                      <p
-                        className={`text-[11px] font-mono font-bold mt-1 tabular-nums ${
+                      <div
+                        className={`text-[11px] font-mono font-bold mt-1 tabular-nums flex items-center gap-1.5 flex-wrap ${
                           isForeignBuy
                             ? 'text-[#16803C] dark:text-[#30D158]'
                             : 'text-[#D7261C] dark:text-[#FF453A]'
                         }`}
                       >
-                        {isForeignBuy ? 'Foreign Buy: ' : 'Foreign Sell: '}
-                        {stock.foreignNetLabel}
-                      </p>
+                        <span>
+                          {isForeignBuy ? 'Foreign Buy: ' : 'Foreign Sell: '}
+                          {stock.foreignNetLabel}
+                        </span>
+                        <span className={`inline-flex items-center gap-1 ${getFearGreedTextTone(fearGreed.zone)}`}>
+                          <span>· F&amp;G {fearGreed.score}</span>
+                          <FearGreedTrendSparkline
+                            history7d={fearGreed.history7d}
+                            score={fearGreed.score}
+                            zone={fearGreed.zone}
+                            compact
+                            showLabel={false}
+                          />
+                        </span>
+                      </div>
                     ) : (
-                      <p className="text-[10px] font-mono text-[#6C6C70] dark:text-[#8E8E93] mt-0.5 tabular-nums">
-                        Range: {formatStockRange(stock)}
-                      </p>
+                      <div className="text-[10px] font-mono text-[#6C6C70] dark:text-[#8E8E93] mt-0.5 tabular-nums flex items-center gap-1.5 flex-wrap">
+                        <span>Range: {formatStockRange(stock)} ·</span>
+                        <span className={`inline-flex items-center gap-1 font-bold ${getFearGreedTextTone(fearGreed.zone)}`}>
+                          <span>F&amp;G {fearGreed.score}</span>
+                          <FearGreedTrendSparkline
+                            history7d={fearGreed.history7d}
+                            score={fearGreed.score}
+                            zone={fearGreed.zone}
+                            compact
+                            showLabel={false}
+                          />
+                        </span>
+                      </div>
                     )}
                   </div>
 
