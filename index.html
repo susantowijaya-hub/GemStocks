@@ -25,12 +25,135 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
+      rel="preload"
+      as="style"
       href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap"
-      rel="stylesheet"
+      onload="this.onload=null;this.rel='stylesheet'"
     />
+    <noscript>
+      <link
+        href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap"
+        rel="stylesheet"
+      />
+    </noscript>
+    <script>
+      (function () {
+        try {
+          var saved = localStorage.getItem('stocks-theme-mode');
+          var mode = saved === 'arctic' || saved === 'parchment' || saved === 'obsidian' ? saved : 'obsidian';
+          var root = document.documentElement;
+          root.classList.remove('obsidian', 'dark', 'arctic', 'parchment');
+          root.classList.add(mode);
+          if (mode === 'obsidian') root.classList.add('dark');
+        } catch (e) {}
+      })();
+    </script>
+    <style>
+      #boot-shell {
+        min-height: 100dvh;
+        display: flex;
+        flex-direction: column;
+        background: #080b12;
+        color: #f8fafc;
+        font-family: -apple-system, BlinkMacSystemFont, "Plus Jakarta Sans", system-ui, sans-serif;
+      }
+      html.arctic #boot-shell {
+        background: #edf3fa;
+        color: #151821;
+      }
+      html.parchment #boot-shell {
+        background: #f4f0e6;
+        color: #191815;
+      }
+      .boot-bar {
+        height: 58px;
+        padding: 0 18px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        backdrop-filter: blur(18px);
+      }
+      html.arctic .boot-bar,
+      html.parchment .boot-bar {
+        border-bottom-color: rgba(15, 23, 42, 0.08);
+      }
+      .boot-brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-weight: 800;
+        font-size: 16px;
+        letter-spacing: -0.02em;
+      }
+      .boot-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 999px;
+        background: #38bdf8;
+      }
+      .boot-pill {
+        font-size: 11px;
+        font-weight: 700;
+        opacity: 0.72;
+      }
+      .boot-body {
+        max-width: 1440px;
+        width: 100%;
+        margin: 0 auto;
+        padding: 18px;
+        display: grid;
+        gap: 16px;
+      }
+      .boot-strip {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+        gap: 12px;
+      }
+      .boot-card {
+        height: 82px;
+        border-radius: 16px;
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+      }
+      .boot-main {
+        height: 360px;
+        border-radius: 20px;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+      }
+      html.arctic .boot-card,
+      html.arctic .boot-main,
+      html.parchment .boot-card,
+      html.parchment .boot-main {
+        background: rgba(255, 255, 255, 0.58);
+        border-color: rgba(15, 23, 42, 0.08);
+      }
+    </style>
   </head>
   <body class="antialiased selection:bg-[#0066CC] dark:selection:bg-[#0066CC] selection:text-white">
-    <div id="root"></div>
+    <div id="root">
+      <div id="boot-shell" aria-busy="true" aria-label="Loading Stocks Global Market Terminal">
+        <div class="boot-bar">
+          <div class="boot-brand">
+            <span class="boot-dot"></span>
+            <span>Stocks</span>
+          </div>
+          <span class="boot-pill">Initializing live feeds...</span>
+        </div>
+        <div class="boot-body">
+          <div class="boot-strip">
+            <div class="boot-card"></div>
+            <div class="boot-card"></div>
+            <div class="boot-card"></div>
+            <div class="boot-card"></div>
+            <div class="boot-card"></div>
+            <div class="boot-card"></div>
+          </div>
+          <div class="boot-main"></div>
+        </div>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

@@ -55,7 +55,7 @@ import {
 } from '../types/market';
 import { computeTechnicalSignal } from '../utils/marketSignals';
 import { GoogleFinanceDeltaPill } from './GoogleFinanceMiniChart';
-import { AssetCategoryMiniIcon, SignalBadge } from './MarketUiPrimitives';
+import { AssetCategoryMiniIcon, BandarmologyBadge, SignalBadge } from './MarketUiPrimitives';
 import { PortfolioSectorPieChart } from './PortfolioSectorPieChart';
 
 interface PortfolioViewProps {
@@ -718,6 +718,23 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
           }
           return next;
         });
+        const idxSnapshots = data.quotes
+          .filter((q) => q.bandarmology && q.yahooSymbol.toUpperCase().endsWith('.JK'))
+          .map((q) => ({
+            symbol: q.symbol.replace(/\.JK$/i, '').toUpperCase(),
+            name: q.name,
+            price: q.price,
+            prevClose: q.prevClose,
+            changePercent: q.changePercent,
+            bandarmology: q.bandarmology!,
+          }));
+        if (idxSnapshots.length > 0 && typeof window !== 'undefined') {
+          window.dispatchEvent(
+            new CustomEvent('stocks:idx-bandar-quotes', {
+              detail: { snapshots: idxSnapshots },
+            })
+          );
+        }
         setLastFeedUpdatedAt(Date.now());
       }
     } catch {
@@ -1027,6 +1044,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
         ...h,
         lots: holdingLots,
         quote,
+        bandarmology: quote?.bandarmology,
         liveNativePrice,
         prevNativeClose,
         marketValue,
@@ -1046,11 +1064,20 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
   const portfolioSignalTally = useMemo(() => {
     let bull = 0;
     let bear = 0;
+    let idxAcc = 0;
+    let idxDist = 0;
+    let idxTotal = 0;
     for (const h of enrichedHoldings) {
       if (h.signal.direction === 'bull') bull += 1;
       else if (h.signal.direction === 'bear') bear += 1;
+      if (h.currency === 'IDR' || h.yahooSymbol.toUpperCase().endsWith('.JK')) {
+        idxTotal += 1;
+        const ph = h.bandarmology?.phase;
+        if (ph === 'Strong Accumulation' || ph === 'Early Accumulation') idxAcc += 1;
+        else if (ph === 'Strong Distribution' || ph === 'Early Distribution') idxDist += 1;
+      }
     }
-    return { bull, bear };
+    return { bull, bear, idxAcc, idxDist, idxTotal };
   }, [enrichedHoldings]);
 
   // Portfolio Summary Totals
@@ -2467,7 +2494,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                 <span className="font-bold text-[#1C1C1E] dark:text-white">
                   Position Technical Signals ({enrichedHoldings.length})
                 </span>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
                   <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[#30D158]/15 text-[#16803C] dark:text-[#30D158] text-[10px] font-bold tabular-nums">
                     <TrendingUp className="w-3 h-3" />
                     {portfolioSignalTally.bull} Bull
@@ -2476,6 +2503,11 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                     <TrendingDown className="w-3 h-3" />
                     {portfolioSignalTally.bear} Bear
                   </span>
+                  {portfolioSignalTally.idxTotal > 0 && (
+                    <span className="text-[11px] font-semibold text-[#4A4D57] dark:text-[#C7CBD6] tabular-nums">
+                      IDX Bandarmology: {portfolioSignalTally.idxAcc} Acc · {portfolioSignalTally.idxDist} Dist
+                    </span>
+                  )}
                 </div>
               </div>
             )}
@@ -2537,9 +2569,15 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                                     title={h.sessionStateLabel}
                                   />
                                   <SignalBadge signal={h.signal} compact />
+                                  {(h.currency === 'IDR' || h.yahooSymbol.toUpperCase().endsWith('.JK')) && (
+                                    <BandarmologyBadge bandarmology={h.bandarmology} compact />
+                                  )}
                                 </div>
                                 <p className="text-xs text-[#6C6C70] dark:text-[#8E8E93] tabular-nums truncate">
                                   {h.units.toLocaleString('en-US')} shares
+                                  {h.bandarmology
+                                    ? ` · ${h.bandarmology.volumeRatio.toFixed(1)}x Vol · Flow ${h.bandarmology.accumulationPressure}%`
+                                    : ''}
                                 </p>
                               </div>
                             </div>
@@ -2647,6 +2685,26 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                               </p>
                             </div>
                           </div>
+
+                          {/* IDX Bandarmology Accumulation / Distribution Breakdown */}
+                          {h.bandarmology && (
+                            <div className="rounded-xl bg-white dark:bg-[#1C1C1E] border border-[#E5E5EA] dark:border-[#2C2C2E] px-3 py-2.5 flex flex-wrap items-center justify-between gap-2">
+                              <div className="min-w-0">
+                                <span className="text-[10px] font-bold uppercase tracking-wider text-[#6C6C70] dark:text-[#9EB5C8]">
+                                  IDX Bandarmology Position
+                                </span>
+                                <p className="text-[11px] text-[#4A4D57] dark:text-[#C7CBD6] mt-0.5">
+                                  {h.bandarmology.summary}
+                                </p>
+                              </div>
+                              <div className="flex items-center gap-3 shrink-0">
+                                <BandarmologyBadge bandarmology={h.bandarmology} showScore />
+                                <span className="text-[11px] font-mono tabular-nums text-[#6C6C70] dark:text-[#9EB5C8]">
+                                  {h.bandarmology.volumeRatio.toFixed(2)}x Vol · {h.bandarmology.accumulationPressure}% Flow
+                                </span>
+                              </div>
+                            </div>
+                          )}
 
                           {/* Individual Purchase Lots List (Google Finance style + ⋮ menu) */}
                           <div className="rounded-xl bg-white dark:bg-[#1C1C1E] border border-[#E5E5EA] dark:border-[#2C2C2E] divide-y divide-[#E5E5EA] dark:divide-[#2C2C2E]/70">

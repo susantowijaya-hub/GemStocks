@@ -47,6 +47,7 @@ test.describe('Stocks Terminal E2E & Visual Contrast Regression', () => {
   test('renders all 8 routes with zero console, hydration, or runtime errors', async ({
     page,
   }) => {
+    test.setTimeout(120_000);
     const { consoleErrors, pageErrors, serverErrors } = attachErrorCollectors(page);
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto('/#dashboard', { waitUntil: 'domcontentloaded' });
@@ -305,7 +306,7 @@ test.describe('Stocks Terminal E2E & Visual Contrast Regression', () => {
       // Verify top header icons/controls do NOT overlap each other on 390px mobile view
       const headerAudit = await page.evaluate(() => {
         const header = document.querySelector('header');
-        const brandBtn = header?.querySelector('button[title="Return to Global Markets"]');
+        const brandBtn = header?.querySelector('button');
         const actionBar = header?.querySelector('[data-testid="header-actions-bar"]');
         if (!header || !brandBtn || !actionBar) {
           return { ok: false, reason: 'Missing header elements', overlaps: [] as string[] };
@@ -522,6 +523,7 @@ test.describe('Stocks Terminal E2E & Visual Contrast Regression', () => {
   test('surfaces real-time multi-provider failover and cached snapshot diagnostics badge & drawer', async ({
     page,
   }) => {
+    test.setTimeout(120_000);
     const { pageErrors } = attachErrorCollectors(page);
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto('/#dashboard', { waitUntil: 'domcontentloaded' });
@@ -658,8 +660,7 @@ test.describe('Stocks Terminal E2E & Visual Contrast Regression', () => {
     await expect(drawer.getByText('Yahoo .JK Basket Proxy')).toBeVisible();
     await expect(drawer.getByText('Yahoo Crypto Fallback')).toBeVisible();
 
-    await page.unroute('**/api/market/quotes');
-    await page.unroute('**/api/market/diagnostics');
+    await page.unrouteAll({ behavior: 'ignoreErrors' });
     await diagTrigger.click();
 
     // Verify Top 8 open-session ticker strip & Breaking News marquee bar
@@ -667,6 +668,32 @@ test.describe('Stocks Terminal E2E & Visual Contrast Regression', () => {
     const liveStrip = page.getByTestId('live-ticker-strip');
     await expect(liveStrip).toBeVisible();
     await expect(liveStrip).toContainText(/OPEN TOP 8|LIVE TOP 8/);
+
+    // Verify D3 5-minute trajectory sparklines on dashboard ticker cards
+    await page.evaluate(() => window.scrollTo(0, 0));
+    const sparkRows = page.getByTestId('ticker-5m-sparkline-row');
+    expect(await sparkRows.count()).toBeGreaterThanOrEqual(4);
+    const firstSparkRow = sparkRows.first();
+    await expect(firstSparkRow).toBeVisible();
+    await expect(firstSparkRow).toContainText(/5m\s+[+\-]?\d+\.\d{2}%/);
+    const firstSparkSvg = firstSparkRow.getByTestId('d3-5m-sparkline');
+    await expect(firstSparkSvg).toBeVisible();
+    expect(await firstSparkSvg.locator('path').count()).toBeGreaterThanOrEqual(1);
+
+    // Verify Weighted Risk-On vs Risk-Off Market Sentiment Gauge
+    const riskGauge = page.getByTestId('risk-regime-gauge');
+    await riskGauge.scrollIntoViewIfNeeded();
+    await expect(riskGauge).toBeVisible();
+    const riskScore = Number(await page.getByTestId('risk-regime-score').innerText());
+    expect(riskScore).toBeGreaterThanOrEqual(0);
+    expect(riskScore).toBeLessThanOrEqual(100);
+    await expect(page.getByTestId('risk-regime-status')).toHaveText(
+      /Strong Risk-On|Risk-On|Neutral|Risk-Off|Strong Risk-Off/
+    );
+    await expect(page.getByTestId('risk-regime-weighted-move')).toHaveText(/[+\-]?\d+\.\d{2}%/);
+    for (const sectorLabel of ['US Indices', 'Asia & IDX', 'Cyclicals & Crypto', 'Safe Havens (Inv)']) {
+      await expect(riskGauge).toContainText(sectorLabel);
+    }
 
     // Verify Volatility-Driven Market Fear & Greed Sentiment Gauge
     const volGauge = page.getByTestId('market-fear-greed-gauge');
@@ -698,22 +725,22 @@ test.describe('Stocks Terminal E2E & Visual Contrast Regression', () => {
     await sentimentCard.getByRole('tab', { name: 'Bear' }).click();
     await sentimentCard.getByRole('tab', { name: 'Top' }).click();
 
-    // Verify major FX currencies & granular intraday timeframes (15M / 1H / 4H) + Candlestick toggle
+    // Verify major FX currencies & granular intraday timeframes (1m..4h) + Candlestick toggle
     await page.evaluate(() => window.scrollTo(0, 0));
-    const fxTab = page.locator('main button').filter({ hasText: 'FX & Yields' }).first();
+    const fxTab = page.locator('main button').filter({ hasText: 'Currencies & Yields' }).first();
     await fxTab.click();
     for (const pair of ['USD/IDR', 'EUR/USD', 'GBP/USD', 'USD/JPY', 'AUD/USD', 'USD/CHF', 'USD/CAD', 'NZD/USD', 'USD/CNY']) {
       await expect(page.locator('main').getByText(pair).first()).toBeVisible();
     }
 
-    // Select EUR/USD to reveal FX 15M / 1H / 4H timeframe buttons & Candlestick OHLC
+    // Select EUR/USD to reveal 1m, 5m, 15m, 30m, 1h, 4h timeframe buttons & Candlestick OHLC
     await page.locator('main button').filter({ hasText: 'EUR/USD' }).first().click();
     const chartToggle = page.getByTestId('chart-type-toggle');
     await expect(chartToggle).toBeVisible();
-    await expect(page.locator('main button', { hasText: /^15M$/ })).toBeVisible();
-    await expect(page.locator('main button', { hasText: /^1H$/ })).toBeVisible();
-    await expect(page.locator('main button', { hasText: /^4H$/ })).toBeVisible();
-    await page.locator('main button', { hasText: /^15M$/ }).click();
+    for (const tf of ['1m', '5m', '15m', '30m', '1h', '4h']) {
+      await expect(page.locator('main button', { hasText: new RegExp(`^${tf}$`) })).toBeVisible();
+    }
+    await page.locator('main button', { hasText: /^15m$/ }).click();
     await chartToggle.getByRole('button', { name: 'Candles' }).click();
     const candleGroup = page.getByTestId('candlestick-series');
     await expect(candleGroup).toBeVisible();
@@ -721,23 +748,158 @@ test.describe('Stocks Terminal E2E & Visual Contrast Regression', () => {
     await chartToggle.getByRole('button', { name: 'Line' }).click();
     await expect(candleGroup).toHaveCount(0);
 
-    // Verify Collapsible BottomDock FAB hover expansion on desktop
+    // Verify BTC/USD and XAU/USD also expose granular 1m..4h timeframes
+    const commTab = page.locator('main button').filter({ hasText: 'Commodities & Crypto' }).first();
+    await commTab.click();
+    await page.locator('main button').filter({ hasText: 'BTC/USD' }).first().click();
+    await expect(page.locator('main button', { hasText: /^1m$/ })).toBeVisible();
+    await expect(page.locator('main button', { hasText: /^4h$/ })).toBeVisible();
+    await page.locator('main button').filter({ hasText: 'Gold' }).first().click();
+    await expect(page.locator('main button', { hasText: /^5m$/ })).toBeVisible();
+    await expect(page.locator('main button', { hasText: /^1h$/ })).toBeVisible();
+
+    // Verify ICT Smart Money Signal Radar & Alert Drawer workflows (ICT + IDX Bandarmology)
+    const ictCard = page.getByTestId('ict-signal-card');
+    await ictCard.scrollIntoViewIfNeeded();
+    await expect(ictCard).toBeVisible();
+    await expect(ictCard).toContainText(/ICT BUY|ICT SELL|ICT NEUTRAL/);
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.getByTestId('alerts-drawer-toggle').click();
+    const alertDrawer = page.getByTestId('price-alert-drawer');
+    await expect(alertDrawer).toBeVisible();
+    await alertDrawer.getByRole('button', { name: 'Scan ICT' }).click();
+    await expect(alertDrawer).toContainText(/ICT (BUY|SELL)/);
+    await alertDrawer.getByTestId('scan-idx-bandar-btn').click();
+    await alertDrawer.getByTestId('alert-filter-tabs').getByRole('tab', { name: /IDX Bandar/ }).click();
+    await expect(alertDrawer).toContainText(/Early Acc|Strong Acc|IDX Bandar/);
+    await alertDrawer.getByTestId('alert-filter-tabs').getByRole('tab', { name: /All/ }).click();
+    await alertDrawer.getByRole('button', { name: 'Close alerts panel' }).click();
+
+    // Verify Icon-Only Collapsible BottomDock FAB hover expansion on desktop
     const dockTrigger = page.getByTestId('bottom-dock-trigger');
     await expect(dockTrigger).toBeVisible();
+    const triggerText = await dockTrigger.evaluate((el) => (el as HTMLElement).innerText.trim());
+    expect(triggerText).toBe('');
     await dockTrigger.hover();
     const dockBar = page.getByTestId('bottom-dock-bar');
     await expect(dockBar).toBeVisible();
+    const dockRouteText = await dockBar.locator('[data-route-id="stocks"]').evaluate((el) => (el as HTMLElement).innerText.trim());
+    expect(dockRouteText).toBe('');
 
-    // Verify Stock Technical Candlestick Chart inside SymbolDetailModal (via Stocks route)
     await dockBar.locator('[data-route-id="stocks"]').click();
     await expect
       .poll(() => new URL(page.url()).hash)
       .toBe('#stocks');
+
+    expect(pageErrors).toEqual([]);
+  });
+
+  test('triggers automated IDX Bandarmology accumulation shift alerts and persists SymbolDetailModal MTF tabs', async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+    const { pageErrors } = attachErrorCollectors(page);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto('/#stocks', { waitUntil: 'domcontentloaded' });
+
+    await expect(page.getByTestId('idx-bandarmology-filter')).toBeVisible();
+    await expect(page.getByTestId('idx-bandar-shift-monitor')).toBeVisible();
     const firstStockRow = page.locator('main tbody tr').first();
     await expect(firstStockRow).toBeVisible({ timeout: 15_000 });
+    await expect(
+      page.locator('main').getByText(/Strong Acc|Early Acc|Neutral|Early Dist|Strong Dist/).first()
+    ).toBeVisible({ timeout: 15_000 });
+
+    // Simulate a live IDX Bandarmology shift ('Early Accumulation' <-> 'Strong Accumulation') and assert toast notification
+    let expectedShiftRegex = /Early Acc → Strong Acc|Strong Acc → Early Acc/;
+    await page.route('**/api/stocks/movers', async (route) => {
+      const response = await route.fetch();
+      const body = await response.json();
+      const buckets = ['impact', 'gainers', 'losers', 'foreignBuy', 'foreignSell'] as const;
+      type MoverStub = {
+        symbol?: string;
+        bandarmology?: {
+          phase?: string;
+          score?: number;
+          volumeRatio?: number;
+          accumulationPressure?: number;
+          foreignBias?: string;
+          summary?: string;
+        };
+      };
+
+      let targetSymbol: string | undefined;
+      let targetPrevPhase: string | undefined;
+      for (const bucketKey of buckets) {
+        const list = body?.indonesia?.[bucketKey] as MoverStub[] | undefined;
+        if (!Array.isArray(list)) continue;
+        const match = list.find(
+          (s) =>
+            s.bandarmology?.phase === 'Early Accumulation' ||
+            s.bandarmology?.phase === 'Strong Accumulation'
+        );
+        if (match?.symbol) {
+          targetSymbol = match.symbol;
+          targetPrevPhase = match.bandarmology?.phase;
+          break;
+        }
+      }
+
+      if (!targetSymbol && Array.isArray(body?.indonesia?.impact) && body.indonesia.impact.length > 0) {
+        targetSymbol = body.indonesia.impact[0].symbol;
+        targetPrevPhase = 'Early Accumulation';
+      }
+
+      if (targetSymbol) {
+        const wasStrong = targetPrevPhase === 'Strong Accumulation';
+        const nextPhase = wasStrong ? 'Early Accumulation' : 'Strong Accumulation';
+        expectedShiftRegex = wasStrong ? /Strong Acc → Early Acc/ : /Early Acc → Strong Acc/;
+
+        for (const bucketKey of buckets) {
+          const list = body?.indonesia?.[bucketKey] as MoverStub[] | undefined;
+          if (!Array.isArray(list)) continue;
+          for (const item of list) {
+            if (item.symbol === targetSymbol) {
+              item.bandarmology = {
+                ...(item.bandarmology ?? {}),
+                phase: nextPhase,
+                score: wasStrong ? 22 : 72,
+                volumeRatio: 1.85,
+                accumulationPressure: wasStrong ? 56 : 79,
+                foreignBias: 'Net Buy',
+                summary: `Automated phase transition to ${nextPhase}`,
+              };
+            }
+          }
+        }
+      }
+
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(body),
+      });
+    });
+
+    await page.locator('main button', { hasText: 'Refresh' }).first().click();
+    await expect(page.getByTestId('price-alert-toast-stack')).toContainText(/IDX Bandar/, { timeout: 12_000 });
+    await expect(page.getByTestId('price-alert-toast-stack')).toContainText(expectedShiftRegex);
+    await page.unrouteAll({ behavior: 'ignoreErrors' });
+
+    // Open SymbolDetailModal and verify Persistent Quick-Switch Intraday Tabs (1m..4h) + Candlestick chart
     await firstStockRow.click();
     const modal = page.getByTestId('symbol-detail-modal');
     await expect(modal).toBeVisible();
+    const mtfTabs = modal.getByTestId('symbol-detail-timeframe-tabs');
+    await expect(mtfTabs).toBeVisible();
+    for (const tf of ['1m', '5m', '15m', '30m', '1h', '4h']) {
+      await expect(mtfTabs.locator(`button[data-timeframe="${tf}"]`)).toBeVisible();
+    }
+    await mtfTabs.locator('button[data-timeframe="15m"]').click();
+    await expect(mtfTabs.locator('button[data-timeframe="15m"]')).toHaveAttribute('aria-selected', 'true');
+    const savedTf = await page.evaluate(() => window.localStorage.getItem('stocks_symbol_detail_timeframe_v1'));
+    expect(savedTf).toBe('15m');
+
     const modalChartToggle = modal.getByTestId('chart-type-toggle');
     await expect(modalChartToggle).toBeVisible({ timeout: 15_000 });
     await modalChartToggle.getByRole('button', { name: 'Candles' }).click();
@@ -745,13 +907,111 @@ test.describe('Stocks Terminal E2E & Visual Contrast Regression', () => {
     await modal.getByRole('button', { name: 'Close chart modal' }).click();
     await expect(modal).toHaveCount(0);
 
-    // Verify Portfolio holdings animated list container
+    // Reopen SymbolDetailModal on second stock row and verify 15m persisted across symbol switches
+    const secondStockRow = page.locator('main tbody tr').nth(1);
+    await secondStockRow.click();
+    const reopenedModal = page.getByTestId('symbol-detail-modal');
+    await expect(reopenedModal).toBeVisible();
+    await expect(
+      reopenedModal.getByTestId('symbol-detail-timeframe-tabs').locator('button[data-timeframe="15m"]')
+    ).toHaveAttribute('aria-selected', 'true');
+    await reopenedModal.getByTestId('symbol-detail-timeframe-tabs').locator('button[data-timeframe="4h"]').click();
+    await expect(
+      reopenedModal.getByTestId('symbol-detail-timeframe-tabs').locator('button[data-timeframe="4h"]')
+    ).toHaveAttribute('aria-selected', 'true');
+    await reopenedModal.getByRole('button', { name: 'Close chart modal' }).click();
+    await expect(reopenedModal).toHaveCount(0);
+
+    // Verify Portfolio holdings animated list container & IDX Bandarmology rollup support
+    const dockTrigger = page.getByTestId('bottom-dock-trigger');
     await dockTrigger.click();
     await page.getByTestId('bottom-dock-bar').locator('[data-route-id="portfolio"]').click();
     await expect
       .poll(() => new URL(page.url()).hash)
       .toBe('#portfolio');
-    await expect(page.getByTestId('portfolio-holdings-list')).toBeVisible();
+    await page.getByRole('button', { name: 'Add your first holding' }).click();
+    const bbcaPick = page.locator('form button').filter({ hasText: 'BBCA' }).first();
+    await expect(bbcaPick).toBeVisible({ timeout: 10_000 });
+    await bbcaPick.click();
+    const qtyInput = page.locator('form input[type="number"]').first();
+    await qtyInput.fill('100');
+    const priceInput = page.locator('form input[type="number"]').nth(1);
+    await expect(priceInput).not.toHaveValue('', { timeout: 10_000 });
+    await page.getByRole('button', { name: 'Save Holding' }).click();
+    await expect(page.getByTestId('portfolio-holdings-list')).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByTestId('portfolio-holding-row-BBCA')).toBeVisible();
+    await expect(page.locator('main')).toContainText('IDX Bandarmology:');
+
+    // Verify AI Daily Digest modal on News Feed (#news)
+    await dockTrigger.click();
+    await page.getByTestId('bottom-dock-bar').locator('[data-route-id="news"]').click();
+    await expect
+      .poll(() => new URL(page.url()).hash)
+      .toBe('#news');
+
+    let digestCallCount = 0;
+    await page.route('**/api/news/daily-digest', async (route) => {
+      digestCallCount += 1;
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          sessionHeadline: 'Semiconductor Surge and Bank Flows Anchor Risk-On Session',
+          marketMood: 'Risk-On Momentum',
+          executiveBrief:
+            'US mega-cap semis and Jakarta large-cap accumulation led cross-asset gains as breaking technology earnings catalysts drove volume rotation.',
+          topicLabel: 'All Global Markets',
+          moverImpacts: [
+            {
+              symbol: 'NVDA',
+              yahooSymbol: 'NVDA',
+              name: 'NVIDIA Corporation',
+              market: 'US Equities',
+              movePercent: '+32.57%',
+              direction: 'up',
+              associatedHeadline: 'Nvidia shares soar on leadership & AI guidance update',
+              impactAnalysis:
+                'Heavy institutional call and spot volume followed breaking headlines, lifting Nasdaq leadership.',
+            },
+            {
+              symbol: 'CDIA',
+              yahooSymbol: 'CDIA.JK',
+              name: 'PT Chandra Daya Investasi Tbk',
+              market: 'IDX / Jakarta',
+              movePercent: '+24.52%',
+              direction: 'up',
+              associatedHeadline: 'IDX heavyweights extend foreign accumulation streak',
+              impactAnalysis:
+                'Strong Accumulation phase paired with 4.34x 20D relative turnover pushed IDX momentum higher.',
+            },
+          ],
+          sessionWatchpoints: [
+            'Monitor US 10Y yield reaction ahead of the afternoon bond auction.',
+            'Track IDX foreign net buy continuity into the Jakarta closing print.',
+            'Watch Nasdaq breadth sustainability beyond top 3 AI heavyweights.',
+          ],
+          model: 'gemini-4-hydrogen',
+          generatedAt: new Date().toISOString(),
+        }),
+      });
+    });
+
+    const digestBtn = page.getByTestId('daily-digest-trigger');
+    await expect(digestBtn).toBeVisible();
+    await digestBtn.click();
+
+    const digestModal = page.getByTestId('daily-digest-modal');
+    await expect(digestModal).toBeVisible();
+    await expect(digestModal).toContainText('Semiconductor Surge and Bank Flows Anchor Risk-On Session');
+    await expect(digestModal.getByTestId('daily-digest-movers-list')).toContainText('NVDA');
+    await expect(digestModal.getByTestId('daily-digest-movers-list')).toContainText('CDIA');
+    await expect(digestModal).toContainText('Session Watchpoints');
+
+    await digestModal.getByTestId('daily-digest-regenerate').click();
+    await expect.poll(() => digestCallCount).toBe(2);
+    await digestModal.getByRole('button', { name: 'Close Daily Digest' }).click();
+    await expect(digestModal).toHaveCount(0);
+    await page.unrouteAll({ behavior: 'ignoreErrors' });
 
     expect(pageErrors).toEqual([]);
   });

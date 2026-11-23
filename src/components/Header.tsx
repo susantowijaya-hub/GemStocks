@@ -481,22 +481,31 @@ export const Header: React.FC<HeaderProps> = ({
       {/* Main Row */}
       <div className="relative px-3 sm:px-4 lg:px-6 py-2 sm:py-2.5 lg:py-3 flex items-center justify-between gap-2 sm:gap-3">
         {/* Left: Brand + Clock + Translucent Glass Tab Switcher */}
-        <div className="flex items-center gap-3 xl:gap-5 min-w-0">
+        <div className="flex items-center gap-2 sm:gap-3 xl:gap-5 min-w-0">
           <button
             type="button"
             onClick={() => handleNavClick('dashboard')}
-            className="flex items-center gap-1.5 sm:gap-2 text-left shrink-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#0071E3] rounded-lg"
+            className="flex items-center gap-1.5 sm:gap-2 text-left min-w-0 shrink focus:outline-none focus-visible:ring-2 focus-visible:ring-[#0071E3] rounded-lg"
           >
             <TrendingUp className="w-5 h-5 sm:w-6 sm:h-6 text-[#0F7033] dark:text-[#4ADE80] shrink-0" />
-            <div className="flex flex-col sm:flex-row sm:items-baseline sm:gap-2.5 leading-tight">
+            <div className="flex flex-col sm:flex-row sm:items-baseline sm:gap-2.5 leading-tight min-w-0">
               <span className="text-base sm:text-lg lg:text-xl font-extrabold tracking-tight text-[#1C1C1E] dark:text-white whitespace-nowrap">
                 Stocks
               </span>
               <span className="hidden xl:inline text-xs font-mono font-semibold text-[#4A4D57] dark:text-[#B4B8C4] tabular-nums whitespace-nowrap">
                 {clock.full}
               </span>
-              <span className="xl:hidden text-[9px] sm:text-xs font-mono font-semibold text-[#4A4D57] dark:text-[#B4B8C4] tabular-nums whitespace-nowrap">
+              <span className="hidden sm:inline xl:hidden text-xs font-mono font-semibold text-[#4A4D57] dark:text-[#B4B8C4] tabular-nums whitespace-nowrap">
                 {clock.short}
+              </span>
+              <span className="sm:hidden text-[9px] font-mono font-semibold text-[#4A4D57] dark:text-[#B4B8C4] tabular-nums whitespace-nowrap truncate">
+                {now.toLocaleTimeString('en-GB', {
+                  timeZone: 'Asia/Jakarta',
+                  hour: '2-digit',
+                  minute: '2-digit',
+                  hour12: false,
+                })}{' '}
+                WIB
               </span>
             </div>
           </button>

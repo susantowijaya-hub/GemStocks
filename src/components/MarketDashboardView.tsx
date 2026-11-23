@@ -20,6 +20,7 @@ import {
 import {
   AppRoute,
   Asset5mVolatility,
+  IctSignalAnalysis,
   MarketAsset,
   MarketIntelligenceResponse,
   NewsStory,
@@ -41,12 +42,16 @@ import {
 import {
   computeAssetTimeframeReturn,
   computeOverallMarketFearGreed,
+  computeRiskRegimeSentiment,
   computeVolatilityFearGreed,
+  extractFiveMinuteTrajectory,
   getAssetFearGreed,
   getAssetSignal,
 } from '../utils/marketSignals';
+import { D3FiveMinSparkline } from './D3FiveMinSparkline';
 import { GoogleFinanceDeltaPill } from './GoogleFinanceMiniChart';
 import { HeadlineSentimentGaugeCard } from './HeadlineSentimentGaugeCard';
+import { IctSignalCard } from './IctSignalCard';
 import { InteractiveChart } from './InteractiveChart';
 import { MarketFearGreedGaugeCard } from './MarketFearGreedGaugeCard';
 import {
@@ -57,6 +62,7 @@ import {
   SignalBadge,
 } from './MarketUiPrimitives';
 import { PriceAlertDrawer } from './PriceAlertOverlay';
+import { RiskRegimeGaugeCard } from './RiskRegimeGaugeCard';
 import { WidgetErrorBoundary } from './WidgetErrorBoundary';
 
 const MarketDepthCard = lazyWithRetry(() =>
@@ -105,6 +111,10 @@ const DashboardTickerCard: React.FC<DashboardTickerCardProps> = React.memo(
   }) => {
     const tileSignal = getAssetSignal(tile);
     const tileFearGreed = getAssetFearGreed(tile);
+    const fiveMin = useMemo(
+      () => extractFiveMinuteTrajectory(tile, volInfo),
+      [tile, volInfo]
+    );
     const isDarkSurface = themeMode === 'obsidian';
 
     const signalTextClass =
@@ -221,6 +231,35 @@ const DashboardTickerCard: React.FC<DashboardTickerCardProps> = React.memo(
           <GoogleFinanceDeltaPill changePercent={tile.changePercent} compact />
         </div>
 
+        {/* 5-Minute D3 Price Trajectory Sparkline */}
+        {!isCompactCards && (
+          <div
+            data-testid="ticker-5m-sparkline-row"
+            className="mt-1.5 pt-1 border-t border-black/8 dark:border-white/8 w-full flex items-center justify-between gap-2"
+            title={`5-minute price trajectory: ${fiveMin.deltaPct >= 0 ? '+' : ''}${fiveMin.deltaPct.toFixed(2)}%`}
+          >
+            <span
+              className={`text-[9px] font-mono font-bold tabular-nums whitespace-nowrap shrink-0 ${
+                fiveMin.deltaPct > 0.005
+                  ? 'text-[#0F7033] dark:text-[#4ADE80]'
+                  : fiveMin.deltaPct < -0.005
+                    ? 'text-[#C41C16] dark:text-[#FF6B63]'
+                    : 'text-[#6C6C70] dark:text-[#9EB5C8]'
+              }`}
+            >
+              5m {fiveMin.deltaPct >= 0 ? '+' : ''}
+              {fiveMin.deltaPct.toFixed(2)}%
+            </span>
+            <D3FiveMinSparkline
+              points={fiveMin.points}
+              deltaPct={fiveMin.deltaPct}
+              width={72}
+              height={18}
+              className="w-[72px] h-[18px] shrink-0"
+            />
+          </div>
+        )}
+
         {showVolHeatmap && volInfo && (
           <div
             className="mt-1.5 pt-1 border-t border-black/10 dark:border-white/10 w-full flex items-center justify-between gap-1 text-[10px] font-mono tabular-nums"
@@ -279,6 +318,10 @@ interface MarketDashboardViewProps {
   onMarkAlertRead?: (id: string) => void;
   onClearAlerts?: () => void;
   onTriggerTestAlert?: (assetId?: string) => void;
+  onScanIct?: (assetId?: string) => void;
+  onPushIctAlert?: (signal: IctSignalAnalysis) => void;
+  onScanBandar?: () => void;
+  onInspectSymbol?: (yahooSymbol: string) => void;
 }
 
 const REGION_TABS: { id: DashboardRegionTab; label: string }[] = [
@@ -311,6 +354,10 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
   onMarkAlertRead,
   onClearAlerts,
   onTriggerTestAlert,
+  onScanIct,
+  onPushIctAlert,
+  onScanBandar,
+  onInspectSymbol,
 }) => {
   const [timeframe, setTimeframe] = useState<Timeframe>('1D');
   const [regionTab, setRegionTab] = useState<DashboardRegionTab>('all');
@@ -425,6 +472,7 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
   const activeSignal = useMemo(() => getAssetSignal(activeAsset), [activeAsset]);
   const activeFearGreed = useMemo(() => getAssetFearGreed(activeAsset), [activeAsset]);
   const overallFearGreed = useMemo(() => computeOverallMarketFearGreed(assets), [assets]);
+  const riskRegime = useMemo(() => computeRiskRegimeSentiment(assets), [assets]);
   const volatilityFearGreed = useMemo(
     () => computeVolatilityFearGreed(assets, volatility5mMap),
     [assets, volatility5mMap]
@@ -543,6 +591,7 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
             <button
               type="button"
               onClick={() => setIsAlertDrawerOpen((prev) => !prev)}
+              data-testid="alerts-drawer-toggle"
               className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-[11px] font-bold border whitespace-nowrap shrink-0 transition-all ${
                 unreadAlertCount > 0
                   ? 'bg-[#FF9F0A]/18 border-[#FF9F0A]/45 text-[#9A4E00] dark:text-[#FBBF24]'
@@ -550,14 +599,14 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
                     ? 'bg-[#1C1C1E] dark:bg-white text-white dark:text-[#111318] border-transparent'
                     : 'liquid-glass-pill text-[#4A4D57] dark:text-[#C7CBD6] hover:text-[#1C1C1E] dark:hover:text-white'
               }`}
-              title="Real-time alerts when any asset moves > 2.0% within 5 minutes"
+              title="Real-time 5m volatility (>2%) & ICT Buy/Sell signal alerts"
             >
               {unreadAlertCount > 0 ? (
                 <BellRing className="w-3.5 h-3.5 animate-pulse" />
               ) : (
                 <Bell className="w-3.5 h-3.5" />
               )}
-              <span>5m Alerts</span>
+              <span>Alerts</span>
               <span className="font-mono tabular-nums">
                 {unreadAlertCount > 0 ? `(${unreadAlertCount})` : alerts.length > 0 ? `(${alerts.length})` : ''}
               </span>
@@ -651,12 +700,18 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
           activeAssetId={activeAsset?.id}
           onClose={() => setIsAlertDrawerOpen(false)}
           onSelectAlert={(alert) => {
-            onSelectAsset(alert.assetId);
             onMarkAlertRead?.(alert.id);
+            if (alert.alertKind === 'bandarmology') {
+              onInspectSymbol?.(alert.assetId);
+            } else {
+              onSelectAsset(alert.assetId);
+            }
           }}
           onMarkAllRead={() => onMarkAllAlertsRead?.()}
           onClearAlerts={() => onClearAlerts?.()}
           onTriggerTestAlert={(assetId) => onTriggerTestAlert?.(assetId)}
+          onScanIct={(assetId) => onScanIct?.(assetId)}
+          onScanBandar={onScanBandar}
         />
 
         <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_360px] gap-5 items-start">
@@ -862,6 +917,19 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
               </div>
             </div>
 
+            {/* ICT Smart Money Buy/Sell Radar for FX Majors, BTC/USD, & XAU/USD */}
+            <IctSignalCard
+              assets={assets}
+              activeAsset={activeAsset}
+              activeTimeframe={timeframe}
+              onSelectAsset={onSelectAsset}
+              onLoadTimeframe={onLoadTimeframe}
+              onTriggerIctAlert={(sig) => {
+                onPushIctAlert?.(sig);
+                setIsAlertDrawerOpen(true);
+              }}
+            />
+
             {/* Lazy-Loaded Secondary Widget 1: Market Depth */}
             <WidgetErrorBoundary widgetName="Market Depth & Order Book">
               <Suspense
@@ -882,10 +950,13 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
 
           {/* CHILD 2 (Order 2 on mobile — ABOVE Correlation Matrix, Col 2 spanning rows on desktop): Insights & Technical Sentiment Rail */}
           <aside className="order-2 xl:col-start-2 xl:row-start-1 xl:row-span-2 flex flex-col gap-4 min-w-0">
-            {/* 1. Volatility-Driven Market Fear & Greed Sentiment Gauge */}
+            {/* 1. Weighted Index & Sector Risk-On vs Risk-Off Sentiment Gauge */}
+            <RiskRegimeGaugeCard regime={riskRegime} themeMode={themeMode} />
+
+            {/* 2. Volatility-Driven Market Fear & Greed Sentiment Gauge */}
             <MarketFearGreedGaugeCard sentiment={volatilityFearGreed} themeMode={themeMode} />
 
-            {/* 2. Overall Global Market Fear & Greed Composite */}
+            {/* 3. Overall Global Market Fear & Greed Composite */}
             <GlobalMarketFearGreedCard sentiment={overallFearGreed} compactRail />
 
             {/* 3. Live Headline Sentiment SVG Circular Gauge */}

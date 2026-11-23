@@ -9,6 +9,8 @@ interface InteractiveChartProps {
   onTimeframeChange: (tf: Timeframe) => void;
   onInspectIndexChange?: (idx: number | null) => void;
   compact?: boolean;
+  forceGranularIntraday?: boolean;
+  hideTimeframeTabs?: boolean;
 }
 
 type ChartDisplayMode = 'line' | 'candles';
@@ -26,10 +28,13 @@ interface BucketedCandle extends CandlePoint {
 }
 
 const STANDARD_TIMEFRAMES: Timeframe[] = ['1D', '1W', '1M', '3M', 'YTD', '1Y', 'ALL'];
-const CURRENCY_TIMEFRAMES: Timeframe[] = [
-  '15M',
-  '1H',
-  '4H',
+const GRANULAR_INTRADAY_TIMEFRAMES: Timeframe[] = [
+  '1m',
+  '5m',
+  '15m',
+  '30m',
+  '1h',
+  '4h',
   '1D',
   '1W',
   '1M',
@@ -40,9 +45,12 @@ const CURRENCY_TIMEFRAMES: Timeframe[] = [
 ];
 
 const TIME_LABELS: Record<Timeframe, string[]> = {
-  '15M': ['-15m', '-10m', '-5m', 'Now'],
-  '1H': ['-60m', '-40m', '-20m', 'Now'],
-  '4H': ['-4h', '-3h', '-2h', '-1h', 'Now'],
+  '1m': ['-35m', '-24m', '-12m', 'Now'],
+  '5m': ['-3h', '-2h', '-1h', 'Now'],
+  '15m': ['-10h', '-6h', '-3h', 'Now'],
+  '30m': ['-20h', '-12h', '-6h', 'Now'],
+  '1h': ['-42h', '-28h', '-14h', 'Now'],
+  '4h': ['-6D', '-4D', '-2D', 'Now'],
   '1D': ['Open', 'Morning', 'Midday', 'Afternoon', 'Pre-Close', 'Close'],
   '1W': ['D1', 'D2', 'D3', 'D4', 'Now'],
   '1M': ['W1', 'W2', 'W3', 'W4', 'Now'],
@@ -152,6 +160,8 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
   onTimeframeChange,
   onInspectIndexChange,
   compact = false,
+  forceGranularIntraday = false,
+  hideTimeframeTabs = false,
 }) => {
   const uid = useId().replace(/:/g, '');
   const svgRef = useRef<SVGSVGElement | null>(null);
@@ -159,12 +169,23 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   const [pinnedIndex, setPinnedIndex] = useState<number | null>(null);
 
-  const isCurrencyInstrument = asset.category === 'forex-yields' && !asset.isYield;
-  const availableTimeframes = isCurrencyInstrument
-    ? CURRENCY_TIMEFRAMES
+  const upperId = (asset.id || '').toUpperCase();
+  const upperSym = (asset.symbol || '').toUpperCase();
+  const isGranularIntradayAsset =
+    forceGranularIntraday ||
+    (asset.category === 'forex-yields' && !asset.isYield) ||
+    upperId === 'BTCUSD' ||
+    upperId === 'BTC-USD' ||
+    upperSym === 'BTC/USD' ||
+    upperId === 'XAUUSD' ||
+    upperId === 'GC=F' ||
+    upperSym === 'XAU/USD' ||
+    upperId.endsWith('=X');
+  const availableTimeframes = isGranularIntradayAsset
+    ? GRANULAR_INTRADAY_TIMEFRAMES
     : STANDARD_TIMEFRAMES;
 
-  // Guard timeframe when switching from FX intraday interval to an equity/index asset
+  // Guard timeframe when switching from granular intraday interval to a non-intraday asset
   useEffect(() => {
     if (!availableTimeframes.includes(timeframe)) {
       onTimeframeChange('1D');
@@ -187,7 +208,13 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
     baseSeries.length >= 2 ? baseSeries : [asset.prevClose || asset.price, asset.price];
 
   const isIntradayTf =
-    timeframe === '15M' || timeframe === '1H' || timeframe === '4H' || timeframe === '1D';
+    timeframe === '1m' ||
+    timeframe === '5m' ||
+    timeframe === '15m' ||
+    timeframe === '30m' ||
+    timeframe === '1h' ||
+    timeframe === '4h' ||
+    timeframe === '1D';
 
   // Anchor split color & horizontal baseline on Opening Price for 1D, or Period Start for intraday/multi-day
   const openBaseline = useMemo(() => {
@@ -204,7 +231,7 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
       ? Math.max(0.15, Math.min(1, asset.sessionProgressRatio))
       : 1;
 
-  const maxBarsForAsset = isCurrencyInstrument ? 46 : 38;
+  const maxBarsForAsset = isGranularIntradayAsset ? 46 : 38;
   const rawCandles = useMemo(
     () =>
       buildOhlcCandles(
@@ -453,11 +480,26 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         const ts = rawTs[idx];
         const d = new Date(ts);
         if (!Number.isFinite(d.getTime())) continue;
-        if (timeframe === '15M' || timeframe === '1H' || timeframe === '4H' || timeframe === '1D') {
+        if (
+          timeframe === '1m' ||
+          timeframe === '5m' ||
+          timeframe === '15m' ||
+          timeframe === '30m' ||
+          timeframe === '1D'
+        ) {
           out.push(
             new Intl.DateTimeFormat('en-GB', {
               hour: '2-digit',
               minute: '2-digit',
+              hour12: false,
+            }).format(d)
+          );
+        } else if (timeframe === '1h' || timeframe === '4h') {
+          out.push(
+            new Intl.DateTimeFormat('en-GB', {
+              month: 'short',
+              day: 'numeric',
+              hour: '2-digit',
               hour12: false,
             }).format(d)
           );
@@ -493,31 +535,33 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
       {/* Segmented Timeframe Selector + Chart Type Toggle (Line / Candles) + Legend */}
       <div className="flex flex-wrap items-center justify-between gap-2 py-0.5">
         <div className="flex flex-wrap items-center gap-2 max-w-full">
-          <div
-            role="tablist"
-            aria-label="Chart Timeframes"
-            className="liquid-glass-pill inline-flex p-1 rounded-full overflow-x-auto no-scrollbar max-w-full"
-          >
-            {availableTimeframes.map((tf) => {
-              const active = tf === timeframe;
-              return (
-                <button
-                  key={tf}
-                  type="button"
-                  role="tab"
-                  aria-selected={active}
-                  onClick={() => onTimeframeChange(tf)}
-                  className={`px-2.5 sm:px-3 py-1 rounded-full text-xs font-bold transition-all whitespace-nowrap shrink-0 ${
-                    active
-                      ? 'bg-[#0066CC] dark:bg-[#0066CC] text-white shadow-sm'
-                      : 'text-[#52525A] dark:text-[#AEAEB8] hover:text-[#1C1C1E] dark:hover:text-white'
-                  }`}
-                >
-                  {tf}
-                </button>
-              );
-            })}
-          </div>
+          {!hideTimeframeTabs && (
+            <div
+              role="tablist"
+              aria-label="Chart Timeframes"
+              className="liquid-glass-pill inline-flex p-1 rounded-full overflow-x-auto no-scrollbar max-w-full"
+            >
+              {availableTimeframes.map((tf) => {
+                const active = tf === timeframe;
+                return (
+                  <button
+                    key={tf}
+                    type="button"
+                    role="tab"
+                    aria-selected={active}
+                    onClick={() => onTimeframeChange(tf)}
+                    className={`px-2.5 sm:px-3 py-1 rounded-full text-xs font-bold transition-all whitespace-nowrap shrink-0 ${
+                      active
+                        ? 'bg-[#0066CC] dark:bg-[#0066CC] text-white shadow-sm'
+                        : 'text-[#52525A] dark:text-[#AEAEB8] hover:text-[#1C1C1E] dark:hover:text-white'
+                    }`}
+                  >
+                    {tf}
+                  </button>
+                );
+              })}
+            </div>
+          )}
 
           {/* Line vs Candlestick Display Toggle */}
           <div

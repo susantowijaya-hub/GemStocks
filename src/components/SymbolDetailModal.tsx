@@ -1,10 +1,34 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { ArrowDown, ArrowUp, Loader2, TrendingUp, X } from 'lucide-react';
-import { CandlePoint, MarketAsset, Timeframe } from '../types/market';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ArrowDown, ArrowUp, Clock, Loader2, TrendingUp, X } from 'lucide-react';
+import {
+  BandarmologyAnalysis,
+  CandlePoint,
+  MarketAsset,
+  Timeframe,
+} from '../types/market';
 import { computeFearGreedIndex, parseFormattedMarketNumber } from '../utils/marketSignals';
 import { GoogleFinanceDeltaPill } from './GoogleFinanceMiniChart';
 import { InteractiveChart } from './InteractiveChart';
-import { FearGreedMeter } from './MarketUiPrimitives';
+import { BandarmologyBadge, FearGreedMeter } from './MarketUiPrimitives';
+
+const DETAIL_TIMEFRAME_STORAGE_KEY = 'stocks_symbol_detail_timeframe_v1';
+
+const INTRADAY_QUICK_TABS: Timeframe[] = ['1m', '5m', '15m', '30m', '1h', '4h'];
+const SWING_MACRO_TABS: Timeframe[] = ['1D', '1W', '1M', '3M', 'YTD', '1Y', 'ALL'];
+const ALL_DETAIL_TIMEFRAMES: Timeframe[] = [...INTRADAY_QUICK_TABS, ...SWING_MACRO_TABS];
+
+function loadSavedDetailTimeframe(): Timeframe {
+  if (typeof window === 'undefined') return '15m';
+  try {
+    const saved = window.localStorage.getItem(DETAIL_TIMEFRAME_STORAGE_KEY) as Timeframe | null;
+    if (saved && ALL_DETAIL_TIMEFRAMES.includes(saved)) {
+      return saved;
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return '1D';
+}
 
 interface SymbolDetailData {
   id: string;
@@ -44,6 +68,7 @@ interface SymbolDetailData {
   sessionStateLabel: string;
   sessionProgressRatio: number;
   updatedAtEpoch: number;
+  bandarmology?: BandarmologyAnalysis;
 }
 
 interface SymbolDetailModalProps {
@@ -55,31 +80,51 @@ export const SymbolDetailModal: React.FC<SymbolDetailModalProps> = ({
   yahooSymbol,
   onClose,
 }) => {
-  const [timeframe, setTimeframe] = useState<Timeframe>('1D');
-  const [loadedTimeframe, setLoadedTimeframe] = useState<Timeframe>('1D');
+  const [timeframe, setTimeframeState] = useState<Timeframe>(loadSavedDetailTimeframe);
+  const [loadedTimeframe, setLoadedTimeframe] = useState<Timeframe>(timeframe);
   const [detail, setDetail] = useState<SymbolDetailData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [inspectedIdx, setInspectedIdx] = useState<number | null>(null);
+  const frameCacheRef = useRef<Record<string, SymbolDetailData>>({});
+  const marketSessionOpenRef = useRef<boolean>(false);
+
+  const setTimeframe = useCallback((nextTf: Timeframe) => {
+    setTimeframeState(nextTf);
+    if (typeof window !== 'undefined') {
+      try {
+        window.localStorage.setItem(DETAIL_TIMEFRAME_STORAGE_KEY, nextTf);
+      } catch {
+        // ignore storage quota errors
+      }
+    }
+  }, []);
 
   useEffect(() => {
     if (!yahooSymbol) return;
-    setTimeframe('1D');
-    setLoadedTimeframe('1D');
     setInspectedIdx(null);
-  }, [yahooSymbol]);
-
-  useEffect(() => {
-    setInspectedIdx(null);
-  }, [timeframe]);
+    const cacheKey = `${yahooSymbol.toUpperCase()}:${timeframe}`;
+    const cached = frameCacheRef.current[cacheKey];
+    if (cached) {
+      marketSessionOpenRef.current = Boolean(cached.marketSessionOpen);
+      setDetail(cached);
+      setLoadedTimeframe(timeframe);
+    }
+  }, [yahooSymbol, timeframe]);
 
   useEffect(() => {
     if (!yahooSymbol) return;
     let cancelled = false;
-    setLoading(true);
+    let inFlight = false;
+    const cacheKey = `${yahooSymbol.toUpperCase()}:${timeframe}`;
+    if (!frameCacheRef.current[cacheKey]) {
+      setLoading(true);
+    }
     setError(null);
 
     const load = async () => {
+      if (inFlight) return;
+      inFlight = true;
       try {
         const res = await fetch(
           `/api/symbol/detail?symbol=${encodeURIComponent(yahooSymbol)}&timeframe=${encodeURIComponent(
@@ -89,6 +134,8 @@ export const SymbolDetailModal: React.FC<SymbolDetailModalProps> = ({
         if (!res.ok) throw new Error('Unable to load chart data');
         const json = (await res.json()) as SymbolDetailData;
         if (!cancelled) {
+          marketSessionOpenRef.current = Boolean(json.marketSessionOpen);
+          frameCacheRef.current[cacheKey] = json;
           setDetail(json);
           setLoadedTimeframe(timeframe);
         }
@@ -97,14 +144,17 @@ export const SymbolDetailModal: React.FC<SymbolDetailModalProps> = ({
           setError(e instanceof Error ? e.message : 'Unable to load symbol chart.');
         }
       } finally {
+        inFlight = false;
         if (!cancelled) setLoading(false);
       }
     };
 
     void load();
 
+    const isIntraday =
+      timeframe === '1D' || INTRADAY_QUICK_TABS.includes(timeframe);
     const timer = window.setInterval(() => {
-      if (detail?.marketSessionOpen && timeframe === '1D') {
+      if (marketSessionOpenRef.current && isIntraday) {
         void load();
       }
     }, 3000);
@@ -113,7 +163,7 @@ export const SymbolDetailModal: React.FC<SymbolDetailModalProps> = ({
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [yahooSymbol, timeframe, detail?.marketSessionOpen]);
+  }, [yahooSymbol, timeframe]);
 
   // Adapt individual stock / symbol response into a MarketAsset for InteractiveChart (Line + Candlestick OHLC)
   const chartAsset = useMemo<MarketAsset | null>(() => {
@@ -244,6 +294,18 @@ export const SymbolDetailModal: React.FC<SymbolDetailModalProps> = ({
         : 0;
   const isGain = displayChangePct >= 0;
 
+  const handleTabKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+    e.preventDefault();
+    const curIdx = ALL_DETAIL_TIMEFRAMES.indexOf(timeframe);
+    if (curIdx < 0) return;
+    const nextIdx =
+      e.key === 'ArrowRight'
+        ? (curIdx + 1) % ALL_DETAIL_TIMEFRAMES.length
+        : (curIdx - 1 + ALL_DETAIL_TIMEFRAMES.length) % ALL_DETAIL_TIMEFRAMES.length;
+    setTimeframe(ALL_DETAIL_TIMEFRAMES[nextIdx]);
+  };
+
   return (
     <div
       className="fixed inset-0 z-50 bg-black/60 backdrop-blur-md flex items-center justify-center p-3 sm:p-5"
@@ -295,6 +357,76 @@ export const SymbolDetailModal: React.FC<SymbolDetailModalProps> = ({
           >
             <X className="w-4 h-4" />
           </button>
+        </div>
+
+        {/* Persistent Sticky Quick-Switch Timeframe Tab Interface (1m, 5m, 15m, 30m, 1h, 4h + Macro) */}
+        <div
+          data-testid="symbol-detail-timeframe-tabs"
+          onKeyDown={handleTabKeyDown}
+          className="px-4 sm:px-5 py-2.5 border-b border-black/8 dark:border-white/10 bg-black/[0.02] dark:bg-white/[0.03] flex flex-wrap items-center justify-between gap-2 shrink-0"
+        >
+          <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar max-w-full" role="tablist" aria-label="Multi-timeframe quick switch">
+            <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-[#6C6C70] dark:text-[#9EB5C8] pr-1 shrink-0">
+              <Clock className="w-3 h-3" />
+              MTF
+            </span>
+            <div className="inline-flex items-center gap-0.5 p-0.5 rounded-xl bg-black/5 dark:bg-white/8">
+              {INTRADAY_QUICK_TABS.map((tf) => {
+                const active = tf === timeframe;
+                return (
+                  <button
+                    key={tf}
+                    type="button"
+                    role="tab"
+                    data-timeframe={tf}
+                    aria-selected={active}
+                    onClick={() => setTimeframe(tf)}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-mono font-bold transition-colors whitespace-nowrap shrink-0 ${
+                      active
+                        ? 'bg-[#0066CC] text-white shadow-xs'
+                        : 'text-[#4A4D57] dark:text-[#C7CBD6] hover:text-[#1C1C1E] dark:hover:text-white'
+                    }`}
+                  >
+                    {tf}
+                  </button>
+                );
+              })}
+            </div>
+
+            <span aria-hidden="true" className="text-black/15 dark:text-white/15 px-0.5 select-none">
+              |
+            </span>
+
+            <div className="inline-flex items-center gap-0.5 p-0.5 rounded-xl bg-black/5 dark:bg-white/8">
+              {SWING_MACRO_TABS.map((tf) => {
+                const active = tf === timeframe;
+                return (
+                  <button
+                    key={tf}
+                    type="button"
+                    role="tab"
+                    data-timeframe={tf}
+                    aria-selected={active}
+                    onClick={() => setTimeframe(tf)}
+                    className={`px-2 py-1 rounded-lg text-xs font-mono font-bold transition-colors whitespace-nowrap shrink-0 ${
+                      active
+                        ? 'bg-[#0066CC] text-white shadow-xs'
+                        : 'text-[#4A4D57] dark:text-[#C7CBD6] hover:text-[#1C1C1E] dark:hover:text-white'
+                    }`}
+                  >
+                    {tf}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-1.5 text-[10px] font-semibold text-[#6C6C70] dark:text-[#9EB5C8] shrink-0">
+            {loading && !isTimeframeSynced && (
+              <Loader2 className="w-3 h-3 animate-spin text-[#0066CC]" />
+            )}
+            <span className="font-mono">Saved: {timeframe}</span>
+          </div>
         </div>
 
         {/* Body */}
@@ -372,6 +504,8 @@ export const SymbolDetailModal: React.FC<SymbolDetailModalProps> = ({
                 onTimeframeChange={setTimeframe}
                 onInspectIndexChange={setInspectedIdx}
                 compact
+                forceGranularIntraday
+                hideTimeframeTabs
               />
 
               {/* Key Statistics Grid */}
@@ -410,6 +544,52 @@ export const SymbolDetailModal: React.FC<SymbolDetailModalProps> = ({
                   compact
                   showComponents
                 />
+              )}
+
+              {/* IDX Bandarmology Accumulation / Distribution Position */}
+              {detail.bandarmology && (
+                <div
+                  data-testid="modal-bandarmology-card"
+                  className="rounded-2xl liquid-glass-inset p-4 flex flex-col gap-2.5 text-xs"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <span className="text-[11px] font-bold uppercase tracking-wider text-[#6C6C70] dark:text-[#9EB5C8]">
+                        IDX Bandarmology Position
+                      </span>
+                      <p className="text-[11px] text-[#4A4D57] dark:text-[#C7CBD6] mt-0.5">
+                        {detail.bandarmology.summary}
+                      </p>
+                    </div>
+                    <BandarmologyBadge bandarmology={detail.bandarmology} showScore />
+                  </div>
+                  <div className="grid grid-cols-3 gap-3 pt-2 border-t border-black/8 dark:border-white/10">
+                    <div>
+                      <span className="text-[10px] text-[#6C6C70] dark:text-[#9EB5C8]">
+                        20D Volume Ratio
+                      </span>
+                      <p className="font-mono font-bold tabular-nums text-[#1C1C1E] dark:text-white mt-0.5">
+                        {detail.bandarmology.volumeRatio.toFixed(2)}x
+                      </p>
+                    </div>
+                    <div>
+                      <span className="text-[10px] text-[#6C6C70] dark:text-[#9EB5C8]">
+                        Acc Flow Pressure
+                      </span>
+                      <p className="font-mono font-bold tabular-nums text-[#1C1C1E] dark:text-white mt-0.5">
+                        {detail.bandarmology.accumulationPressure}%
+                      </p>
+                    </div>
+                    <div>
+                      <span className="text-[10px] text-[#6C6C70] dark:text-[#9EB5C8]">
+                        Foreign Flow Bias
+                      </span>
+                      <p className="font-mono font-bold text-[#1C1C1E] dark:text-white mt-0.5">
+                        {detail.bandarmology.foreignBias}
+                      </p>
+                    </div>
+                  </div>
+                </div>
               )}
             </>
           ) : null}

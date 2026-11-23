@@ -4,6 +4,9 @@ import {
   FearGreedZone,
   MarketAsset,
   MarketSignalInfo,
+  RiskRegimeInfo,
+  RiskRegimeSectorBreakdown,
+  RiskRegimeStatus,
   SignalTier,
   StockMover,
   Timeframe,
@@ -892,6 +895,207 @@ export function computeVolatilityFearGreed(
     safeHavenBidScore,
     driver,
     history7d,
+  };
+}
+
+export function extractFiveMinuteTrajectory(
+  asset: MarketAsset,
+  volInfo?: Asset5mVolatility
+): { points: number[]; deltaPct: number } {
+  const series = asset.chartSeries?.['1D'] ?? [];
+  const timestamps = asset.chartTimestamps?.['1D'] ?? [];
+  const livePrice = Number.isFinite(asset.price) && asset.price > 0 ? asset.price : 0;
+
+  let trajectory: number[] = [];
+
+  if (series.length >= 3 && timestamps.length === series.length) {
+    const lastTs = timestamps[timestamps.length - 1];
+    if (typeof lastTs === 'number' && Number.isFinite(lastTs)) {
+      const cutoff = lastTs - 5 * 60_000;
+      const inWindow: number[] = [];
+      for (let i = 0; i < series.length; i++) {
+        const val = series[i];
+        if (timestamps[i] >= cutoff && typeof val === 'number' && Number.isFinite(val) && val > 0) {
+          inWindow.push(val);
+        }
+      }
+      if (inWindow.length >= 3) {
+        trajectory = inWindow;
+      }
+    }
+  }
+
+  if (trajectory.length < 3) {
+    const sourcePool =
+      series.length >= 3
+        ? series
+        : asset.sparklinePoints.length >= 3
+          ? asset.sparklinePoints
+          : [];
+    trajectory = sourcePool
+      .filter((v) => typeof v === 'number' && Number.isFinite(v) && v > 0)
+      .slice(-8);
+  }
+
+  if (livePrice > 0) {
+    if (trajectory.length >= 2) {
+      trajectory = [...trajectory.slice(0, -1), livePrice];
+    } else {
+      const pctHint =
+        volInfo?.isSessionOpen && typeof volInfo.pct5m === 'number'
+          ? volInfo.pct5m
+          : typeof asset.move5mPct === 'number'
+            ? asset.move5mPct
+            : asset.changePercent * 0.15;
+      const safeHint = Number.isFinite(pctHint) ? pctHint : 0;
+      const startVal = livePrice / (1 + safeHint / 100 || 1);
+      trajectory = [
+        startVal,
+        startVal + (livePrice - startVal) * 0.35,
+        startVal + (livePrice - startVal) * 0.68,
+        livePrice,
+      ];
+    }
+  }
+
+  if (trajectory.length < 2) {
+    const base = livePrice || asset.prevClose || 100;
+    trajectory = [base, base];
+  }
+
+  const first = trajectory[0];
+  const last = trajectory[trajectory.length - 1];
+  const computedDelta = first > 0 ? ((last - first) / first) * 100 : 0;
+  const deltaPct =
+    volInfo?.isSessionOpen && typeof volInfo.pct5m === 'number' && Number.isFinite(volInfo.pct5m)
+      ? volInfo.pct5m
+      : typeof asset.move5mPct === 'number' && Number.isFinite(asset.move5mPct) && asset.marketSessionOpen !== false
+        ? asset.move5mPct
+        : computedDelta;
+
+  return {
+    points: trajectory,
+    deltaPct: Number.isFinite(deltaPct) ? Number(deltaPct.toFixed(2)) : 0,
+  };
+}
+
+export function computeRiskRegimeSentiment(assets: MarketAsset[]): RiskRegimeInfo {
+  if (!assets || assets.length === 0) {
+    return {
+      status: 'Neutral',
+      polarity: 'neutral',
+      score: 50,
+      weightedMovePct: 0,
+      advancingSectors: 0,
+      totalSectors: 4,
+      driver: 'Awaiting live index & sector quotes...',
+      sectors: [],
+    };
+  }
+
+  const byId = new Map(assets.map((a) => [a.id.toUpperCase(), a]));
+
+  const weightedBucketAvg = (items: Array<{ id: string; w: number; scale?: number }>): number => {
+    let sum = 0;
+    let totalW = 0;
+    for (const item of items) {
+      const asset = byId.get(item.id.toUpperCase());
+      if (!asset || !Number.isFinite(asset.changePercent)) continue;
+      const scale = item.scale ?? 1;
+      sum += (asset.changePercent / scale) * item.w;
+      totalW += item.w;
+    }
+    return totalW > 0 ? sum / totalW : 0;
+  };
+
+  // 1. US Broad & Tech Indices (35% weight)
+  const usMove = weightedBucketAvg([
+    { id: 'SPX', w: 1.4 },
+    { id: 'IXIC', w: 1.3 },
+    { id: 'DJI', w: 1.0 },
+  ]);
+
+  // 2. Asia & Emerging Markets Indices (25% weight)
+  const asiaMove = weightedBucketAvg([
+    { id: 'IHSG', w: 1.3 },
+    { id: 'EIDO', w: 1.1 },
+    { id: 'HSI', w: 1.0 },
+    { id: 'TAIEX', w: 1.0 },
+    { id: 'KOSPI', w: 1.0 },
+    { id: 'SSEC', w: 0.9 },
+    { id: 'NIFTY', w: 1.0 },
+  ]);
+
+  // 3. Cyclicals & High-Beta Digital Risk Assets (15% weight)
+  const cyclicalMove = weightedBucketAvg([
+    { id: 'BTCUSD', w: 1.1, scale: 2.2 },
+    { id: 'ETHUSD', w: 0.9, scale: 2.4 },
+    { id: 'WTI', w: 1.0, scale: 1.3 },
+    { id: 'BRENT', w: 1.0, scale: 1.3 },
+    { id: 'AUDUSD', w: 0.9, scale: 0.65 },
+    { id: 'NZDUSD', w: 0.8, scale: 0.65 },
+  ]);
+
+  // 4. Safe-Haven Inverse Sector (25% weight):
+  // Rising Gold / DXY / CHF or falling 10Y Treasury yields indicates Risk-Off demand -> negative risk score
+  const xau = byId.get('XAUUSD')?.changePercent ?? 0;
+  const dxy = byId.get('DXY')?.changePercent ?? 0;
+  const usdChf = byId.get('USDCHF')?.changePercent ?? 0;
+  const us10y = byId.get('US10Y')?.changePercent ?? 0;
+  const safeHavenRiskMove = -(xau * 0.42 + dxy * 0.48 - usdChf * 0.25 - us10y * 0.22);
+
+  const classifyStance = (val: number): RiskRegimeSectorBreakdown['stance'] =>
+    val >= 0.12 ? 'Risk-On' : val <= -0.12 ? 'Risk-Off' : 'Neutral';
+
+  const rawBuckets: Array<{ id: string; label: string; weightPct: number; avgMovePct: number }> = [
+    { id: 'us-indices', label: 'US Indices', weightPct: 35, avgMovePct: usMove },
+    { id: 'asia-indices', label: 'Asia & IDX', weightPct: 25, avgMovePct: asiaMove },
+    { id: 'cyclicals-crypto', label: 'Cyclicals & Crypto', weightPct: 15, avgMovePct: cyclicalMove },
+    { id: 'safe-havens', label: 'Safe Havens (Inv)', weightPct: 25, avgMovePct: safeHavenRiskMove },
+  ];
+
+  const sectors: RiskRegimeSectorBreakdown[] = rawBuckets.map((b) => ({
+    id: b.id,
+    label: b.label,
+    weightPct: b.weightPct,
+    avgMovePct: Number(b.avgMovePct.toFixed(2)),
+    weightedContributionPct: Number(((b.avgMovePct * b.weightPct) / 100).toFixed(3)),
+    stance: classifyStance(b.avgMovePct),
+  }));
+
+  const weightedMovePct = sectors.reduce((acc, s) => acc + s.weightedContributionPct, 0);
+  const score = clamp0100(50 + Math.tanh(weightedMovePct / 0.85) * 44);
+
+  let status: RiskRegimeStatus = 'Neutral';
+  let polarity: RiskRegimeInfo['polarity'] = 'neutral';
+  if (score >= 65) {
+    status = 'Strong Risk-On';
+    polarity = 'risk-on';
+  } else if (score >= 54) {
+    status = 'Risk-On';
+    polarity = 'risk-on';
+  } else if (score <= 35) {
+    status = 'Strong Risk-Off';
+    polarity = 'risk-off';
+  } else if (score <= 46) {
+    status = 'Risk-Off';
+    polarity = 'risk-off';
+  }
+
+  const advancingSectors = sectors.filter((s) => s.stance === 'Risk-On').length;
+  const driver = `Weighted cross-sector delta ${
+    weightedMovePct >= 0 ? '+' : ''
+  }${weightedMovePct.toFixed(2)}% · ${advancingSectors}/${sectors.length} sectors Risk-On`;
+
+  return {
+    status,
+    polarity,
+    score,
+    weightedMovePct: Number(weightedMovePct.toFixed(2)),
+    advancingSectors,
+    totalSectors: sectors.length,
+    driver,
+    sectors,
   };
 }
 

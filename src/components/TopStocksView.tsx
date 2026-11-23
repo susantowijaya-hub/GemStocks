@@ -1,10 +1,12 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { motion } from 'motion/react';
 import {
+  Activity,
   ArrowDownLeft,
   ArrowRight,
   ArrowUpRight,
   BarChart3,
+  BellRing,
   Building2,
   Clock,
   Compass,
@@ -17,7 +19,9 @@ import {
 } from 'lucide-react';
 import {
   AppRoute,
+  BandarmologyPhase,
   MarketIntelligenceResponse,
+  PriceAlertItem,
   StockMover,
   StocksMoversBucket,
 } from '../types/market';
@@ -25,6 +29,7 @@ import { getAllMarketSessions, MarketSessionStatus } from '../utils/marketSessio
 import { getStockFearGreed, getStockSignal } from '../utils/marketSignals';
 import { GoogleFinanceDeltaPill, GoogleFinanceMiniChart } from './GoogleFinanceMiniChart';
 import {
+  BandarmologyBadge,
   FearGreedInlineBar,
   FearGreedTrendSparkline,
   getFearGreedTextTone,
@@ -38,7 +43,9 @@ interface TopStocksViewProps {
   stocksLoading?: boolean;
   marketIntelligence?: MarketIntelligenceResponse | null;
   searchQuery: string;
+  alerts?: PriceAlertItem[];
   onRefresh: () => void;
+  onScanBandar?: () => void;
   onInspectSymbol?: (yahooSymbol: string) => void;
   onNavigate?: (route: AppRoute) => void;
   onClearSearch?: () => void;
@@ -46,6 +53,7 @@ interface TopStocksViewProps {
 
 type MarketFilter = 'all' | 'us' | 'id';
 type DirectionFilter = 'impact' | 'gainers' | 'losers' | 'foreignBuy' | 'foreignSell';
+type BandarFilter = 'all' | BandarmologyPhase;
 
 function formatStockPrice(stock: StockMover): string {
   if (stock.price <= 0) return '—';
@@ -155,6 +163,8 @@ function MarketMoversSection({
   onClearSearch?: () => void;
   onInspectSymbol?: (yahooSymbol: string) => void;
 }) {
+  const isIdMarket = stocks.some((s) => s.market === 'ID');
+
   const openChartForStock = (stock: StockMover) => {
     if (!onInspectSymbol) return;
     const sym = stock.market === 'ID' ? `${stock.symbol}.JK` : stock.symbol;
@@ -228,6 +238,7 @@ function MarketMoversSection({
                   <th className="py-3 pl-5 pr-2 w-12">Rank</th>
                   <th className="py-3 px-3">Stock</th>
                   <th className="py-3 px-3">Signal</th>
+                  {isIdMarket && <th className="py-3 px-3">Bandarmology</th>}
                   <th className="py-3 px-3">Fear &amp; Greed</th>
                   <th className="py-3 px-3">Trend</th>
                   {isForeignFlow && (
@@ -278,6 +289,18 @@ function MarketMoversSection({
                       <td className="py-3 px-3">
                         <SignalBadge signal={signal} compact />
                       </td>
+                      {isIdMarket && (
+                        <td className="py-3 px-3">
+                          <div className="flex flex-col items-start gap-0.5">
+                            <BandarmologyBadge bandarmology={stock.bandarmology} compact />
+                            {stock.bandarmology && (
+                              <span className="text-[10px] font-mono tabular-nums text-[#6C6C70] dark:text-[#9EB5C8]">
+                                {stock.bandarmology.volumeRatio.toFixed(1)}x vol · Flow {stock.bandarmology.accumulationPressure}%
+                              </span>
+                            )}
+                          </div>
+                        </td>
+                      )}
                       <td className="py-3 px-3">
                         <FearGreedInlineBar fearGreed={fearGreed} compact />
                       </td>
@@ -365,9 +388,15 @@ function MarketMoversSection({
                         {stock.symbol}
                       </span>
                       <SignalBadge signal={signal} compact />
+                      {stock.market === 'ID' && (
+                        <BandarmologyBadge bandarmology={stock.bandarmology} compact />
+                      )}
                     </div>
                     <p className="text-xs text-[#6C6C70] dark:text-[#8E8E93] truncate mt-0.5">
                       {stock.name} · Vol {stock.volume}
+                      {stock.market === 'ID' && stock.bandarmology
+                        ? ` · ${stock.bandarmology.volumeRatio.toFixed(1)}x Vol`
+                        : ''}
                     </p>
                     {isForeignFlow && stock.foreignNetLabel ? (
                       <div
@@ -445,14 +474,22 @@ export const TopStocksView: React.FC<TopStocksViewProps> = ({
   stocksLoading = false,
   marketIntelligence = null,
   searchQuery,
+  alerts = [],
   onRefresh,
+  onScanBandar,
   onInspectSymbol,
   onNavigate,
   onClearSearch,
 }) => {
   const [marketFilter, setMarketFilter] = useState<MarketFilter>('all');
   const [directionFilter, setDirectionFilter] = useState<DirectionFilter>('impact');
+  const [bandarFilter, setBandarFilter] = useState<BandarFilter>('all');
   const [isRefreshing, setIsRefreshing] = useState(false);
+
+  const bandarShiftAlerts = useMemo(
+    () => alerts.filter((a) => a.alertKind === 'bandarmology').slice(0, 4),
+    [alerts]
+  );
   const [now, setNow] = useState(() => new Date());
 
   useEffect(() => {
@@ -501,8 +538,10 @@ export const TopStocksView: React.FC<TopStocksViewProps> = ({
             : directionFilter === 'foreignSell'
               ? idxBucket.foreignSell ?? []
               : idxBucket.impact;
-    return filterSearch(raw);
-  }, [idxBucket, directionFilter, searchQuery]);
+    const searched = filterSearch(raw);
+    if (bandarFilter === 'all') return searched;
+    return searched.filter((s) => (s.bandarmology?.phase ?? 'Neutral') === bandarFilter);
+  }, [idxBucket, directionFilter, searchQuery, bandarFilter]);
 
   const combinedSignalTally = useMemo(() => {
     let bull = 0;
@@ -514,6 +553,17 @@ export const TopStocksView: React.FC<TopStocksViewProps> = ({
     }
     return { bull, bear };
   }, [activeUsList, activeIdxList]);
+
+  const idxBandarSummary = useMemo(() => {
+    let acc = 0;
+    let dist = 0;
+    for (const s of idxBucket.impact) {
+      const ph = s.bandarmology?.phase;
+      if (ph === 'Strong Accumulation' || ph === 'Early Accumulation') acc += 1;
+      else if (ph === 'Strong Distribution' || ph === 'Early Distribution') dist += 1;
+    }
+    return { acc, dist };
+  }, [idxBucket.impact]);
 
   const handleManualRefresh = () => {
     setIsRefreshing(true);
@@ -599,6 +649,9 @@ export const TopStocksView: React.FC<TopStocksViewProps> = ({
             <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[#FF453A]/15 text-[#D7261C] dark:text-[#FF453A] text-[10px] font-bold tabular-nums">
               <TrendingDown className="w-3 h-3" />
               {combinedSignalTally.bear} Bear Signals
+            </span>
+            <span className="text-[11px] font-semibold text-[#4A4D57] dark:text-[#C7CBD6] tabular-nums">
+              IDX Bandarmology: {idxBandarSummary.acc} Accumulation · {idxBandarSummary.dist} Distribution
             </span>
           </div>
           <p className="text-xs text-[#3A3A3C] dark:text-[#D1D1D6] leading-relaxed mt-1.5">
@@ -693,6 +746,84 @@ export const TopStocksView: React.FC<TopStocksViewProps> = ({
             ))}
         </div>
       </div>
+
+      {showIdxSection && (
+        <div className="flex flex-col gap-2.5">
+          <div
+            data-testid="idx-bandarmology-filter"
+            className="flex flex-wrap items-center gap-1.5 text-xs"
+          >
+            <span className="text-[11px] font-bold uppercase tracking-wider text-[#6C6C70] dark:text-[#9EB5C8] mr-1">
+              IDX Bandarmology:
+            </span>
+            {(
+              [
+                { id: 'all', label: 'All Phases' },
+                { id: 'Strong Accumulation', label: 'Strong Accumulation' },
+                { id: 'Early Accumulation', label: 'Early Accumulation' },
+                { id: 'Early Distribution', label: 'Early Distribution' },
+                { id: 'Strong Distribution', label: 'Strong Distribution' },
+              ] as const
+            ).map((phase) => (
+              <button
+                key={phase.id}
+                type="button"
+                onClick={() => setBandarFilter(phase.id)}
+                className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold whitespace-nowrap shrink-0 transition-colors border ${
+                  bandarFilter === phase.id
+                    ? 'bg-[#1C1C1E] dark:bg-white text-white dark:text-[#111318] border-transparent shadow-sm'
+                    : 'liquid-glass-pill text-[#4A4D57] dark:text-[#C7CBD6] hover:text-[#1C1C1E] dark:hover:text-white'
+                }`}
+              >
+                {phase.label}
+              </button>
+            ))}
+          </div>
+
+          <div
+            data-testid="idx-bandar-shift-monitor"
+            className="rounded-xl liquid-glass-inset px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2.5 text-xs"
+          >
+            <div className="flex flex-wrap items-center gap-2 min-w-0">
+              <BellRing className="w-3.5 h-3.5 text-[#0F7033] dark:text-[#4ADE80] shrink-0" />
+              <span className="font-bold text-[#1C1C1E] dark:text-white">
+                Accumulation Shift Monitor
+              </span>
+              <span className="text-[11px] text-[#6C6C70] dark:text-[#9EB5C8]">
+                Auto-alerts when IDX stocks shift Early ↔ Strong Accumulation ({bandarShiftAlerts.length} recent)
+              </span>
+              {bandarShiftAlerts.map((sh) => {
+                const isUp = sh.bandarToPhase === 'Strong Accumulation';
+                return (
+                  <button
+                    key={sh.id}
+                    type="button"
+                    onClick={() => onInspectSymbol?.(sh.assetId)}
+                    className={`px-2 py-0.5 rounded-lg text-[11px] font-mono font-bold transition-opacity hover:opacity-85 ${
+                      isUp
+                        ? 'bg-[#16A34A]/15 text-[#0F7033] dark:text-[#4ADE80]'
+                        : 'bg-[#D97706]/15 text-[#9A5A0A] dark:text-[#FBBF24]'
+                    }`}
+                  >
+                    {sh.symbol}: {isUp ? 'Early → Strong Acc' : 'Strong → Early Acc'}
+                  </button>
+                );
+              })}
+            </div>
+            {onScanBandar && (
+              <button
+                type="button"
+                data-testid="stocks-scan-bandar-btn"
+                onClick={onScanBandar}
+                className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg liquid-glass-pill text-[11px] font-bold text-[#0F7033] dark:text-[#4ADE80] hover:brightness-95 dark:hover:brightness-110 transition-all whitespace-nowrap shrink-0"
+              >
+                <Activity className="w-3 h-3" />
+                Scan IDX Shifts
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Tables */}
       {showUsSection && (

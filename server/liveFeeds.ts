@@ -118,6 +118,22 @@ export interface LiveFxResponse {
   updatedAt: string;
 }
 
+export type BandarmologyPhase =
+  | 'Strong Accumulation'
+  | 'Early Accumulation'
+  | 'Early Distribution'
+  | 'Strong Distribution'
+  | 'Neutral';
+
+export interface BandarmologyAnalysis {
+  phase: BandarmologyPhase;
+  score: number;
+  volumeRatio: number;
+  accumulationPressure: number;
+  foreignBias: 'Net Buy' | 'Net Sell' | 'Balanced';
+  summary: string;
+}
+
 export interface StockMover {
   symbol: string;
   name: string;
@@ -138,6 +154,7 @@ export interface StockMover {
   foreignNetLabel?: string;
   foreignFlowSide?: 'BUY' | 'SELL';
   foreignSourceLabel?: string;
+  bandarmology?: BandarmologyAnalysis;
 }
 
 export interface StocksMoversBucket {
@@ -1927,6 +1944,7 @@ async function fetchYahooChartJson(
           high?: Array<number | null>;
           low?: Array<number | null>;
           close?: Array<number | null>;
+          volume?: Array<number | null>;
         }>;
       };
     }>;
@@ -1954,6 +1972,7 @@ async function fetchYahooChartJson(
                 high?: Array<number | null>;
                 low?: Array<number | null>;
                 close?: Array<number | null>;
+                volume?: Array<number | null>;
               }>;
             };
           }>;
@@ -2045,10 +2064,19 @@ export async function fetchLiveChart(
       const cfg = YAHOO_SYMBOL_CONFIG.find((c) => c.id === id);
       if (!cfg) return null;
 
-      const rangeMap: Record<string, { range: string; interval: string; sliceTail?: number }> = {
-        '15M': { range: '1d', interval: '1m', sliceTail: 30 },
-        '1H': { range: '1d', interval: '2m', sliceTail: 42 },
-        '4H': { range: '2d', interval: '5m', sliceTail: 48 },
+      const rangeMap: Record<
+        string,
+        { range: string; interval: string; sliceTail?: number; aggregateEvery?: number }
+      > = {
+        '1m': { range: '1d', interval: '1m', sliceTail: 36 },
+        '5m': { range: '1d', interval: '5m', sliceTail: 36 },
+        '15m': { range: '5d', interval: '15m', sliceTail: 40 },
+        '15M': { range: '5d', interval: '15m', sliceTail: 40 },
+        '30m': { range: '5d', interval: '30m', sliceTail: 42 },
+        '1h': { range: '1mo', interval: '60m', sliceTail: 42 },
+        '1H': { range: '1mo', interval: '60m', sliceTail: 42 },
+        '4h': { range: '1mo', interval: '60m', aggregateEvery: 4, sliceTail: 38 },
+        '4H': { range: '1mo', interval: '60m', aggregateEvery: 4, sliceTail: 38 },
         '1D': { range: '1d', interval: '15m' },
         '1W': { range: '5d', interval: '1h' },
         '1M': { range: '1mo', interval: '1d' },
@@ -2090,9 +2118,9 @@ export async function fetchLiveChart(
       const rawHighs = quoteObj?.high ?? [];
       const rawLows = quoteObj?.low ?? [];
       const rawTimestamps = item?.timestamp ?? [];
-      const points: number[] = [];
-      const timestamps: number[] = [];
-      const candles: CandlePoint[] = [];
+      let points: number[] = [];
+      let timestamps: number[] = [];
+      let candles: CandlePoint[] = [];
 
       for (let i = 0; i < rawCloses.length; i++) {
         const val = rawCloses[i];
@@ -2122,6 +2150,25 @@ export async function fetchLiveChart(
         return cached?.data ?? null;
       }
 
+      if (params.aggregateEvery && params.aggregateEvery > 1 && candles.length >= params.aggregateEvery) {
+        const aggCandles: CandlePoint[] = [];
+        const step = params.aggregateEvery;
+        for (let i = 0; i < candles.length; i += step) {
+          const chunk = candles.slice(i, i + step);
+          if (chunk.length === 0) continue;
+          aggCandles.push({
+            t: chunk[chunk.length - 1].t,
+            o: Number(chunk[0].o.toFixed(cfg.decimals)),
+            h: Number(Math.max(...chunk.map((x) => x.h)).toFixed(cfg.decimals)),
+            l: Number(Math.min(...chunk.map((x) => x.l)).toFixed(cfg.decimals)),
+            c: Number(chunk[chunk.length - 1].c.toFixed(cfg.decimals)),
+          });
+        }
+        candles = aggCandles;
+        points = aggCandles.map((b) => b.c);
+        timestamps = aggCandles.map((b) => b.t);
+      }
+
       const finalPoints =
         params.sliceTail && points.length > params.sliceTail
           ? points.slice(-params.sliceTail)
@@ -2148,7 +2195,7 @@ export async function fetchLiveChart(
         prevClose: Number.isFinite(prevClose) ? Number(prevClose.toFixed(cfg.decimals)) : finalPoints[0],
       };
 
-      const chartTtl = params.sliceTail ? 20_000 : 180_000;
+      const chartTtl = params.sliceTail ? 15_000 : 180_000;
       chartCache.set(key, { data: payload, expiresAt: now + chartTtl });
       return payload;
     } catch {
@@ -3831,6 +3878,256 @@ async function fetchIdxForeignFlowLists(): Promise<{
   };
 }
 
+// Track latest IDX daily net foreign flow map for cross-module Bandarmology fusion
+const latestIdxForeignFlowMap = new Map<string, number>();
+const idxBandarmologyCache = new Map<
+  string,
+  { data: BandarmologyAnalysis; expiresAt: number }
+>();
+
+function computeIdxBandarmologyFromBars(params: {
+  symbol: string;
+  closes: number[];
+  highs: number[];
+  lows: number[];
+  volumes: number[];
+  opens: number[];
+  currentPrice?: number;
+  prevClose?: number;
+  foreignNetAmount?: number;
+}): BandarmologyAnalysis {
+  const {
+    closes,
+    highs,
+    lows,
+    volumes,
+    opens,
+    currentPrice,
+    prevClose,
+    foreignNetAmount,
+  } = params;
+
+  const n = Math.min(closes.length, highs.length, lows.length, volumes.length);
+  if (n === 0) {
+    return {
+      phase: 'Neutral',
+      score: 0,
+      volumeRatio: 1,
+      accumulationPressure: 50,
+      foreignBias:
+        typeof foreignNetAmount === 'number'
+          ? foreignNetAmount > 0
+            ? 'Net Buy'
+            : foreignNetAmount < 0
+              ? 'Net Sell'
+              : 'Balanced'
+          : 'Balanced',
+      summary: 'Awaiting multi-session OHLCV turnover bars for smart-money flow.',
+    };
+  }
+
+  let totalVol = 0;
+  let cmfNumerator = 0;
+  let recent5Vol = 0;
+  let recent5CmfNum = 0;
+  let priorVol = 0;
+  let priorCmfNum = 0;
+  const split5 = Math.max(0, n - 5);
+
+  for (let i = 0; i < n; i++) {
+    const c = closes[i];
+    const h = Math.max(highs[i], c);
+    const l = Math.min(lows[i], c);
+    const v = Math.max(0, volumes[i]);
+    const hlSpan = Math.max(1e-6, h - l);
+    const clv = ((c - l) - (h - c)) / hlSpan;
+    const mfVol = clv * v;
+    totalVol += v;
+    cmfNumerator += mfVol;
+    if (i >= split5) {
+      recent5Vol += v;
+      recent5CmfNum += mfVol;
+    } else {
+      priorVol += v;
+      priorCmfNum += mfVol;
+    }
+  }
+
+  const cmf20 = totalVol > 0 ? cmfNumerator / totalVol : 0; // -1 .. +1
+  const cmf5 = recent5Vol > 0 ? recent5CmfNum / recent5Vol : cmf20;
+  const cmfPrior = priorVol > 0 ? priorCmfNum / priorVol : cmf20;
+  const cmfAccel = cmf5 - cmfPrior;
+
+  const avgVol20 = n > 1 ? volumes.slice(0, n - 1).reduce((s, v) => s + v, 0) / (n - 1) : volumes[0] || 1;
+  const lastVol = volumes[n - 1] || avgVol20;
+  const volumeRatio = avgVol20 > 0 ? Number(Math.max(0.2, Math.min(6, lastVol / avgVol20)).toFixed(2)) : 1;
+
+  // Last bar close strength & spread absorption
+  const lastClose = currentPrice && currentPrice > 0 ? currentPrice : closes[n - 1];
+  const lastOpen = opens[n - 1] ?? prevClose ?? lastClose;
+  const lastHigh = Math.max(highs[n - 1] ?? lastClose, lastClose, lastOpen);
+  const lastLow = Math.min(lows[n - 1] ?? lastClose, lastClose, lastOpen);
+  const lastClv = ((lastClose - lastLow) - (lastHigh - lastClose)) / Math.max(1e-6, lastHigh - lastLow);
+  const dayChgPct =
+    prevClose && prevClose > 0
+      ? ((lastClose - prevClose) / prevClose) * 100
+      : n >= 2 && closes[n - 2] > 0
+        ? ((lastClose - closes[n - 2]) / closes[n - 2]) * 100
+        : 0;
+
+  // Absorption: high volume with tight negative/flat price OR clean positive CLV acceleration
+  const volBoost = Math.min(1.65, Math.max(0.65, 0.75 + (volumeRatio - 0.85) * 0.48));
+
+  const cmfComponent = cmf20 * 52;
+  const accelComponent = cmfAccel * 38 * volBoost;
+  const priceVolumeComponent =
+    (lastClv * 18 + Math.max(-1.5, Math.min(1.5, dayChgPct / 2.2)) * 12) * volBoost;
+
+  const netFlow = typeof foreignNetAmount === 'number' ? foreignNetAmount : undefined;
+  let foreignComponent = 0;
+  let foreignBias: BandarmologyAnalysis['foreignBias'] = 'Balanced';
+  if (typeof netFlow === 'number' && Math.abs(netFlow) > 100_000_000) {
+    if (netFlow > 0) {
+      foreignBias = 'Net Buy';
+      foreignComponent = Math.min(26, 10 + Math.log10(Math.max(1, netFlow / 1e9)) * 7);
+    } else {
+      foreignBias = 'Net Sell';
+      foreignComponent = -Math.min(26, 10 + Math.log10(Math.max(1, Math.abs(netFlow) / 1e9)) * 7);
+    }
+  } else if (cmf5 >= 0.14 && volumeRatio >= 1.15) {
+    foreignBias = 'Net Buy';
+  } else if (cmf5 <= -0.14 && volumeRatio >= 1.15) {
+    foreignBias = 'Net Sell';
+  }
+
+  const rawScore = cmfComponent + accelComponent + priceVolumeComponent + foreignComponent;
+  const score = Math.round(Math.max(-100, Math.min(100, rawScore)));
+  const accumulationPressure = Math.round(Math.max(4, Math.min(96, 50 + cmf20 * 35 + cmf5 * 22)));
+
+  let phase: BandarmologyPhase = 'Neutral';
+  if (score >= 34 && (cmf20 >= 0.08 || foreignComponent >= 14 || (volumeRatio >= 1.25 && score >= 36))) {
+    phase = 'Strong Accumulation';
+  } else if (score >= 10 || (cmfAccel >= 0.08 && lastClv >= 0.1 && volumeRatio >= 1.0)) {
+    phase = 'Early Accumulation';
+  } else if (score <= -34 && (cmf20 <= -0.08 || foreignComponent <= -14 || (volumeRatio >= 1.25 && score <= -36))) {
+    phase = 'Strong Distribution';
+  } else if (score <= -10 || (cmfAccel <= -0.08 && lastClv <= -0.1 && volumeRatio >= 1.0)) {
+    phase = 'Early Distribution';
+  }
+
+  const biasText =
+    foreignBias === 'Balanced' ? 'Domestic flow balanced' : `Foreign ${foreignBias}`;
+  const summary = `${phase} · ${volumeRatio.toFixed(2)}x 20D vol, CMF ${(cmf20 * 100).toFixed(0)}%, ${biasText}.`;
+
+  return {
+    phase,
+    score,
+    volumeRatio,
+    accumulationPressure,
+    foreignBias,
+    summary,
+  };
+}
+
+async function fetchIdxBandarmologyMap(
+  idxTickerList: Array<{
+    symbol: string;
+    price?: number;
+    prevClose?: number;
+    foreignNetAmount?: number;
+  }>
+): Promise<Map<string, BandarmologyAnalysis>> {
+  const out = new Map<string, BandarmologyAnalysis>();
+  const now = Date.now();
+  const idxOpen = getServerSessionInfo('BBCA.JK', new Date(now)).isOpen;
+  const ttl = idxOpen ? 90_000 : 600_000;
+
+  const uniqueMap = new Map<
+    string,
+    { symbol: string; yahooSymbol: string; price?: number; prevClose?: number; foreignNetAmount?: number }
+  >();
+  for (const item of idxTickerList) {
+    const clean = item.symbol.trim().toUpperCase().replace(/\.JK$/i, '');
+    if (!clean) continue;
+    const cached = idxBandarmologyCache.get(clean);
+    if (cached && cached.expiresAt > now) {
+      out.set(clean, cached.data);
+      continue;
+    }
+    if (!uniqueMap.has(clean)) {
+      uniqueMap.set(clean, {
+        symbol: clean,
+        yahooSymbol: `${clean}.JK`,
+        price: item.price,
+        prevClose: item.prevClose,
+        foreignNetAmount: item.foreignNetAmount ?? latestIdxForeignFlowMap.get(clean),
+      });
+    }
+  }
+
+  const queue = Array.from(uniqueMap.values()).slice(0, 36);
+  const concurrency = 6;
+  let cursor = 0;
+
+  const worker = async () => {
+    while (cursor < queue.length) {
+      const target = queue[cursor++];
+      try {
+        const json = await fetchYahooChartJson(target.yahooSymbol, '1mo', '1d', 5000);
+        const item = json?.chart?.result?.[0];
+        const q = item?.indicators?.quote?.[0];
+        const rawC = q?.close ?? [];
+        const rawH = q?.high ?? [];
+        const rawL = q?.low ?? [];
+        const rawO = q?.open ?? [];
+        const rawV = q?.volume ?? [];
+
+        const closes: number[] = [];
+        const highs: number[] = [];
+        const lows: number[] = [];
+        const opens: number[] = [];
+        const volumes: number[] = [];
+
+        for (let i = 0; i < rawC.length; i++) {
+          const c = rawC[i];
+          if (typeof c === 'number' && Number.isFinite(c) && c > 0) {
+            closes.push(c);
+            highs.push(typeof rawH[i] === 'number' && Number.isFinite(rawH[i]!) ? rawH[i]! : c);
+            lows.push(typeof rawL[i] === 'number' && Number.isFinite(rawL[i]!) ? rawL[i]! : c);
+            opens.push(typeof rawO[i] === 'number' && Number.isFinite(rawO[i]!) ? rawO[i]! : c);
+            volumes.push(typeof rawV[i] === 'number' && Number.isFinite(rawV[i]!) ? rawV[i]! : 0);
+          }
+        }
+
+        const analysis = computeIdxBandarmologyFromBars({
+          symbol: target.symbol,
+          closes,
+          highs,
+          lows,
+          volumes,
+          opens,
+          currentPrice: target.price,
+          prevClose: target.prevClose,
+          foreignNetAmount: target.foreignNetAmount,
+        });
+
+        out.set(target.symbol, analysis);
+        idxBandarmologyCache.set(target.symbol, {
+          data: analysis,
+          expiresAt: Date.now() + ttl,
+        });
+      } catch {
+        // fallback handled if needed
+      }
+    }
+  };
+
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, Math.max(1, queue.length)) }, () => worker())
+  );
+  return out;
+}
+
 function computeIndexImpactScore(item: InternalMover, region: 'US' | 'ID'): number {
   // Cap-weighted index contribution formula: MarketCap^0.68 * (|chg%| + 0.35) * CoreIndexWeight * RVOL
   const mcapScale = region === 'ID' ? 1e13 : 1e11;
@@ -4121,6 +4418,17 @@ async function fetchTopStockMoversFresh(): Promise<StocksMoversResponse> {
       ? foreignFlows.foreignSell.slice(0, 10)
       : buildInstitutionalFlowFallback('SELL', foreignFlows.foreignSell);
 
+  for (const fb of finalForeignBuy) {
+    if (typeof fb.foreignNetAmount === 'number') {
+      latestIdxForeignFlowMap.set(fb.symbol, fb.foreignNetAmount);
+    }
+  }
+  for (const fs of finalForeignSell) {
+    if (typeof fs.foreignNetAmount === 'number') {
+      latestIdxForeignFlowMap.set(fs.symbol, fs.foreignNetAmount);
+    }
+  }
+
   const stripInternal = ({
     dollarTurnover: _dt,
     marketCap: _mc,
@@ -4137,7 +4445,29 @@ async function fetchTopStockMoversFresh(): Promise<StocksMoversResponse> {
     ...idxLosersRaw.map(stripInternal),
   ];
 
-  const enriched = await enrichSparklinesForMovers(combinedMovers);
+  const idxAllForBandar = [
+    ...idxImpactRaw,
+    ...idxGainersRaw,
+    ...idxLosersRaw,
+    ...finalForeignBuy,
+    ...finalForeignSell,
+  ].map((m) => ({
+    symbol: m.symbol,
+    price: m.price,
+    prevClose: m.prevClose,
+    foreignNetAmount: 'foreignNetAmount' in m ? m.foreignNetAmount : latestIdxForeignFlowMap.get(m.symbol),
+  }));
+
+  const [enriched, bandarMap] = await Promise.all([
+    enrichSparklinesForMovers(combinedMovers),
+    fetchIdxBandarmologyMap(idxAllForBandar),
+  ]);
+
+  const attachBandar = (m: StockMover): StockMover =>
+    m.market === 'ID' && bandarMap.has(m.symbol)
+      ? { ...m, bandarmology: bandarMap.get(m.symbol) }
+      : m;
+
   const u0 = usImpactRaw.length;
   const u1 = u0 + usGainersRaw.length;
   const u2 = u1 + usLosersRaw.length;
@@ -4151,11 +4481,11 @@ async function fetchTopStockMoversFresh(): Promise<StocksMoversResponse> {
       losers: enriched.slice(u1, u2),
     },
     indonesia: {
-      impact: enriched.slice(u2, i0),
-      gainers: enriched.slice(i0, i1),
-      losers: enriched.slice(i1),
-      foreignBuy: finalForeignBuy,
-      foreignSell: finalForeignSell,
+      impact: enriched.slice(u2, i0).map(attachBandar),
+      gainers: enriched.slice(i0, i1).map(attachBandar),
+      losers: enriched.slice(i1).map(attachBandar),
+      foreignBuy: finalForeignBuy.map(attachBandar),
+      foreignSell: finalForeignSell.map(attachBandar),
     },
     updatedAt: new Date().toISOString(),
   };
@@ -4226,6 +4556,7 @@ export interface PortfolioQuoteResult {
   chart1D: number[];
   timestamps1D: number[];
   updatedAtEpoch: number;
+  bandarmology?: BandarmologyAnalysis;
 }
 
 const portfolioQuoteCache = new Map<
@@ -4377,8 +4708,29 @@ export async function fetchPortfolioQuotes(
     })
   );
 
+  const validQuotes = results.filter((r): r is PortfolioQuoteResult => r !== null);
+  const idxPortfolioItems = validQuotes.filter(
+    (q) => q.currency === 'IDR' && q.yahooSymbol.endsWith('.JK')
+  );
+  if (idxPortfolioItems.length > 0) {
+    const bandarMap = await fetchIdxBandarmologyMap(
+      idxPortfolioItems.map((q) => ({
+        symbol: q.symbol,
+        price: q.price,
+        prevClose: q.prevClose,
+        foreignNetAmount: latestIdxForeignFlowMap.get(q.symbol),
+      }))
+    );
+    for (const q of validQuotes) {
+      if (q.currency === 'IDR' && q.yahooSymbol.endsWith('.JK')) {
+        const b = bandarMap.get(q.symbol);
+        if (b) q.bandarmology = b;
+      }
+    }
+  }
+
   return {
-    quotes: results.filter((r): r is PortfolioQuoteResult => r !== null),
+    quotes: validQuotes,
     updatedAt: new Date().toISOString(),
   };
 }
@@ -4401,10 +4753,19 @@ export async function fetchPortfolioSymbolSeries(
     return cached.data;
   }
 
-  const rangeMap: Record<string, { range: string; interval: string; sliceTail?: number }> = {
-    '15M': { range: '1d', interval: '1m', sliceTail: 30 },
-    '1H': { range: '1d', interval: '2m', sliceTail: 42 },
-    '4H': { range: '2d', interval: '5m', sliceTail: 48 },
+  const rangeMap: Record<
+    string,
+    { range: string; interval: string; sliceTail?: number; aggregateEvery?: number }
+  > = {
+    '1m': { range: '1d', interval: '1m', sliceTail: 36 },
+    '5m': { range: '1d', interval: '5m', sliceTail: 36 },
+    '15m': { range: '5d', interval: '15m', sliceTail: 40 },
+    '15M': { range: '5d', interval: '15m', sliceTail: 40 },
+    '30m': { range: '5d', interval: '30m', sliceTail: 42 },
+    '1h': { range: '1mo', interval: '60m', sliceTail: 42 },
+    '1H': { range: '1mo', interval: '60m', sliceTail: 42 },
+    '4h': { range: '1mo', interval: '60m', aggregateEvery: 4, sliceTail: 38 },
+    '4H': { range: '1mo', interval: '60m', aggregateEvery: 4, sliceTail: 38 },
     '1D': { range: '1d', interval: sessionInfo.isOpen ? '5m' : '15m' },
     '5D': { range: '5d', interval: '30m' },
     '1W': { range: '5d', interval: '30m' },
@@ -4453,9 +4814,9 @@ export async function fetchPortfolioSymbolSeries(
     const rawHighs = quoteObj?.high ?? [];
     const rawLows = quoteObj?.low ?? [];
     const rawTs = item?.timestamp ?? [];
-    const points: number[] = [];
-    const timestamps: number[] = [];
-    const candles: CandlePoint[] = [];
+    let points: number[] = [];
+    let timestamps: number[] = [];
+    let candles: CandlePoint[] = [];
 
     for (let i = 0; i < rawCloses.length; i++) {
       const val = rawCloses[i];
@@ -4485,6 +4846,25 @@ export async function fetchPortfolioSymbolSeries(
       }
     }
     if (points.length === 0) return cached?.data ?? null;
+
+    if (params.aggregateEvery && params.aggregateEvery > 1 && candles.length >= params.aggregateEvery) {
+      const aggCandles: CandlePoint[] = [];
+      const step = params.aggregateEvery;
+      for (let i = 0; i < candles.length; i += step) {
+        const chunk = candles.slice(i, i + step);
+        if (chunk.length === 0) continue;
+        aggCandles.push({
+          t: chunk[chunk.length - 1].t,
+          o: chunk[0].o,
+          h: Math.max(...chunk.map((x) => x.h)),
+          l: Math.min(...chunk.map((x) => x.l)),
+          c: chunk[chunk.length - 1].c,
+        });
+      }
+      candles = aggCandles;
+      points = aggCandles.map((b) => b.c);
+      timestamps = aggCandles.map((b) => b.t);
+    }
 
     const finalPoints = params.sliceTail && points.length > params.sliceTail ? points.slice(-params.sliceTail) : points;
     const finalTimestamps =
@@ -4551,6 +4931,7 @@ export interface SymbolDetailResponse {
   sessionStateLabel: string;
   sessionProgressRatio: number;
   updatedAtEpoch: number;
+  bandarmology?: BandarmologyAnalysis;
 }
 
 export async function fetchSymbolDetail(
@@ -4757,6 +5138,19 @@ export async function fetchSymbolDetail(
   const fullName = String(meta.shortName || meta.longName || cleanSym).slice(0, 64);
   const openFormatted = formatStatNumber(firstOpen, decimals, prefix);
 
+  let bandarmology: BandarmologyAnalysis | undefined;
+  if (isIdr && !isIndex && sym.endsWith('.JK')) {
+    const bMap = await fetchIdxBandarmologyMap([
+      {
+        symbol: cleanSym,
+        price: Number(price.toFixed(decimals)),
+        prevClose: Number(prevClose.toFixed(decimals)),
+        foreignNetAmount: latestIdxForeignFlowMap.get(cleanSym),
+      },
+    ]);
+    bandarmology = bMap.get(cleanSym);
+  }
+
   return {
     id: sym,
     symbol: cleanSym,
@@ -4805,6 +5199,7 @@ export async function fetchSymbolDetail(
     sessionStateLabel: sessionInfo.stateLabel,
     sessionProgressRatio: sessionInfo.progressRatio,
     updatedAtEpoch: Number(meta.regularMarketTime || Math.floor(now / 1000)) * 1000,
+    bandarmology,
   };
 }
 

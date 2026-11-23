@@ -2,7 +2,7 @@ import 'dotenv/config';
 if (!process.env.DISABLE_HMR) {
   process.env.DISABLE_HMR = 'true';
 }
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import express from 'express';
 import type { Request, Response } from 'express';
 import fs from 'node:fs';
@@ -435,6 +435,260 @@ async function startServer() {
         error:
           errObj?.message ||
           'Failed to fetch grounded AI market intelligence. Check your Gemini API key in Settings > Secrets.',
+      });
+    }
+  });
+
+  // AI-Generated Daily Digest Modal Endpoint (Top Session Movers + News Impact via Gemini 4 Hydrogen)
+  const digestCache = new Map<string, { expiresAt: number; payload: unknown }>();
+  const TOPIC_LABELS: Record<string, string> = {
+    all: 'All Global Markets',
+    rates: 'US Rates & Fed',
+    idx: 'IDX & Rupiah',
+    commodities: 'Commodities',
+    crypto: 'Crypto',
+  };
+
+  app.post('/api/news/daily-digest', async (req: Request, res: Response) => {
+    try {
+      const body = (req.body || {}) as { topic?: string; force?: boolean };
+      const rawTopic = typeof body.topic === 'string' ? body.topic : 'all';
+      const topic = Object.prototype.hasOwnProperty.call(TOPIC_LABELS, rawTopic)
+        ? rawTopic
+        : 'all';
+      const force = Boolean(body.force);
+      const topicLabel = TOPIC_LABELS[topic];
+
+      const cached = digestCache.get(topic);
+      if (!force && cached && cached.expiresAt > Date.now()) {
+        return res.json(cached.payload);
+      }
+
+      const [quotesRes, moversRes, newsRes] = await Promise.allSettled([
+        fetchLiveQuotes(),
+        fetchTopStockMovers(),
+        fetchLiveNews(),
+      ]);
+
+      const quoteAssets =
+        quotesRes.status === 'fulfilled' && Array.isArray(quotesRes.value?.quotes)
+          ? quotesRes.value.quotes
+          : [];
+      const usMovers =
+        moversRes.status === 'fulfilled' && Array.isArray(moversRes.value?.us?.impact)
+          ? moversRes.value.us.impact
+          : [];
+      const idxMovers =
+        moversRes.status === 'fulfilled' && Array.isArray(moversRes.value?.indonesia?.impact)
+          ? moversRes.value.indonesia.impact
+          : [];
+      const allStories =
+        newsRes.status === 'fulfilled' && Array.isArray(newsRes.value?.stories)
+          ? newsRes.value.stories
+          : [];
+
+      const scopedStories =
+        topic === 'all'
+          ? allStories
+          : [
+              ...allStories.filter((s) => s.topic === topic),
+              ...allStories.filter((s) => s.topic !== topic && s.isBreaking),
+            ];
+
+      const topStories = scopedStories.slice(0, 18);
+      const topMacroMovers = [...quoteAssets]
+        .filter((a) => Number.isFinite(a.changePercent))
+        .sort((a, b) => Math.abs(b.changePercent) - Math.abs(a.changePercent))
+        .slice(0, 6);
+      const topUs = usMovers.slice(0, 6);
+      const topIdx = idxMovers.slice(0, 6);
+
+      const moverYahooLookup = new Map<string, string>();
+      for (const a of quoteAssets) {
+        moverYahooLookup.set(a.id.toUpperCase(), a.id);
+      }
+      for (const s of [...topUs, ...topIdx]) {
+        const clean = s.symbol.replace(/\.JK$/i, '').toUpperCase();
+        const yahooSym = s.market === 'ID' && !s.symbol.toUpperCase().endsWith('.JK')
+          ? `${clean}.JK`
+          : s.symbol.toUpperCase();
+        moverYahooLookup.set(clean, yahooSym);
+        moverYahooLookup.set(s.symbol.toUpperCase(), yahooSym);
+      }
+
+      const promptLines: string[] = [
+        `Focus Scope: ${topicLabel}`,
+        `Session Timestamp (UTC): ${new Date().toISOString()}`,
+        '',
+        '=== TOP US EQUITY MOVERS ===',
+        ...topUs.map(
+          (s) =>
+            `- ${s.symbol} (${s.name}): ${s.changePercent >= 0 ? '+' : ''}${s.changePercent.toFixed(
+              2
+            )}% | Price: $${s.price.toFixed(2)} | Volume: ${s.volume}`
+        ),
+        '',
+        '=== TOP INDONESIA (IDX) EQUITY MOVERS ===',
+        ...topIdx.map(
+          (s) =>
+            `- ${s.symbol} (${s.name}): ${s.changePercent >= 0 ? '+' : ''}${s.changePercent.toFixed(
+              2
+            )}% | Price: Rp ${Math.round(s.price).toLocaleString('en-US')}${
+              s.bandarmology ? ` | Bandarmology: ${s.bandarmology.phase} (Score ${s.bandarmology.score})` : ''
+            }`
+        ),
+        '',
+        '=== TOP MACRO / FX / CRYPTO BENCHMARK MOVERS ===',
+        ...topMacroMovers.map(
+          (a) =>
+            `- ${a.id} (${a.sentiment}, ${a.sessionStateLabel}): ${
+              a.changePercent >= 0 ? '+' : ''
+            }${a.changePercent.toFixed(2)}% | Last: ${a.price}`
+        ),
+        '',
+        '=== CURRENT SESSION NEWS DISPATCHES ===',
+        ...topStories.map(
+          (st, idx) =>
+            `${idx + 1}. [${st.isBreaking ? 'BREAKING' : st.topic.toUpperCase()}] (${st.publisher}, ${
+              st.timeAgo
+            }) ${st.headline} — ${st.summary.slice(0, 180)}`
+        ),
+      ];
+
+      const ai = getGeminiClient();
+      const response = await ai.models.generateContent({
+        model: MODEL_NAME,
+        contents: promptLines.join('\n'),
+        config: {
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          systemInstruction:
+            'You are a senior institutional cross-asset market strategist summarizing the current trading session. ' +
+            'Produce a concise, data-grounded Daily Digest linking top market movers (from US equities, Indonesia IDX equities, macro indices, FX, commodities, or crypto) to the session headlines driving them. ' +
+            'Include 4 to 6 high-impact moverImpacts using exact symbols and percentage moves from the provided snapshot. ' +
+            'Keep executiveBrief to 2-3 crisp sentences, each impactAnalysis to 1-2 tight sentences citing the concrete catalyst, and sessionWatchpoints to 3 concise bullets.',
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              sessionHeadline: {
+                type: Type.STRING,
+                description: 'One concise headline summarizing the overarching theme of the current session.',
+              },
+              marketMood: {
+                type: Type.STRING,
+                description: 'Short 2-3 word regime label such as Risk-On Rally, Selective Rotation, or Risk-Off Defensive.',
+              },
+              executiveBrief: {
+                type: Type.STRING,
+                description: '2-3 sentence synthesis of the top market movers and news catalysts for the current session.',
+              },
+              moverImpacts: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    symbol: { type: Type.STRING },
+                    name: { type: Type.STRING },
+                    market: { type: Type.STRING },
+                    movePercent: { type: Type.STRING },
+                    direction: {
+                      type: Type.STRING,
+                      enum: ['up', 'down', 'flat'],
+                    },
+                    associatedHeadline: { type: Type.STRING },
+                    impactAnalysis: { type: Type.STRING },
+                  },
+                  required: [
+                    'symbol',
+                    'name',
+                    'market',
+                    'movePercent',
+                    'direction',
+                    'associatedHeadline',
+                    'impactAnalysis',
+                  ],
+                },
+              },
+              sessionWatchpoints: {
+                type: Type.ARRAY,
+                items: { type: Type.STRING },
+              },
+            },
+            required: [
+              'sessionHeadline',
+              'marketMood',
+              'executiveBrief',
+              'moverImpacts',
+              'sessionWatchpoints',
+            ],
+          },
+        },
+      });
+
+      const rawJson = (response.text ?? '').trim();
+      if (!rawJson) {
+        return res.status(502).json({
+          error: 'Gemini returned an empty Daily Digest response. Please try regenerating.',
+        });
+      }
+
+      const parsed = JSON.parse(rawJson) as {
+        sessionHeadline: string;
+        marketMood: string;
+        executiveBrief: string;
+        moverImpacts: Array<{
+          symbol: string;
+          name: string;
+          market: string;
+          movePercent: string;
+          direction: 'up' | 'down' | 'flat';
+          associatedHeadline: string;
+          impactAnalysis: string;
+        }>;
+        sessionWatchpoints: string[];
+      };
+
+      const enrichedImpacts = (Array.isArray(parsed.moverImpacts) ? parsed.moverImpacts : [])
+        .slice(0, 6)
+        .map((item) => {
+          const cleanSym = (item.symbol || '').trim().toUpperCase();
+          return {
+            ...item,
+            yahooSymbol: moverYahooLookup.get(cleanSym),
+          };
+        });
+
+      const payload = {
+        sessionHeadline: parsed.sessionHeadline || 'Global Session Daily Digest',
+        marketMood: parsed.marketMood || 'Active Session',
+        executiveBrief: parsed.executiveBrief || '',
+        topicLabel,
+        moverImpacts: enrichedImpacts,
+        sessionWatchpoints: (Array.isArray(parsed.sessionWatchpoints)
+          ? parsed.sessionWatchpoints
+          : []
+        ).slice(0, 4),
+        model: MODEL_NAME,
+        generatedAt: new Date().toISOString(),
+      };
+
+      digestCache.set(topic, {
+        expiresAt: Date.now() + 2 * 60_000,
+        payload,
+      });
+
+      return res.json(payload);
+    } catch (error: unknown) {
+      const errObj = error as { status?: number; message?: string };
+      console.error('Gemini daily digest error:', errObj?.message || error);
+      const statusCode =
+        typeof errObj?.status === 'number' && errObj.status >= 400 && errObj.status < 600
+          ? errObj.status
+          : 500;
+      return res.status(statusCode).json({
+        error:
+          errObj?.message ||
+          'Failed to generate AI Daily Digest. Please verify your Gemini API key in Settings > Secrets.',
       });
     }
   });

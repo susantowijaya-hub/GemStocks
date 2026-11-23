@@ -171,7 +171,10 @@ function StocksTerminalShell() {
     markAllRead,
     clearAlerts,
     triggerTestAlert,
-  } = usePriceAlerts(assets);
+    pushIctSignalAlert,
+    scanIctAlerts,
+    scanBandarmologyAlerts,
+  } = usePriceAlerts(assets, idxMoversBucket);
 
   // Sync browser hash navigation (Back/Forward on Desktop, Android, and iOS Safari)
   useEffect(() => {
@@ -447,6 +450,10 @@ function StocksTerminalShell() {
             onMarkAlertRead={markRead}
             onClearAlerts={clearAlerts}
             onTriggerTestAlert={triggerTestAlert}
+            onScanIct={scanIctAlerts}
+            onPushIctAlert={pushIctSignalAlert}
+            onScanBandar={scanBandarmologyAlerts}
+            onInspectSymbol={(sym) => handleInspectSymbol(sym)}
           />
         )}
 
@@ -482,7 +489,9 @@ function StocksTerminalShell() {
             stocksLoading={stocksLoading}
             marketIntelligence={marketIntelligence}
             searchQuery={searchQuery}
+            alerts={alerts}
             onRefresh={refreshStocks}
+            onScanBandar={scanBandarmologyAlerts}
             onInspectSymbol={(sym) => handleInspectSymbol(sym)}
             onNavigate={handleNavigate}
             onClearSearch={() => setSearchQuery('')}
@@ -554,9 +563,13 @@ function StocksTerminalShell() {
         toasts={toasts}
         onDismiss={dismissToast}
         onSelectAlert={(alert: PriceAlertItem) => {
-          setSelectedAssetId(alert.assetId);
           markRead(alert.id);
           dismissToast(alert.id);
+          if (alert.alertKind === 'bandarmology') {
+            handleInspectSymbol(alert.assetId);
+            return;
+          }
+          setSelectedAssetId(alert.assetId);
           if (activeRoute !== 'dashboard') {
             handleNavigate('dashboard');
           }

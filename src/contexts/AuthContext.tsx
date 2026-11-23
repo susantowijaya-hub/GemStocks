@@ -1,19 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
-import {
-  User,
-  onAuthStateChanged,
-  signInWithPopup,
-  signOut,
-} from 'firebase/auth';
-import {
-  doc,
-  getDoc,
-  onSnapshot,
-  serverTimestamp,
-  setDoc,
-  updateDoc,
-} from 'firebase/firestore';
-import { auth, db, googleProvider } from '../lib/firebase';
+import type { User } from 'firebase/auth';
+import { getFirebaseServices } from '../lib/firebase';
 import { OperationType, handleFirestoreError } from '../lib/firestoreErrors';
 import { CurrencyCode } from '../types/market';
 
@@ -54,6 +41,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const ensureUserProfile = useCallback(async (firebaseUser: User) => {
     const userPath = `users/${firebaseUser.uid}`;
+    const [{ db }, { doc, getDoc, serverTimestamp, setDoc, updateDoc }] = await Promise.all([
+      getFirebaseServices(),
+      import('firebase/firestore'),
+    ]);
     const userRef = doc(db, 'users', firebaseUser.uid);
 
     const safeDisplayName = (
@@ -99,49 +90,104 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, []);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
-      setUser(currentUser);
-      setAuthReady(true);
-      setProfileReady(false);
-      if (currentUser) {
-        void ensureUserProfile(currentUser).catch((err) => {
-          setAuthError(
-            err instanceof Error ? err.message : 'Unable to sync user profile.'
-          );
+    let disposed = false;
+    let unsubscribeAuth: (() => void) | undefined;
+    let timerId: number | null = null;
+    let idleId: number | null = null;
+
+    const attachAuth = async () => {
+      try {
+        const [{ auth }, { onAuthStateChanged }] = await Promise.all([
+          getFirebaseServices(),
+          import('firebase/auth'),
+        ]);
+        if (disposed) return;
+
+        unsubscribeAuth = onAuthStateChanged(auth, (currentUser) => {
+          if (disposed) return;
+          setUser(currentUser);
+          setAuthReady(true);
+          setProfileReady(false);
+          if (currentUser) {
+            void ensureUserProfile(currentUser).catch((err) => {
+              setAuthError(
+                err instanceof Error ? err.message : 'Unable to sync user profile.'
+              );
+            });
+          } else {
+            setPreferences(DEFAULT_PREFERENCES);
+          }
         });
-      } else {
-        setPreferences(DEFAULT_PREFERENCES);
+      } catch {
+        if (!disposed) {
+          setAuthReady(true);
+        }
       }
-    });
-    return () => unsubscribe();
+    };
+
+    // Defer Firebase Auth initialization until after first paint / idle so initial screen mounts immediately
+    const isPortfolioRoute =
+      typeof window !== 'undefined' && window.location.hash === '#portfolio';
+    if (isPortfolioRoute) {
+      void attachAuth();
+    } else if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
+      idleId = window.requestIdleCallback(() => void attachAuth(), { timeout: 600 });
+    } else {
+      timerId = window.setTimeout(() => void attachAuth(), 250);
+    }
+
+    return () => {
+      disposed = true;
+      if (idleId !== null && 'cancelIdleCallback' in window) {
+        window.cancelIdleCallback(idleId);
+      }
+      if (timerId !== null) window.clearTimeout(timerId);
+      unsubscribeAuth?.();
+    };
   }, [ensureUserProfile]);
 
   // Attach preferences listener only when auth + profile are ready
   useEffect(() => {
     if (!authReady || !profileReady || !user) return;
-    const prefPath = `users/${user.uid}/preferences/settings`;
-    const prefRef = doc(db, 'users', user.uid, 'preferences', 'settings');
+    let disposed = false;
+    let unsubscribePref: (() => void) | undefined;
 
-    const unsubscribe = onSnapshot(
-      prefRef,
-      (snapshot) => {
-        if (snapshot.exists()) {
-          const data = snapshot.data();
-          setPreferences({
-            nfpAlertEnabled: Boolean(data.nfpAlertEnabled),
-            preferredCurrency: (data.preferredCurrency as CurrencyCode) || 'USD',
-            favoriteAssetIds: Array.isArray(data.favoriteAssetIds)
-              ? (data.favoriteAssetIds as string[]).slice(0, 30)
-              : DEFAULT_PREFERENCES.favoriteAssetIds,
-          });
+    const attachPrefs = async () => {
+      const [{ db }, { doc, onSnapshot }] = await Promise.all([
+        getFirebaseServices(),
+        import('firebase/firestore'),
+      ]);
+      if (disposed) return;
+
+      const prefPath = `users/${user.uid}/preferences/settings`;
+      const prefRef = doc(db, 'users', user.uid, 'preferences', 'settings');
+
+      unsubscribePref = onSnapshot(
+        prefRef,
+        (snapshot) => {
+          if (snapshot.exists()) {
+            const data = snapshot.data();
+            setPreferences({
+              nfpAlertEnabled: Boolean(data.nfpAlertEnabled),
+              preferredCurrency: (data.preferredCurrency as CurrencyCode) || 'USD',
+              favoriteAssetIds: Array.isArray(data.favoriteAssetIds)
+                ? (data.favoriteAssetIds as string[]).slice(0, 30)
+                : DEFAULT_PREFERENCES.favoriteAssetIds,
+            });
+          }
+        },
+        (error) => {
+          handleFirestoreError(error, OperationType.GET, prefPath);
         }
-      },
-      (error) => {
-        handleFirestoreError(error, OperationType.GET, prefPath);
-      }
-    );
+      );
+    };
 
-    return () => unsubscribe();
+    void attachPrefs();
+
+    return () => {
+      disposed = true;
+      unsubscribePref?.();
+    };
   }, [authReady, profileReady, user]);
 
   const updatePreferences = useCallback(
@@ -156,6 +202,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (!user || !profileReady) return;
 
       const prefPath = `users/${user.uid}/preferences/settings`;
+      const [{ db }, { doc, getDoc, serverTimestamp, setDoc, updateDoc }] = await Promise.all([
+        getFirebaseServices(),
+        import('firebase/firestore'),
+      ]);
       const prefRef = doc(db, 'users', user.uid, 'preferences', 'settings');
       try {
         const snap = await getDoc(prefRef);
@@ -187,6 +237,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setAuthError(null);
     setAuthLoading(true);
     try {
+      const [{ auth, googleProvider }, { signInWithPopup }] = await Promise.all([
+        getFirebaseServices(),
+        import('firebase/auth'),
+      ]);
       await signInWithPopup(auth, googleProvider);
     } catch (error: unknown) {
       const errObj = error as { code?: string; message?: string };
@@ -201,6 +255,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const logout = useCallback(async () => {
     setAuthError(null);
     try {
+      const [{ auth }, { signOut }] = await Promise.all([
+        getFirebaseServices(),
+        import('firebase/auth'),
+      ]);
       await signOut(auth);
     } catch (error: unknown) {
       const errObj = error as { message?: string };

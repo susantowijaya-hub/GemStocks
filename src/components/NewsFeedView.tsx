@@ -1,8 +1,10 @@
-import React, { useMemo, useState } from 'react';
-import { ArrowRight, Newspaper, Tag } from 'lucide-react';
+import React, { useCallback, useMemo, useRef, useState } from 'react';
+import { ArrowRight, BookOpen, Newspaper, Tag } from 'lucide-react';
 import { EDITORIAL_INSIGHTS } from '../data/marketData';
 import {
   AppRoute,
+  DailyDigestMoverImpact,
+  DailyDigestResponse,
   DailyMarketSummaryResponse,
   EconomicEvent,
   MarketAsset,
@@ -10,6 +12,7 @@ import {
   NewsStory,
   StocksMoversBucket,
 } from '../types/market';
+import { DailyDigestModal } from './DailyDigestModal';
 import { DailyMarketSummary } from './DailyMarketSummary';
 
 interface NewsFeedViewProps {
@@ -56,6 +59,77 @@ export const NewsFeedView: React.FC<NewsFeedViewProps> = ({
   onNavigate,
 }) => {
   const [activeTopic, setActiveTopic] = useState<TopicFilter>('all');
+  const [digestOpen, setDigestOpen] = useState<boolean>(false);
+  const [digestLoading, setDigestLoading] = useState<boolean>(false);
+  const [digestError, setDigestError] = useState<string | null>(null);
+  const [activeDigest, setActiveDigest] = useState<DailyDigestResponse | null>(null);
+  const digestCacheRef = useRef<Partial<Record<TopicFilter, DailyDigestResponse>>>({});
+
+  const activeTopicLabel = useMemo(
+    () => TOPICS.find((t) => t.id === activeTopic)?.label ?? 'All Topics',
+    [activeTopic]
+  );
+
+  const loadDailyDigest = useCallback(
+    async (topic: TopicFilter, force = false) => {
+      if (!force && digestCacheRef.current[topic]) {
+        setActiveDigest(digestCacheRef.current[topic] ?? null);
+        setDigestError(null);
+        return;
+      }
+
+      setDigestLoading(true);
+      setDigestError(null);
+      if (force) {
+        setActiveDigest(digestCacheRef.current[topic] ?? null);
+      } else {
+        setActiveDigest(null);
+      }
+
+      try {
+        const res = await fetch('/api/news/daily-digest', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ topic, force }),
+        });
+        const data = (await res.json().catch(() => ({}))) as DailyDigestResponse & {
+          error?: string;
+        };
+        if (!res.ok) {
+          throw new Error(data.error || 'Unable to generate session Daily Digest.');
+        }
+        digestCacheRef.current[topic] = data;
+        setActiveDigest(data);
+      } catch (err) {
+        setDigestError(
+          err instanceof Error ? err.message : 'Unable to generate session Daily Digest.'
+        );
+      } finally {
+        setDigestLoading(false);
+      }
+    },
+    []
+  );
+
+  const handleOpenDigest = useCallback(() => {
+    setDigestOpen(true);
+    void loadDailyDigest(activeTopic, false);
+  }, [activeTopic, loadDailyDigest]);
+
+  const handleInspectDigestMover = useCallback(
+    (item: DailyDigestMoverImpact) => {
+      if (!item.yahooSymbol) return;
+      const isCoreAsset = assets.some((a) => a.id === item.yahooSymbol);
+      setDigestOpen(false);
+      if (isCoreAsset) {
+        onSelectAsset(item.yahooSymbol);
+        onNavigate('dashboard');
+        return;
+      }
+      onInspectSymbol?.(item.yahooSymbol);
+    },
+    [assets, onInspectSymbol, onNavigate, onSelectAsset]
+  );
 
   const filteredStories = useMemo(() => {
     const q = searchQuery.toLowerCase().trim();
@@ -100,24 +174,36 @@ export const NewsFeedView: React.FC<NewsFeedViewProps> = ({
           </p>
         </div>
 
-        <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1">
-          {TOPICS.map((t) => {
-            const active = activeTopic === t.id;
-            return (
-              <button
-                key={t.id}
-                type="button"
-                onClick={() => setActiveTopic(t.id)}
-                className={`px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-colors border ${
-                  active
-                    ? 'bg-[#1C1C1E] dark:bg-white text-white dark:text-[#111318] border-transparent'
-                    : 'liquid-glass-pill text-[#4A4D57] dark:text-[#C7CBD6] hover:text-[#1C1C1E] dark:hover:text-white'
-                }`}
-              >
-                {t.label}
-              </button>
-            );
-          })}
+        <div className="flex flex-wrap items-center justify-between md:justify-end gap-2">
+          <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1">
+            {TOPICS.map((t) => {
+              const active = activeTopic === t.id;
+              return (
+                <button
+                  key={t.id}
+                  type="button"
+                  onClick={() => setActiveTopic(t.id)}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap shrink-0 transition-colors border ${
+                    active
+                      ? 'bg-[#1C1C1E] dark:bg-white text-white dark:text-[#111318] border-transparent'
+                      : 'liquid-glass-pill text-[#4A4D57] dark:text-[#C7CBD6] hover:text-[#1C1C1E] dark:hover:text-white'
+                  }`}
+                >
+                  {t.label}
+                </button>
+              );
+            })}
+          </div>
+
+          <button
+            type="button"
+            onClick={handleOpenDigest}
+            data-testid="daily-digest-trigger"
+            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#0066CC] dark:bg-[#0EA5E9] text-white text-xs font-bold shadow-sm hover:brightness-110 transition-all whitespace-nowrap shrink-0"
+          >
+            <BookOpen className="w-3.5 h-3.5 shrink-0" />
+            <span>Daily Digest</span>
+          </button>
         </div>
       </section>
 
@@ -324,6 +410,17 @@ export const NewsFeedView: React.FC<NewsFeedViewProps> = ({
           ))}
         </div>
       </section>
+
+      <DailyDigestModal
+        open={digestOpen}
+        topicLabel={activeTopicLabel}
+        digest={activeDigest}
+        loading={digestLoading}
+        error={digestError}
+        onClose={() => setDigestOpen(false)}
+        onRegenerate={() => void loadDailyDigest(activeTopic, true)}
+        onInspectMover={handleInspectDigestMover}
+      />
     </div>
   );
 };

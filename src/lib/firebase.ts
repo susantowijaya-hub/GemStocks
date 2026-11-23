@@ -1,39 +1,30 @@
-import { initializeApp } from 'firebase/app';
-import { getAuth, GoogleAuthProvider } from 'firebase/auth';
-import {
-  doc,
-  Firestore,
-  getDocFromServer,
-  getFirestore,
-  initializeFirestore,
-} from 'firebase/firestore';
-import firebaseConfig from '../../firebase-applet-config.json';
+import type { FirebaseApp } from 'firebase/app';
+import type { Auth, GoogleAuthProvider, User } from 'firebase/auth';
+import type { Firestore } from 'firebase/firestore';
 
-const app = initializeApp(firebaseConfig);
-
-function createFirestoreInstance(): Firestore {
-  try {
-    // Force long polling in iframe/proxied environments so WebChannel stream blocks
-    // do not trigger transient "code=unavailable / client is offline" failures.
-    return initializeFirestore(
-      app,
-      { experimentalForceLongPolling: true },
-      firebaseConfig.firestoreDatabaseId
-    );
-  } catch {
-    return getFirestore(app, firebaseConfig.firestoreDatabaseId);
-  }
+export interface FirebaseRuntimeServices {
+  app: FirebaseApp;
+  db: Firestore;
+  auth: Auth;
+  googleProvider: GoogleAuthProvider;
 }
 
-export const db = createFirestoreInstance();
-export const auth = getAuth(app);
-export const googleProvider = new GoogleAuthProvider();
-googleProvider.setCustomParameters({ prompt: 'select_account' });
+let servicesPromise: Promise<FirebaseRuntimeServices> | null = null;
+let cachedServices: FirebaseRuntimeServices | null = null;
+let connectionTested = false;
 
-async function testConnection() {
+export function getCachedAuthUser(): User | null {
+  return cachedServices?.auth.currentUser ?? null;
+}
+
+async function runConnectionCheck(db: Firestore): Promise<void> {
+  if (connectionTested) return;
+  connectionTested = true;
   if (typeof navigator !== 'undefined' && navigator.onLine === false) {
     return;
   }
+
+  const { doc, getDocFromServer } = await import('firebase/firestore');
 
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
@@ -55,4 +46,49 @@ async function testConnection() {
   }
 }
 
-void testConnection();
+export function getFirebaseServices(): Promise<FirebaseRuntimeServices> {
+  if (cachedServices) {
+    return Promise.resolve(cachedServices);
+  }
+  if (!servicesPromise) {
+    servicesPromise = (async () => {
+      const [
+        { initializeApp },
+        { getAuth, GoogleAuthProvider },
+        { getFirestore, initializeFirestore },
+        configMod,
+      ] = await Promise.all([
+        import('firebase/app'),
+        import('firebase/auth'),
+        import('firebase/firestore'),
+        import('../../firebase-applet-config.json'),
+      ]);
+
+      const firebaseConfig = configMod.default;
+      const app = initializeApp(firebaseConfig);
+
+      let db: Firestore;
+      try {
+        // Force long polling in iframe/proxied environments so WebChannel stream blocks
+        // do not trigger transient "code=unavailable / client is offline" failures.
+        db = initializeFirestore(
+          app,
+          { experimentalForceLongPolling: true },
+          firebaseConfig.firestoreDatabaseId
+        );
+      } catch {
+        db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+      }
+
+      const auth = getAuth(app);
+      const googleProvider = new GoogleAuthProvider();
+      googleProvider.setCustomParameters({ prompt: 'select_account' });
+
+      const services: FirebaseRuntimeServices = { app, db, auth, googleProvider };
+      cachedServices = services;
+      void runConnectionCheck(db);
+      return services;
+    })();
+  }
+  return servicesPromise;
+}

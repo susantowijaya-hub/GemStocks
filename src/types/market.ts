@@ -10,7 +10,59 @@ export interface CandlePoint {
   c: number;
 }
 
-export type Timeframe = '15M' | '1H' | '4H' | '1D' | '1W' | '1M' | '3M' | 'YTD' | '1Y' | 'ALL';
+export type Timeframe =
+  | '1m'
+  | '5m'
+  | '15m'
+  | '30m'
+  | '1h'
+  | '4h'
+  | '1D'
+  | '1W'
+  | '1M'
+  | '3M'
+  | 'YTD'
+  | '1Y'
+  | 'ALL';
+
+export type BandarmologyPhase =
+  | 'Strong Accumulation'
+  | 'Early Accumulation'
+  | 'Neutral'
+  | 'Early Distribution'
+  | 'Strong Distribution';
+
+export interface BandarmologyAnalysis {
+  phase: BandarmologyPhase;
+  score: number; // -100 (Strong Distribution) to +100 (Strong Accumulation)
+  volumeRatio: number; // Current vs 20D average volume
+  accumulationPressure: number; // Chaikin / money flow scaled 0..100
+  foreignBias: 'Net Buy' | 'Net Sell' | 'Balanced';
+  summary: string;
+}
+
+export type IctDirection = 'BUY' | 'SELL' | 'NEUTRAL';
+
+export interface IctSignalAnalysis {
+  assetId: string;
+  symbol: string;
+  name: string;
+  direction: IctDirection;
+  confidence: number; // 0..100
+  setupName: string;
+  pdZone: 'Discount' | 'Equilibrium' | 'Premium';
+  entryZone: string;
+  stopLoss: string;
+  targetPrice: string;
+  riskReward: string;
+  triggers: string[];
+  timeframe: Timeframe;
+  currentPrice: number;
+  decimals: number;
+  currencyPrefix?: string;
+  unitSuffix?: string;
+  evaluatedAt: number;
+}
 
 export type WatchlistCategory =
   | 'us-indices'
@@ -199,6 +251,7 @@ export interface StockMover {
   foreignNetLabel?: string;
   foreignFlowSide?: 'BUY' | 'SELL';
   foreignSourceLabel?: string;
+  bandarmology?: BandarmologyAnalysis;
 }
 
 export interface StocksMoversBucket {
@@ -285,6 +338,7 @@ export interface PortfolioQuoteItem {
   chart1D: number[];
   timestamps1D: number[];
   updatedAtEpoch: number;
+  bandarmology?: BandarmologyAnalysis;
 }
 
 export interface PortfolioMoverItem {
@@ -401,6 +455,20 @@ export interface PriceAlertItem {
   unitSuffix?: string;
   triggeredAt: number;
   read: boolean;
+  alertKind?: 'volatility' | 'ict' | 'bandarmology';
+  ictAction?: 'BUY' | 'SELL';
+  ictSetup?: string;
+  entryZone?: string;
+  stopLoss?: string;
+  targetPrice?: string;
+  ictTimeframe?: Timeframe;
+  confidence?: number;
+  bandarFromPhase?: BandarmologyPhase;
+  bandarToPhase?: BandarmologyPhase;
+  bandarScore?: number;
+  bandarVolumeRatio?: number;
+  bandarAccPressure?: number;
+  bandarForeignBias?: 'Net Buy' | 'Net Sell' | 'Balanced';
 }
 
 export interface Asset5mVolatility {
@@ -600,4 +668,55 @@ export interface ClientFeedTransportDiagnostics {
   activeBackoffs: Array<{ endpoint: string; failures: number; retryInSec: number }>;
   lastQuotesAt: number | null;
 }
+
+export interface DailyDigestMoverImpact {
+  symbol: string;
+  yahooSymbol?: string;
+  name: string;
+  market: string;
+  movePercent: string;
+  direction: 'up' | 'down' | 'flat';
+  associatedHeadline: string;
+  impactAnalysis: string;
+}
+
+export interface DailyDigestResponse {
+  sessionHeadline: string;
+  marketMood: string;
+  executiveBrief: string;
+  topicLabel: string;
+  moverImpacts: DailyDigestMoverImpact[];
+  sessionWatchpoints: string[];
+  model: string;
+  generatedAt: string;
+}
+
+export type RiskRegimeStatus =
+  | 'Strong Risk-On'
+  | 'Risk-On'
+  | 'Neutral'
+  | 'Risk-Off'
+  | 'Strong Risk-Off';
+
+export interface RiskRegimeSectorBreakdown {
+  id: string;
+  label: string;
+  weightPct: number;
+  avgMovePct: number;
+  weightedContributionPct: number;
+  stance: 'Risk-On' | 'Neutral' | 'Risk-Off';
+}
+
+export interface RiskRegimeInfo {
+  status: RiskRegimeStatus;
+  polarity: 'risk-on' | 'neutral' | 'risk-off';
+  score: number; // 0 (Strong Risk-Off) to 100 (Strong Risk-On)
+  weightedMovePct: number;
+  advancingSectors: number;
+  totalSectors: number;
+  driver: string;
+  sectors: RiskRegimeSectorBreakdown[];
+}
+
+
 

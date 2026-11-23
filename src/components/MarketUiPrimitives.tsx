@@ -15,8 +15,93 @@ import {
   TrendingDown,
   TrendingUp,
 } from 'lucide-react';
-import { FearGreedInfo, FearGreedZone, MarketSignalInfo, WatchlistCategory } from '../types/market';
+import {
+  BandarmologyAnalysis,
+  BandarmologyPhase,
+  FearGreedInfo,
+  FearGreedZone,
+  MarketSignalInfo,
+  WatchlistCategory,
+} from '../types/market';
 import type { OverallMarketFearGreed } from '../utils/marketSignals';
+
+export function getBandarmologyToneClasses(phase: BandarmologyPhase): string {
+  switch (phase) {
+    case 'Strong Accumulation':
+      return 'bg-[#16A34A]/18 dark:bg-[#22C55E]/22 text-[#0B5D2A] dark:text-[#4ADE80] border-[#16A34A]/45 dark:border-[#4ADE80]/45';
+    case 'Early Accumulation':
+      return 'bg-[#0D9488]/15 dark:bg-[#2DD4BF]/18 text-[#0F5E57] dark:text-[#5EEAD4] border-[#0D9488]/35 dark:border-[#2DD4BF]/38';
+    case 'Early Distribution':
+      return 'bg-[#EA580C]/16 dark:bg-[#FB923C]/18 text-[#9A3412] dark:text-[#FDBA74] border-[#EA580C]/38 dark:border-[#FB923C]/40';
+    case 'Strong Distribution':
+      return 'bg-[#DC2626]/18 dark:bg-[#EF4444]/22 text-[#B91C1C] dark:text-[#FF6B63] border-[#DC2626]/45 dark:border-[#FF6B63]/45';
+    default:
+      return 'bg-[#E5E5EA]/90 dark:bg-[#2C2C2E] text-[#45474F] dark:text-[#C5C8D2] border-[#C7C7CC] dark:border-[#48484E]';
+  }
+}
+
+export const BandarmologyBadge: React.FC<{
+  bandarmology?: BandarmologyAnalysis | null;
+  compact?: boolean;
+  showScore?: boolean;
+  className?: string;
+}> = React.memo(({ bandarmology, compact = false, showScore = false, className = '' }) => {
+  if (!bandarmology) {
+    return (
+      <span
+        className={`inline-flex items-center px-2 py-0.5 rounded-md border text-[10px] font-semibold whitespace-nowrap shrink-0 bg-[#E5E5EA]/60 dark:bg-[#2C2C2E]/60 text-[#6C6C70] dark:text-[#9EB5C8] border-[#D1D1D6] dark:border-[#38383A] ${className}`}
+      >
+        Neutral
+      </span>
+    );
+  }
+
+  const toneClasses = getBandarmologyToneClasses(bandarmology.phase);
+  const shortText =
+    bandarmology.phase === 'Strong Accumulation'
+      ? compact
+        ? 'Strong Acc'
+        : 'Strong Accumulation'
+      : bandarmology.phase === 'Early Accumulation'
+        ? compact
+          ? 'Early Acc'
+          : 'Early Accumulation'
+        : bandarmology.phase === 'Early Distribution'
+          ? compact
+            ? 'Early Dist'
+            : 'Early Distribution'
+          : bandarmology.phase === 'Strong Distribution'
+            ? compact
+              ? 'Strong Dist'
+              : 'Strong Distribution'
+            : 'Neutral';
+
+  const isAcc = bandarmology.phase.includes('Accumulation');
+  const isDist = bandarmology.phase.includes('Distribution');
+
+  return (
+    <span
+      title={`${bandarmology.phase} (Score ${bandarmology.score > 0 ? '+' : ''}${bandarmology.score}) · ${bandarmology.volumeRatio}x 20D Vol · Flow ${bandarmology.accumulationPressure}% · ${bandarmology.foreignBias} — ${bandarmology.summary}`}
+      className={`inline-flex items-center gap-1 rounded-md border font-bold whitespace-nowrap shrink-0 ${
+        compact ? 'px-2 py-0.5 text-[10px]' : 'px-2.5 py-0.5 text-[11px]'
+      } ${toneClasses} ${className}`}
+    >
+      {isAcc ? (
+        <ArrowUp className="w-3 h-3 shrink-0" />
+      ) : isDist ? (
+        <ArrowDown className="w-3 h-3 shrink-0" />
+      ) : (
+        <Activity className="w-3 h-3 shrink-0" />
+      )}
+      <span>{shortText}</span>
+      {showScore && (
+        <span className="font-mono tabular-nums opacity-85 ml-0.5">
+          ({bandarmology.score > 0 ? `+${bandarmology.score}` : bandarmology.score})
+        </span>
+      )}
+    </span>
+  );
+});
 
 export function getFearGreedTextTone(zone: FearGreedZone): string {
   switch (zone) {

@@ -1,5 +1,23 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Asset5mVolatility, MarketAsset, PriceAlertItem } from '../types/market';
+import {
+  Asset5mVolatility,
+  BandarmologyPhase,
+  IctSignalAnalysis,
+  MarketAsset,
+  PriceAlertItem,
+  StocksMoversBucket,
+} from '../types/market';
+import {
+  BandarmologyQuoteSnapshot,
+  BandarmologyShiftCooldown,
+  buildBandarmologyAlertItem,
+  detectBandarmologyAccumulationShifts,
+  extractUniqueIdxBandarmologyStocks,
+  isAccumulationTargetPhase,
+  loadPersistedBandarPhases,
+  savePersistedBandarPhases,
+} from '../utils/bandarmologyAlerts';
+import { scanAllIctSignals } from '../utils/ictSignals';
 
 const WINDOW_MS = 5 * 60 * 1000; // 5-minute rolling window
 const LIVE_CONFIRM_MIN_SPAN_MS = 4 * 60 * 1000; // Require >= 4 minutes of browser samples before switching from verified server 5m telemetry
@@ -7,6 +25,7 @@ const ALERT_MIN_SPAN_MS = 30 * 1000; // Require >= 30s live tick span before emi
 const THRESHOLD_PERCENT = 2.0; // Trigger when |confirmed move| >= 2.0% within 5 minutes
 const CONFIRM_SECOND_TICK_PCT = 1.85; // 2nd confirming sample must hold >= 1.85% in the same direction
 const COOLDOWN_MS = 5 * 60 * 1000; // Prevent duplicate spam within 5 minutes unless move escalates >= 1% or reverses
+const ICT_COOLDOWN_MS = 10 * 60 * 1000; // Avoid repeating identical ICT setups inside 10 minutes
 const TOAST_TTL_MS = 9500;
 const MAX_ALERTS = 30;
 
@@ -19,6 +38,13 @@ interface AlertCooldownState {
   triggeredAt: number;
   direction: 'surge' | 'drop';
   movePercent: number;
+}
+
+interface IctCooldownState {
+  triggeredAt: number;
+  direction: 'BUY' | 'SELL';
+  confidence: number;
+  setupName: string;
 }
 
 interface PendingSpikeState {
@@ -155,7 +181,7 @@ function computeMedian(values: number[]): number {
   return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
 }
 
-export function usePriceAlerts(assets: MarketAsset[]) {
+export function usePriceAlerts(assets: MarketAsset[], idxBucket?: StocksMoversBucket | null) {
   const [alerts, setAlerts] = useState<PriceAlertItem[]>([]);
   const [toasts, setToasts] = useState<PriceAlertItem[]>([]);
   const [volatility5mMap, setVolatility5mMap] = useState<Record<string, Asset5mVolatility>>({});
@@ -171,6 +197,11 @@ export function usePriceAlerts(assets: MarketAsset[]) {
 
   const samplesRef = useRef<Record<string, PriceSample[]>>({});
   const cooldownRef = useRef<Record<string, AlertCooldownState>>({});
+  const ictCooldownRef = useRef<Record<string, IctCooldownState>>({});
+  const initialIctScannedRef = useRef<boolean>(false);
+  const bandarPhaseMapRef = useRef<Record<string, BandarmologyPhase>>(loadPersistedBandarPhases());
+  const bandarCooldownRef = useRef<Record<string, BandarmologyShiftCooldown>>({});
+  const latestIdxSnapshotsRef = useRef<Record<string, BandarmologyQuoteSnapshot>>({});
   const pendingSpikeRef = useRef<Record<string, PendingSpikeState>>({});
   const toastTimersRef = useRef<Record<string, number>>({});
 
@@ -185,12 +216,47 @@ export function usePriceAlerts(assets: MarketAsset[]) {
   }, []);
 
   const pushAlert = useCallback(
-    (item: PriceAlertItem) => {
+    (item: PriceAlertItem, showToast = true) => {
       setAlerts((prev) => [item, ...prev].slice(0, MAX_ALERTS));
-      setToasts((prev) => [item, ...prev].slice(0, 3));
-      scheduleToastDismiss(item.id);
+      if (showToast) {
+        setToasts((prev) => [item, ...prev].slice(0, 3));
+        scheduleToastDismiss(item.id);
+      }
     },
     [scheduleToastDismiss]
+  );
+
+  const buildIctAlertItem = useCallback(
+    (sig: IctSignalAnalysis, forcedDirection?: 'BUY' | 'SELL'): PriceAlertItem => {
+      const action: 'BUY' | 'SELL' =
+        forcedDirection ?? (sig.direction === 'SELL' ? 'SELL' : 'BUY');
+      const now = Date.now();
+      return {
+        id: `ict-${sig.assetId}-${action}-${now}-${Math.random().toString(36).slice(2, 6)}`,
+        assetId: sig.assetId,
+        symbol: sig.symbol,
+        name: sig.name,
+        direction: action === 'BUY' ? 'surge' : 'drop',
+        movePercent: sig.confidence,
+        windowMinutes: 15,
+        fromPrice: sig.currentPrice,
+        toPrice: sig.currentPrice,
+        decimals: sig.decimals,
+        currencyPrefix: sig.currencyPrefix,
+        unitSuffix: sig.unitSuffix,
+        triggeredAt: now,
+        read: false,
+        alertKind: 'ict',
+        ictAction: action,
+        ictSetup: sig.setupName,
+        entryZone: sig.entryZone,
+        stopLoss: sig.stopLoss,
+        targetPrice: sig.targetPrice,
+        ictTimeframe: sig.timeframe,
+        confidence: sig.confidence,
+      };
+    },
+    []
   );
 
   // Monitor rolling 5-minute price window & cross-market relative volatility across all instruments
@@ -412,6 +478,154 @@ export function usePriceAlerts(assets: MarketAsset[]) {
     };
   }, []);
 
+  // Automated ICT Smart Money setup monitor across FX Majors, BTC/USD, and XAU/USD
+  useEffect(() => {
+    if (assets.length === 0) return;
+    const now = Date.now();
+    const signals = scanAllIctSignals(assets);
+    const activeSetups = signals.filter(
+      (s) => s.direction !== 'NEUTRAL' && s.confidence >= 60
+    );
+    if (activeSetups.length === 0) return;
+
+    if (!initialIctScannedRef.current) {
+      initialIctScannedRef.current = true;
+      for (const sig of activeSetups.slice(0, 2).reverse()) {
+        const dir = sig.direction === 'SELL' ? 'SELL' : 'BUY';
+        ictCooldownRef.current[sig.assetId] = {
+          triggeredAt: now,
+          direction: dir,
+          confidence: sig.confidence,
+          setupName: sig.setupName,
+        };
+        pushAlert(buildIctAlertItem(sig, dir), false);
+      }
+      return;
+    }
+
+    for (const sig of activeSetups) {
+      const dir = sig.direction === 'SELL' ? 'SELL' : 'BUY';
+      const prev = ictCooldownRef.current[sig.assetId];
+      const withinCooldown = prev && now - prev.triggeredAt < ICT_COOLDOWN_MS;
+      const changedDirection = !prev || prev.direction !== dir;
+      const upgraded = prev && sig.confidence - prev.confidence >= 12;
+
+      if (!prev || !withinCooldown || changedDirection || upgraded) {
+        ictCooldownRef.current[sig.assetId] = {
+          triggeredAt: now,
+          direction: dir,
+          confidence: sig.confidence,
+          setupName: sig.setupName,
+        };
+        pushAlert(buildIctAlertItem(sig, dir), true);
+      }
+    }
+  }, [assets, buildIctAlertItem, pushAlert]);
+
+  const processBandarmologySnapshots = useCallback(
+    (snapshots: BandarmologyQuoteSnapshot[], showToast = true): number => {
+      if (snapshots.length === 0) return 0;
+      for (const snap of snapshots) {
+        latestIdxSnapshotsRef.current[snap.symbol] = snap;
+      }
+      const { triggeredAlerts, nextPhases, nextCooldowns } =
+        detectBandarmologyAccumulationShifts(
+          snapshots,
+          bandarPhaseMapRef.current,
+          bandarCooldownRef.current,
+          Date.now()
+        );
+      bandarPhaseMapRef.current = nextPhases;
+      bandarCooldownRef.current = nextCooldowns;
+      savePersistedBandarPhases(nextPhases);
+
+      for (const alertItem of triggeredAlerts) {
+        pushAlert(alertItem, showToast);
+      }
+      return triggeredAlerts.length;
+    },
+    [pushAlert]
+  );
+
+  // Automated IDX Bandarmology monitor for 'Early Accumulation' <-> 'Strong Accumulation' shifts
+  useEffect(() => {
+    const snapshots = extractUniqueIdxBandarmologyStocks(idxBucket);
+    if (snapshots.length === 0) return;
+    processBandarmologySnapshots(snapshots, true);
+  }, [idxBucket, processBandarmologySnapshots]);
+
+  // Also monitor IDX Bandarmology quotes arriving from Portfolio holdings (.JK positions)
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleCustomBandarQuotes = (e: Event) => {
+      const detail = (e as CustomEvent<{ snapshots?: BandarmologyQuoteSnapshot[] }>).detail;
+      if (Array.isArray(detail?.snapshots) && detail.snapshots.length > 0) {
+        processBandarmologySnapshots(detail.snapshots, true);
+      }
+    };
+    window.addEventListener('stocks:idx-bandar-quotes', handleCustomBandarQuotes);
+    return () => window.removeEventListener('stocks:idx-bandar-quotes', handleCustomBandarQuotes);
+  }, [processBandarmologySnapshots]);
+
+  const pushIctSignalAlert = useCallback(
+    (sig: IctSignalAnalysis) => {
+      const forcedDir: 'BUY' | 'SELL' =
+        sig.direction === 'SELL'
+          ? 'SELL'
+          : sig.direction === 'BUY'
+            ? 'BUY'
+            : sig.pdZone === 'Premium'
+              ? 'SELL'
+              : 'BUY';
+      const now = Date.now();
+      ictCooldownRef.current[sig.assetId] = {
+        triggeredAt: now,
+        direction: forcedDir,
+        confidence: sig.confidence,
+        setupName: sig.setupName,
+      };
+      pushAlert(buildIctAlertItem(sig, forcedDir), true);
+    },
+    [buildIctAlertItem, pushAlert]
+  );
+
+  const scanIctAlerts = useCallback(
+    (preferredAssetId?: string): number => {
+      const signals = scanAllIctSignals(assets);
+      const actionable = signals.filter((s) => s.direction !== 'NEUTRAL');
+      const selected =
+        actionable.length > 0
+          ? actionable.slice(0, 3)
+          : [
+              signals.find((s) => s.assetId === preferredAssetId) ?? signals[0],
+            ].filter((x): x is IctSignalAnalysis => Boolean(x));
+
+      const now = Date.now();
+      selected
+        .slice()
+        .reverse()
+        .forEach((sig, idx) => {
+          const forcedDir: 'BUY' | 'SELL' =
+            sig.direction === 'SELL'
+              ? 'SELL'
+              : sig.direction === 'BUY'
+                ? 'BUY'
+                : sig.pdZone === 'Premium'
+                  ? 'SELL'
+                  : 'BUY';
+          ictCooldownRef.current[sig.assetId] = {
+            triggeredAt: now,
+            direction: forcedDir,
+            confidence: sig.confidence,
+            setupName: sig.setupName,
+          };
+          pushAlert(buildIctAlertItem(sig, forcedDir), idx === selected.length - 1);
+        });
+      return selected.length;
+    },
+    [assets, buildIctAlertItem, pushAlert]
+  );
+
   const dismissToast = useCallback((id: string) => {
     if (toastTimersRef.current[id]) {
       window.clearTimeout(toastTimersRef.current[id]);
@@ -464,6 +678,41 @@ export function usePriceAlerts(assets: MarketAsset[]) {
     [assets, pushAlert]
   );
 
+  const scanBandarmologyAlerts = useCallback((): number => {
+    const merged = new Map<string, BandarmologyQuoteSnapshot>(
+      Object.entries(latestIdxSnapshotsRef.current)
+    );
+    for (const s of extractUniqueIdxBandarmologyStocks(idxBucket)) {
+      merged.set(s.symbol, s);
+    }
+    const allSnapshots = Array.from(merged.values());
+    if (allSnapshots.length === 0) return 0;
+
+    // 1. Check for genuine phase transitions first
+    const shiftedCount = processBandarmologySnapshots(allSnapshots, true);
+    if (shiftedCount > 0) return shiftedCount;
+
+    // 2. Otherwise inspect strongest real Strong / Early Accumulation stocks for manual drawer visibility
+    const candidates = allSnapshots
+      .filter((s) => isAccumulationTargetPhase(s.bandarmology.phase))
+      .sort((a, b) => Math.abs(b.bandarmology.score) - Math.abs(a.bandarmology.score))
+      .slice(0, 2);
+
+    const now = Date.now();
+    candidates.forEach((stock, idx) => {
+      const curPhase = stock.bandarmology.phase;
+      const inferredPrev: BandarmologyPhase =
+        curPhase === 'Strong Accumulation'
+          ? 'Early Accumulation'
+          : 'Strong Accumulation';
+      pushAlert(
+        buildBandarmologyAlertItem(stock, inferredPrev, curPhase, now),
+        idx === 0
+      );
+    });
+    return candidates.length;
+  }, [idxBucket, processBandarmologySnapshots, pushAlert]);
+
   const unreadCount = alerts.reduce((acc, a) => acc + (a.read ? 0 : 1), 0);
 
   return {
@@ -477,5 +726,8 @@ export function usePriceAlerts(assets: MarketAsset[]) {
     markAllRead,
     clearAlerts,
     triggerTestAlert,
+    pushIctSignalAlert,
+    scanIctAlerts,
+    scanBandarmologyAlerts,
   };
 }
