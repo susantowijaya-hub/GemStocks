@@ -3,6 +3,7 @@ import { ArrowDown, ArrowUp, Clock, Loader2, ShieldAlert, Target, TrendingUp, X 
 import {
   BandarmologyAnalysis,
   CandlePoint,
+  ChartTradeOverlays,
   MarketAsset,
   StockTradePlan,
   Timeframe,
@@ -80,14 +81,20 @@ interface SymbolDetailData {
 
 interface SymbolDetailModalProps {
   yahooSymbol: string | null;
+  initialTimeframe?: Timeframe;
+  tradeOverlays?: ChartTradeOverlays | null;
   onClose: () => void;
 }
 
 export const SymbolDetailModal: React.FC<SymbolDetailModalProps> = ({
   yahooSymbol,
+  initialTimeframe,
+  tradeOverlays = null,
   onClose,
 }) => {
-  const [timeframe, setTimeframeState] = useState<Timeframe>(loadSavedDetailTimeframe);
+  const [timeframe, setTimeframeState] = useState<Timeframe>(
+    () => initialTimeframe ?? loadSavedDetailTimeframe()
+  );
   const [loadedTimeframe, setLoadedTimeframe] = useState<Timeframe>(timeframe);
   const [detail, setDetail] = useState<SymbolDetailData | null>(null);
   const [loading, setLoading] = useState(false);
@@ -95,6 +102,12 @@ export const SymbolDetailModal: React.FC<SymbolDetailModalProps> = ({
   const [inspectedIdx, setInspectedIdx] = useState<number | null>(null);
   const frameCacheRef = useRef<Record<string, SymbolDetailData>>({});
   const marketSessionOpenRef = useRef<boolean>(false);
+
+  useEffect(() => {
+    if (yahooSymbol && initialTimeframe && ALL_DETAIL_TIMEFRAMES.includes(initialTimeframe)) {
+      setTimeframeState(initialTimeframe);
+    }
+  }, [yahooSymbol, initialTimeframe]);
 
   const setTimeframe = useCallback((nextTf: Timeframe) => {
     setTimeframeState(nextTf);
@@ -293,6 +306,23 @@ export const SymbolDetailModal: React.FC<SymbolDetailModalProps> = ({
       bandarmology: detail.bandarmology,
     });
   }, [detail]);
+
+  const resolvedOverlays = useMemo<ChartTradeOverlays | null>(() => {
+    if (tradeOverlays) return tradeOverlays;
+    if (!detailTradePlan) return null;
+    return {
+      symbolLabel: detail?.symbol,
+      direction: detailTradePlan.action,
+      entryLow: detailTradePlan.entryPrice,
+      stopLoss: detailTradePlan.stopLoss,
+      tp1: detailTradePlan.takeProfit1,
+      tp2: detailTradePlan.takeProfit2,
+      demandLow: detailTradePlan.demandLowNum,
+      demandHigh: detailTradePlan.demandHighNum,
+      supplyLow: detailTradePlan.supplyLowNum,
+      supplyHigh: detailTradePlan.supplyHighNum,
+    };
+  }, [tradeOverlays, detailTradePlan, detail?.symbol]);
 
   if (!yahooSymbol) return null;
 
@@ -543,6 +573,7 @@ export const SymbolDetailModal: React.FC<SymbolDetailModalProps> = ({
                 timeframe={timeframe}
                 onTimeframeChange={setTimeframe}
                 onInspectIndexChange={setInspectedIdx}
+                tradeOverlays={resolvedOverlays}
                 compact
                 forceGranularIntraday
                 hideTimeframeTabs
@@ -573,7 +604,12 @@ export const SymbolDetailModal: React.FC<SymbolDetailModalProps> = ({
                         {detailTradePlan.strategyTag} · {detailTradePlan.bandarFlowBias}
                       </p>
                     </div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      {detailTradePlan.trendFilterLabel && (
+                        <span className="px-2 py-0.5 rounded-md bg-black/[0.05] dark:bg-white/[0.08] font-mono text-[10px] font-bold text-[#4A4D57] dark:text-[#B4C6DA]">
+                          {detailTradePlan.trendFilterLabel}
+                        </span>
+                      )}
                       <span
                         className={`inline-flex items-center px-2.5 py-1 rounded-lg border text-xs font-extrabold font-mono tabular-nums ${
                           detailTradePlan.action === 'BUY'

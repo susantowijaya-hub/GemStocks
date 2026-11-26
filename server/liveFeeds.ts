@@ -152,6 +152,13 @@ export interface StockTradePlan {
   supplyZoneLabel: string;
   bandarFlowBias: string;
   executionNote: string;
+  demandLowNum?: number;
+  demandHighNum?: number;
+  supplyLowNum?: number;
+  supplyHighNum?: number;
+  ema20Num?: number;
+  ema50Num?: number;
+  trendFilterLabel?: 'Uptrend (EMA20 > EMA50)' | 'Downtrend (EMA20 < EMA50)' | 'Neutral';
 }
 
 export interface StockMover {
@@ -1816,17 +1823,12 @@ async function refreshQuotesInternal(): Promise<{
       1
     )}% over 1M), positioned at the ${ord} percentile of its 52-week range (${w52Low} – ${w52High}) with clean bond price near ${bondLastPrice}. Support sits at ${support} and resistance at ${resistance}.${spreadNote}`;
 
-    const chartStart = prevClose;
-    const intradayPoints = Array.from({ length: 16 }, (_, idx) => {
-      const t = idx / 15;
-      const val = chartStart + (price - chartStart) * t + Math.sin(t * Math.PI * 2) * 0.006;
-      return Number(val.toFixed(3));
-    });
-    intradayPoints[intradayPoints.length - 1] = price;
-    const intradayTimestamps = Array.from(
-      { length: 16 },
-      (_, idx) => now - (15 - idx) * 1800_000
-    );
+    // Honest close-point trajectory (no fabricated sine-wave wicks for sovereign yields lacking intraday OHLC)
+    const intradayPoints = [
+      Number(prevClose.toFixed(3)),
+      Number(price.toFixed(3)),
+    ];
+    const intradayTimestamps = [now - 3600_000, now];
 
     const id10ySession = getServerSessionInfo('ID10Y', nowDate);
     const id10y5m = recordAndComputeServer5m(
@@ -2032,14 +2034,14 @@ export async function fetchLiveChart(
         const raw = await fetchId10yRaw().catch(() => null);
         if (!raw) return cached?.data ?? null;
 
-        const perfMap: Record<string, { pct: number; spanMs: number; count: number }> = {
-          '1D': { pct: raw.changePercent, spanMs: 8 * 3600_000, count: 20 },
-          '1W': { pct: raw.perfW, spanMs: 7 * 86400_000, count: 24 },
-          '1M': { pct: raw.perf1M, spanMs: 30 * 86400_000, count: 28 },
-          '3M': { pct: raw.perf3M, spanMs: 90 * 86400_000, count: 36 },
-          YTD: { pct: raw.perfYTD, spanMs: 180 * 86400_000, count: 40 },
-          '1Y': { pct: raw.perfY, spanMs: 365 * 86400_000, count: 48 },
-          ALL: { pct: raw.perfY * 1.15, spanMs: 5 * 365 * 86400_000, count: 52 },
+        const perfMap: Record<string, { pct: number; spanMs: number }> = {
+          '1D': { pct: raw.changePercent, spanMs: 8 * 3600_000 },
+          '1W': { pct: raw.perfW, spanMs: 7 * 86400_000 },
+          '1M': { pct: raw.perf1M, spanMs: 30 * 86400_000 },
+          '3M': { pct: raw.perf3M, spanMs: 90 * 86400_000 },
+          YTD: { pct: raw.perfYTD, spanMs: 180 * 86400_000 },
+          '1Y': { pct: raw.perfY, spanMs: 365 * 86400_000 },
+          ALL: { pct: raw.perfY * 1.15, spanMs: 5 * 365 * 86400_000 },
         };
         const cfg = perfMap[timeframe] ?? perfMap['1D'];
         const startVal = Number((raw.price / (1 + cfg.pct / 100)).toFixed(3));
@@ -2047,36 +2049,15 @@ export async function fetchLiveChart(
           raw.w52LowNum * 0.92,
           Math.min(raw.w52HighNum * 1.05, startVal)
         );
-        const points: number[] = [];
-        const timestamps: number[] = [];
-        const candles: CandlePoint[] = [];
-        for (let i = 0; i < cfg.count; i++) {
-          const t = i / (cfg.count - 1);
-          const wave = Math.sin(t * Math.PI * 3.5) * 0.035 + Math.cos(t * Math.PI * 1.5) * 0.02;
-          const val =
-            i === cfg.count - 1
-              ? raw.price
-              : safeStart + (raw.price - safeStart) * t + (i === 0 ? 0 : wave * (1 - t));
-          const c = Number(Math.max(3.5, val).toFixed(3));
-          const o = i === 0 ? safeStart : points[i - 1];
-          const spread = Math.max(0.008, Math.abs(c - o) * 0.45);
-          const tsMs = Math.round(now - cfg.spanMs * (1 - t));
-          points.push(c);
-          timestamps.push(tsMs);
-          candles.push({
-            t: tsMs,
-            o: Number(o.toFixed(3)),
-            h: Number((Math.max(o, c) + spread).toFixed(3)),
-            l: Number((Math.min(o, c) - spread).toFixed(3)),
-            c,
-          });
-        }
+        // Honest 2-point start->current close trajectory without fabricated synthetic candles or waves
+        const points = [Number(safeStart.toFixed(3)), Number(raw.price.toFixed(3))];
+        const timestamps = [now - cfg.spanMs, now];
         const payload: LiveChartResponse = {
           id: 'ID10Y',
           timeframe,
           points,
           timestamps,
-          candles,
+          candles: undefined,
           prevClose: safeStart,
         };
         chartCache.set(key, { data: payload, expiresAt: now + 180_000 });
@@ -4630,17 +4611,37 @@ function computeEquityTradePlanFromBars(params: {
   const daySpan = Math.max(Math.abs(dayHigh - dayLow), price * 0.014);
   const atr = atrCount > 0 ? Math.max(atrSum / atrCount, price * 0.01) : daySpan * 1.15;
 
-  // Identify technical Supply & Demand base zones from 20D displacement pivots
-  const histHigh = n > 0 ? Math.max(...highs, dayHigh, price) : Math.max(dayHigh, price * 1.03);
-  const histLow = n > 0 ? Math.min(...lows, dayLow, price) : Math.min(dayLow, price * 0.97);
+  // Identify technical Supply & Demand base zones from 3-month swing structure
+  const swingWindowStart = Math.max(0, n - 45);
+  const histHigh = n > 0 ? Math.max(...highs.slice(swingWindowStart), dayHigh, price) : Math.max(dayHigh, price * 1.03);
+  const histLow = n > 0 ? Math.min(...lows.slice(swingWindowStart), dayLow, price) : Math.min(dayLow, price * 0.97);
+
+  // 20D & 50D EMA trend filter over 3mo daily closes
+  const computeEma = (arr: number[], period: number): number => {
+    if (arr.length === 0) return price;
+    const k = 2 / (period + 1);
+    let ema = arr[0];
+    for (let i = 1; i < arr.length; i++) {
+      ema = arr[i] * k + ema * (1 - k);
+    }
+    return ema;
+  };
+  const ema20Num = Number(computeEma(closes.slice(-40), 20).toFixed(currency === 'IDR' ? 0 : 2));
+  const ema50Num = Number(computeEma(closes, 50).toFixed(currency === 'IDR' ? 0 : 2));
+  const trendFilterLabel: StockTradePlan['trendFilterLabel'] =
+    ema20Num > ema50Num * 1.003 && price >= ema20Num * 0.985
+      ? 'Uptrend (EMA20 > EMA50)'
+      : ema20Num < ema50Num * 0.997 && price <= ema20Num * 1.015
+        ? 'Downtrend (EMA20 < EMA50)'
+        : 'Neutral';
 
   let demandLow = histLow;
   let demandHigh = Math.min(price * 0.996, histLow + atr * 0.65);
   let supplyHigh = histHigh;
   let supplyLow = Math.max(price * 1.004, histHigh - atr * 0.65);
 
-  // Scan Rally-Base-Rally / Drop-Base-Rally demand origins
-  for (let i = Math.max(1, n - 18); i < n - 1; i++) {
+  // Scan Rally-Base-Rally / Drop-Base-Rally demand origins over 45 trading days (~2+ months)
+  for (let i = Math.max(1, n - 45); i < n - 1; i++) {
     const dispUp = closes[i + 1] - closes[i];
     if (dispUp >= atr * 0.6 && lows[i] <= price * 1.015) {
       const zLow = lows[i];
@@ -4691,23 +4692,33 @@ function computeEquityTradePlanFromBars(params: {
           ? 'SELL'
           : undefined);
 
-  // Multi-pillar fusion score (-100 .. +100): Bandarmology (45%) + Flow (25%) + Supply/Demand Location (30%)
-  const bandarPts = (bandar.score / 100) * 45;
+  // Multi-pillar fusion score (-100 .. +100): Bandarmology (40%) + Flow (20%) + S/D Location (25%) + EMA20/50 Trend (15%)
+  const bandarPts = (bandar.score / 100) * 40;
   const flowPts =
-    (effectiveForeignSide === 'BUY' ? 14 : effectiveForeignSide === 'SELL' ? -14 : 0) +
-    ((bandar.accumulationPressure - 50) / 50) * 11;
+    (effectiveForeignSide === 'BUY' ? 12 : effectiveForeignSide === 'SELL' ? -12 : 0) +
+    ((bandar.accumulationPressure - 50) / 50) * 8;
   const sdLocationPts =
-    posInSd <= 0.32 ? 22 : posInSd >= 0.72 ? -22 : (0.5 - posInSd) * 18;
+    posInSd <= 0.32 ? 20 : posInSd >= 0.72 ? -20 : (0.5 - posInSd) * 16;
+  const trendPts =
+    trendFilterLabel === 'Uptrend (EMA20 > EMA50)'
+      ? 14
+      : trendFilterLabel === 'Downtrend (EMA20 < EMA50)'
+        ? -14
+        : 0;
   const tapeConfirm =
     bandar.volumeRatio >= 1.15 && Math.abs(chgPct) >= 0.5
       ? chgPct > 0
-        ? 10
-        : -10
+        ? 8
+        : -8
       : 0;
 
-  const netScore = bandarPts + flowPts + sdLocationPts + tapeConfirm;
-  const bullishBias = netScore >= 12 || (bandar.score >= 18 && effectiveForeignSide !== 'SELL');
-  const bearishBias = netScore <= -12 || (bandar.score <= -18 && effectiveForeignSide !== 'BUY');
+  const netScore = bandarPts + flowPts + sdLocationPts + trendPts + tapeConfirm;
+  const bullishBias =
+    (netScore >= 14 || (bandar.score >= 22 && effectiveForeignSide !== 'SELL')) &&
+    !(trendFilterLabel === 'Downtrend (EMA20 < EMA50)' && bandar.score < 32);
+  const bearishBias =
+    (netScore <= -14 || (bandar.score <= -22 && effectiveForeignSide !== 'BUY')) &&
+    !(trendFilterLabel === 'Uptrend (EMA20 > EMA50)' && bandar.score > -32);
 
   let action: StockExecutionAction = 'WAIT';
   let entryPrice = price;
@@ -4799,6 +4810,13 @@ function computeEquityTradePlanFromBars(params: {
     supplyZoneLabel: `${fmtStockLevelServer(snappedSupLow, currency)} – ${fmtStockLevelServer(snappedSupHigh, currency)}`,
     bandarFlowBias: `${bandar.phase} · ${bandar.volumeRatio.toFixed(1)}x Vol · ${bandar.foreignBias}`,
     executionNote,
+    demandLowNum: snappedDemLow,
+    demandHighNum: snappedDemHigh,
+    supplyLowNum: snappedSupLow,
+    supplyHighNum: snappedSupHigh,
+    ema20Num,
+    ema50Num,
+    trendFilterLabel,
   };
 }
 
@@ -4873,7 +4891,7 @@ async function fetchEquityBandarmologyAndZonesMap(
     while (cursor < queue.length) {
       const target = queue[cursor++];
       try {
-        const json = await fetchYahooChartJson(target.yahooSymbol, '1mo', '1d', 4500);
+        const json = await fetchYahooChartJson(target.yahooSymbol, '3mo', '1d', 4500);
         const item = json?.chart?.result?.[0];
         const q = item?.indicators?.quote?.[0];
         const rawC = q?.close ?? [];
@@ -5225,7 +5243,7 @@ async function fetchTopStockMoversFresh(): Promise<StocksMoversResponse> {
       : [...idxPool].sort((a, b) => a.changePercent - b.changePercent)
   ).slice(0, 10);
 
-  // Ensure IDX Foreign Buy & Foreign Sell always populate 10 tickers cleanly
+  // Supplement IDX liquidity leaders honestly without fabricating synthetic foreign net Rupiah amounts
   const buildInstitutionalFlowFallback = (side: 'BUY' | 'SELL', existing: StockMover[]): StockMover[] => {
     const seen = new Set(existing.map((e) => e.symbol));
     const candidates = [...idxImpactBase]
@@ -5239,15 +5257,13 @@ async function fetchTopStockMoversFresh(): Promise<StocksMoversResponse> {
 
     const needed = Math.max(0, 10 - existing.length);
     const additions: StockMover[] = extraPool.slice(0, needed).map((item) => {
-      const estAmt = Math.max(1_500_000_000, Math.round(item.dollarTurnover * 0.22));
-      const signedAmt = side === 'SELL' ? -estAmt : estAmt;
       const { dollarTurnover: _dt, marketCap: _mc, relativeVolume: _rv, ...clean } = item;
       return {
         ...clean,
-        foreignNetAmount: signedAmt,
-        foreignNetLabel: formatIdrFlowLabel(signedAmt),
-        foreignFlowSide: side,
-        foreignSourceLabel: 'IDX Flow Estimate',
+        foreignNetAmount: undefined,
+        foreignNetLabel: 'Pending BEI',
+        foreignFlowSide: undefined,
+        foreignSourceLabel: 'Liquidity Proxy (Pending BEI Flow)',
       };
     });
     return [...existing, ...additions].slice(0, 10);
@@ -5263,12 +5279,12 @@ async function fetchTopStockMoversFresh(): Promise<StocksMoversResponse> {
       ? foreignFlows.foreignSell.slice(0, 10)
       : buildInstitutionalFlowFallback('SELL', foreignFlows.foreignSell);
 
-  for (const fb of finalForeignBuy) {
+  for (const fb of foreignFlows.foreignBuy) {
     if (typeof fb.foreignNetAmount === 'number') {
       latestIdxForeignFlowMap.set(fb.symbol, fb.foreignNetAmount);
     }
   }
-  for (const fs of finalForeignSell) {
+  for (const fs of foreignFlows.foreignSell) {
     if (typeof fs.foreignNetAmount === 'number') {
       latestIdxForeignFlowMap.set(fs.symbol, fs.foreignNetAmount);
     }
@@ -5803,6 +5819,8 @@ export async function fetchSymbolDetail(
 ): Promise<SymbolDetailResponse | null> {
   let sym = yahooSymbolInput.trim().toUpperCase();
   if (!sym) return null;
+  const matchedCfg = YAHOO_SYMBOL_CONFIG.find((c) => c.id === sym);
+  if (matchedCfg) sym = matchedCfg.yahooSymbol;
   if (sym === 'IHSG' || sym === 'COMPOSITE' || sym === 'IDX:COMPOSITE') sym = '^JKSE';
   if (sym === 'SPX' || sym === 'S&P500') sym = '^GSPC';
   if (sym === 'IXIC' || sym === 'NASDAQ') sym = '^IXIC';
@@ -6001,9 +6019,10 @@ export async function fetchSymbolDetail(
   const fullName = String(meta.shortName || meta.longName || cleanSym).slice(0, 64);
   const openFormatted = formatStatNumber(firstOpen, decimals, prefix);
 
+  const isNonEquityMacro = isIndex || isCrypto || sym.endsWith('=X') || sym.endsWith('=F');
   let bandarmology: BandarmologyAnalysis | undefined;
   let tradePlan: StockTradePlan | undefined;
-  if (!isIndex) {
+  if (!isNonEquityMacro) {
     const marketCode: 'US' | 'ID' = isIdr || sym.endsWith('.JK') ? 'ID' : 'US';
     const stratMap = await fetchEquityBandarmologyAndZonesMap([
       {

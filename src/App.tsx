@@ -17,7 +17,14 @@ import { usePrefetch } from './hooks/usePrefetch';
 import { usePriceAlerts } from './hooks/usePriceAlerts';
 import { useRenderPerformance } from './hooks/useRenderPerformance';
 import { useTheme } from './hooks/useTheme';
-import { AppRoute, CalendarCatalyst, NewsStory, PriceAlertItem } from './types/market';
+import {
+  AppRoute,
+  CalendarCatalyst,
+  ChartTradeOverlays,
+  NewsStory,
+  PriceAlertItem,
+  Timeframe,
+} from './types/market';
 import { lazyWithRetry } from './utils/lazyWithRetry';
 
 const WatchlistView = lazyWithRetry(() =>
@@ -145,6 +152,8 @@ function StocksTerminalShell() {
   } | null>(null);
   const [selectedAssetId, setSelectedAssetId] = useState<string>('SPX');
   const [inspectedSymbol, setInspectedSymbol] = useState<string | null>(null);
+  const [inspectedOverlays, setInspectedOverlays] = useState<ChartTradeOverlays | null>(null);
+  const [inspectedInitialTf, setInspectedInitialTf] = useState<Timeframe | undefined>(undefined);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [isPercentMode, setIsPercentMode] = useState<boolean>(true);
   const [activeStory, setActiveStory] = useState<NewsStory | null>(null);
@@ -378,10 +387,17 @@ function StocksTerminalShell() {
   }, []);
 
   const handleInspectSymbol = useCallback(
-    (yahooSymbol: string, builtInAssetId?: string) => {
+    (
+      yahooSymbol: string,
+      builtInAssetId?: string,
+      overlays?: ChartTradeOverlays | null,
+      initialTf?: Timeframe
+    ) => {
       if (builtInAssetId) {
         setSelectedAssetId(builtInAssetId);
       }
+      setInspectedOverlays(overlays ?? null);
+      setInspectedInitialTf(initialTf);
       setInspectedSymbol(yahooSymbol);
     },
     []
@@ -548,8 +564,13 @@ function StocksTerminalShell() {
             onScanIct={scanIctAlerts}
             onTriggerIctAlert={pushIctSignalAlert}
             onLoadTimeframe={loadChartTimeframe}
+            onInspectChart={(assetId, overlays, tf) =>
+              handleInspectSymbol(assetId, assetId, overlays, tf)
+            }
             onMarkAlertRead={markRead}
             onUpdateAlertOutcome={updateAlertOutcome}
+            flashMap={flashMap}
+            volatility5mMap={volatility5mMap}
             searchQuery={searchQuery}
           />
         )}
@@ -634,7 +655,13 @@ function StocksTerminalShell() {
           {inspectedSymbol && (
             <SymbolDetailModal
               yahooSymbol={inspectedSymbol}
-              onClose={() => setInspectedSymbol(null)}
+              initialTimeframe={inspectedInitialTf}
+              tradeOverlays={inspectedOverlays}
+              onClose={() => {
+                setInspectedSymbol(null);
+                setInspectedOverlays(null);
+                setInspectedInitialTf(undefined);
+              }}
             />
           )}
         </Suspense>

@@ -260,6 +260,9 @@ export function usePriceAlerts(
   const samplesRef = useRef<Record<string, PriceSample[]>>({});
   const cooldownRef = useRef<Record<string, AlertCooldownState>>({});
   const ictCooldownRef = useRef<Record<string, IctCooldownState>>({});
+  const entryZoneCooldownRef = useRef<Record<string, number>>({});
+  const lastSignalScanAtRef = useRef<number>(0);
+  const lastCandleSigRef = useRef<string>('');
   const initialIctScannedRef = useRef<boolean>(false);
   const bandarPhaseMapRef = useRef<Record<string, BandarmologyPhase>>(loadPersistedBandarPhases());
   const bandarCooldownRef = useRef<Record<string, BandarmologyShiftCooldown>>({});
@@ -346,6 +349,12 @@ export function usePriceAlerts(
         ictTimeframe: sig.timeframe,
         confidence: sig.confidence,
         outcomeStatus: 'pending',
+        autoGraded: false,
+        entryLowNum: sig.entryLowNum,
+        entryHighNum: sig.entryHighNum,
+        stopLossNum: sig.stopLossNum,
+        tp1Num: sig.tp1Num,
+        tp2Num: sig.tp2Num,
       };
     },
     []
@@ -382,6 +391,12 @@ export function usePriceAlerts(
         ictTimeframe: sdcv.timeframe,
         confidence: sdcv.confidence,
         outcomeStatus: 'pending',
+        autoGraded: false,
+        entryLowNum: sdcv.entryLowNum,
+        entryHighNum: sdcv.entryHighNum,
+        stopLossNum: sdcv.stopLossNum,
+        tp1Num: sdcv.tp1Num,
+        tp2Num: sdcv.tp2Num,
       };
     },
     []
@@ -606,10 +621,31 @@ export function usePriceAlerts(
     };
   }, []);
 
-  // Automated Dual-Engine Monitor (ICT Liquidity + S&D Candle & Volume) across FX Majors, BTC/USD, and XAU/USD
+  // Automated Dual-Engine Monitor (Throttled to >=5s or structural candle changes) + Entry-Zone proximity trigger
   useEffect(() => {
     if (assets.length === 0) return;
     const now = Date.now();
+    const candleSig = assets
+      .map((a) => {
+        const c15 = a.chartCandles?.['15m'];
+        const c5 = a.chartCandles?.['5m'];
+        const t15 = c15?.[c15.length - 1]?.t ?? 0;
+        const t5 = c5?.[c5.length - 1]?.t ?? 0;
+        return `${a.id}:${c15?.length ?? 0}:${t15}:${c5?.length ?? 0}:${t5}`;
+      })
+      .join('|');
+
+    const candleChanged = candleSig !== lastCandleSigRef.current;
+    if (
+      initialIctScannedRef.current &&
+      !candleChanged &&
+      now - lastSignalScanAtRef.current < 5000
+    ) {
+      return;
+    }
+    lastCandleSigRef.current = candleSig;
+    lastSignalScanAtRef.current = now;
+
     const ictSignals = scanAllIctSignals(assets, undefined, true, economicEvents, true);
     const activeIct = ictSignals.filter((s) => s.direction !== 'NEUTRAL' && s.confidence >= 58);
 
@@ -643,6 +679,8 @@ export function usePriceAlerts(
       return;
     }
 
+    const assetPriceMap = new Map(assets.map((a) => [a.id, a.price]));
+
     for (const sig of activeIct) {
       const dir = sig.direction === 'SELL' ? 'SELL' : 'BUY';
       const key = `ict:${sig.assetId}`;
@@ -659,6 +697,27 @@ export function usePriceAlerts(
           setupName: sig.setupName,
         };
         pushAlert(buildIctAlertItem(sig, dir, 'ict'), true);
+      } else {
+        const livePx = assetPriceMap.get(sig.assetId) ?? sig.currentPrice;
+        if (
+          typeof sig.entryLowNum === 'number' &&
+          typeof sig.entryHighNum === 'number' &&
+          livePx >= Math.min(sig.entryLowNum, sig.entryHighNum) &&
+          livePx <= Math.max(sig.entryLowNum, sig.entryHighNum)
+        ) {
+          const zKey = `${key}:zone:${dir}`;
+          const lastZoneAt = entryZoneCooldownRef.current[zKey] ?? 0;
+          if (now - lastZoneAt >= 15 * 60_000) {
+            entryZoneCooldownRef.current[zKey] = now;
+            pushAlert(
+              {
+                ...buildIctAlertItem(sig, dir, 'ict'),
+                ictSetup: `Spot Entered Zone · ${sig.setupName}`,
+              },
+              true
+            );
+          }
+        }
       }
     }
 
@@ -681,6 +740,81 @@ export function usePriceAlerts(
       }
     }
   }, [assets, economicEvents, buildIctAlertItem, buildSdcvAlertItem, pushAlert]);
+
+  // Automated Outcome Grader: evaluates pending BUY/SELL alerts against live price & subsequent OHLC bars
+  useEffect(() => {
+    if (assets.length === 0) return;
+    const assetById = new Map(assets.map((a) => [a.id, a]));
+    const now = Date.now();
+
+    setAlerts((prev) => {
+      let changed = false;
+      const next = prev.map((item) => {
+        if (
+          item.alertKind !== 'ict' ||
+          item.outcomeStatus !== 'pending' ||
+          (item.ictAction !== 'BUY' && item.ictAction !== 'SELL') ||
+          typeof item.stopLossNum !== 'number'
+        ) {
+          return item;
+        }
+        const target = item.tp1Num ?? item.tp2Num;
+        if (typeof target !== 'number' || !Number.isFinite(target)) return item;
+
+        const asset = assetById.get(item.assetId);
+        if (!asset || !Number.isFinite(asset.price) || asset.price <= 0) return item;
+
+        const bars15 = asset.chartCandles?.['15m'] ?? [];
+        const bars5 = asset.chartCandles?.['5m'] ?? [];
+        const relevantBars = [...bars15, ...bars5]
+          .filter((b) => b.t >= item.triggeredAt)
+          .sort((a, b) => a.t - b.t);
+
+        let result: 'win' | 'loss' | null = null;
+        for (const bar of relevantBars) {
+          if (item.ictAction === 'BUY') {
+            if (bar.l <= item.stopLossNum) {
+              result = 'loss';
+              break;
+            }
+            if (bar.h >= target) {
+              result = 'win';
+              break;
+            }
+          } else {
+            if (bar.h >= item.stopLossNum) {
+              result = 'loss';
+              break;
+            }
+            if (bar.l <= target) {
+              result = 'win';
+              break;
+            }
+          }
+        }
+
+        if (!result) {
+          if (item.ictAction === 'BUY') {
+            if (asset.price <= item.stopLossNum) result = 'loss';
+            else if (asset.price >= target) result = 'win';
+          } else {
+            if (asset.price >= item.stopLossNum) result = 'loss';
+            else if (asset.price <= target) result = 'win';
+          }
+        }
+
+        if (!result) return item;
+        changed = true;
+        return {
+          ...item,
+          outcomeStatus: result,
+          autoGraded: true,
+          outcomeGradedAt: now,
+        };
+      });
+      return changed ? next : prev;
+    });
+  }, [assets]);
 
   const processBandarmologySnapshots = useCallback(
     (snapshots: BandarmologyQuoteSnapshot[], showToast = true): number => {
@@ -846,7 +980,16 @@ export function usePriceAlerts(
   const updateAlertOutcome = useCallback(
     (id: string, outcome: 'pending' | 'win' | 'be' | 'loss') => {
       setAlerts((prev) =>
-        prev.map((a) => (a.id === id ? { ...a, outcomeStatus: outcome } : a))
+        prev.map((a) =>
+          a.id === id
+            ? {
+                ...a,
+                outcomeStatus: outcome,
+                autoGraded: false,
+                outcomeGradedAt: outcome === 'pending' ? undefined : Date.now(),
+              }
+            : a
+        )
       );
     },
     []

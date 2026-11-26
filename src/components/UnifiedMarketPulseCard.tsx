@@ -619,9 +619,15 @@ export const UnifiedMarketPulseCard: React.FC<UnifiedMarketPulseCardProps> = Rea
                 />
               </div>
               <div className="flex items-center justify-between text-[10px] font-mono tabular-nums text-[#6C6C70] dark:text-[#9EB5C8]">
-                <span>Buy Wall {formatDepthPrice(activeDepth.buyWallPrice, dec, pfx, sfx)}</span>
+                <span>
+                  {activeDepth.sourceKind === 'session-liquidity' ? 'Demand Ref' : 'Buy Wall'}{' '}
+                  {formatDepthPrice(activeDepth.buyWallPrice, dec, pfx, sfx)}
+                </span>
                 <span>Spread {activeDepth.spreadPct.toFixed(3)}%</span>
-                <span>Sell Wall {formatDepthPrice(activeDepth.sellWallPrice, dec, pfx, sfx)}</span>
+                <span>
+                  {activeDepth.sourceKind === 'session-liquidity' ? 'Supply Ref' : 'Sell Wall'}{' '}
+                  {formatDepthPrice(activeDepth.sellWallPrice, dec, pfx, sfx)}
+                </span>
               </div>
             </div>
 
@@ -722,12 +728,19 @@ export const UnifiedMarketPulseCard: React.FC<UnifiedMarketPulseCardProps> = Rea
         {/* TAB 2: ORDER BOOK & CUMULATIVE DEPTH CURVE (WITH SWIPE GUARD) */}
         {activeTab === 'depth' && (
           <div className="flex flex-col gap-3">
-            <div className="flex items-center justify-between text-[11px] text-[#6C6C70] dark:text-[#9EB5C8]">
-              <span className="inline-flex items-center gap-1.5 font-semibold text-[#1C1C1E] dark:text-white">
-                <Layers className="w-3.5 h-3.5 text-[#0071E3] dark:text-[#38BDF8]" />
-                {activeDepth.symbol} · {activeDepth.sourceLabel}
+            <div className="flex items-center justify-between gap-2 text-[11px] text-[#6C6C70] dark:text-[#9EB5C8]">
+              <span className="inline-flex items-center gap-1.5 font-semibold text-[#1C1C1E] dark:text-white flex-wrap">
+                <Layers className="w-3.5 h-3.5 text-[#0071E3] dark:text-[#38BDF8] shrink-0" />
+                <span>
+                  {activeDepth.symbol} · {activeDepth.sourceLabel}
+                </span>
+                {activeDepth.sourceKind === 'session-liquidity' && (
+                  <span className="text-[10px] font-mono font-bold text-[#9A5A0A] dark:text-[#FBBF24]">
+                    (Derived Ref — Not L2)
+                  </span>
+                )}
               </span>
-              <span className="font-mono tabular-nums">
+              <span className="font-mono tabular-nums shrink-0">
                 Spread {formatDepthPrice(activeDepth.spreadAbs, dec, pfx, sfx)} ({activeDepth.spreadPct.toFixed(3)}%)
               </span>
             </div>
@@ -815,11 +828,11 @@ export const UnifiedMarketPulseCard: React.FC<UnifiedMarketPulseCardProps> = Rea
               </div>
             )}
 
-            {/* Compact Order Ladder (Top 6 Bids & Asks) */}
+            {/* Compact Order Ladder (Top 6 Bids & Asks / Demand & Supply Ref) */}
             <div className="grid grid-cols-2 gap-3 pt-2 border-t border-black/8 dark:border-white/10 text-[11px] font-mono tabular-nums">
               <div>
                 <div className="flex justify-between text-[10px] font-sans font-bold uppercase tracking-wider text-[#6C6C70] dark:text-[#9EB5C8] pb-1 border-b border-black/8 dark:border-white/10">
-                  <span>Bid</span>
+                  <span>{activeDepth.sourceKind === 'session-liquidity' ? 'Demand' : 'Bid'}</span>
                   <span>Size</span>
                 </div>
                 <div className="divide-y divide-black/5 dark:divide-white/5">
@@ -850,7 +863,7 @@ export const UnifiedMarketPulseCard: React.FC<UnifiedMarketPulseCardProps> = Rea
 
               <div>
                 <div className="flex justify-between text-[10px] font-sans font-bold uppercase tracking-wider text-[#6C6C70] dark:text-[#9EB5C8] pb-1 border-b border-black/8 dark:border-white/10">
-                  <span>Ask</span>
+                  <span>{activeDepth.sourceKind === 'session-liquidity' ? 'Supply' : 'Ask'}</span>
                   <span>Size</span>
                 </div>
                 <div className="divide-y divide-black/5 dark:divide-white/5">

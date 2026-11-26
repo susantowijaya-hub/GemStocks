@@ -244,7 +244,7 @@ function MarketMoversSection({
                 <tr className="border-b border-[#E5E5EA] dark:border-[#2C2C2E] text-[11px] font-bold uppercase tracking-wider text-[#6C6C70] dark:text-[#8E8E93]">
                   <th className="py-3 pl-5 pr-2 w-12">Rank</th>
                   <th className="py-3 px-3">Stock</th>
-                  <th className="py-3 px-3">Bandar / Flow</th>
+                  <th className="py-3 px-3">Flow / Bandarmology</th>
                   <th className="py-3 px-3">Execution Signal &amp; Levels</th>
                   <th className="py-3 px-3">Fear &amp; Greed</th>
                   <th className="py-3 px-3">Trend</th>
@@ -691,7 +691,7 @@ export const TopStocksView: React.FC<TopStocksViewProps> = ({
             </h1>
           </div>
           <p className="text-xs sm:text-sm text-[#6C6C70] dark:text-[#8E8E93] mt-1">
-            Bandarmology Accumulation + Order Flow + Technical Supply &amp; Demand execution prices (Entry, TP1/TP2, SL) across US &amp; IDX.
+            US: CMF Flow + EMA Trend · IDX: Bandarmology + Foreign Flow · 3M Supply/Demand Execution Prices (Entry, TP1/TP2, SL).
           </p>
         </div>
 

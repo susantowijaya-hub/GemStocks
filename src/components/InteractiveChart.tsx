@@ -1,6 +1,28 @@
-import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  AreaSeries,
+  CandlestickSeries,
+  ColorType,
+  CrosshairMode,
+  HistogramSeries,
+  LineStyle,
+  createChart,
+  type AreaData,
+  type CandlestickData,
+  type HistogramData,
+  type IChartApi,
+  type IPriceLine,
+  type ISeriesApi,
+  type Time,
+  type UTCTimestamp,
+} from 'lightweight-charts';
 import { CandlestickChart, LineChart, RotateCcw } from 'lucide-react';
-import { CandlePoint, MarketAsset, Timeframe } from '../types/market';
+import {
+  CandlePoint,
+  ChartTradeOverlays,
+  MarketAsset,
+  Timeframe,
+} from '../types/market';
 import { formatAssetPrevClose } from '../utils/formatters';
 import { parseFormattedMarketNumber } from '../utils/marketSignals';
 
@@ -9,6 +31,7 @@ interface InteractiveChartProps {
   timeframe: Timeframe;
   onTimeframeChange: (tf: Timeframe) => void;
   onInspectIndexChange?: (idx: number | null) => void;
+  tradeOverlays?: ChartTradeOverlays | null;
   compact?: boolean;
   forceGranularIntraday?: boolean;
   hideTimeframeTabs?: boolean;
@@ -17,16 +40,25 @@ interface InteractiveChartProps {
 
 type ChartDisplayMode = 'line' | 'candles';
 
-interface BucketedCandle extends CandlePoint {
-  x: number;
-  width: number;
-  openY: number;
-  closeY: number;
-  highY: number;
-  lowY: number;
-  isBull: boolean;
-  isDoji: boolean;
+interface NormalizedBar extends CandlePoint {
+  time: UTCTimestamp;
   seriesIdx: number;
+}
+
+interface NormalizedLinePoint {
+  time: UTCTimestamp;
+  value: number;
+  seriesIdx: number;
+}
+
+interface HoveredReadout {
+  timeSec: number;
+  price: number;
+  o?: number;
+  h?: number;
+  l?: number;
+  c?: number;
+  v?: number;
 }
 
 const STANDARD_TIMEFRAMES: Timeframe[] = ['1D', '1W', '1M', '3M', 'YTD', '1Y', 'ALL'];
@@ -46,114 +78,165 @@ const GRANULAR_INTRADAY_TIMEFRAMES: Timeframe[] = [
   'ALL',
 ];
 
-const TIME_LABELS: Record<Timeframe, string[]> = {
-  '1m': ['-35m', '-24m', '-12m', 'Now'],
-  '5m': ['-3h', '-2h', '-1h', 'Now'],
-  '15m': ['-10h', '-6h', '-3h', 'Now'],
-  '30m': ['-20h', '-12h', '-6h', 'Now'],
-  '1h': ['-42h', '-28h', '-14h', 'Now'],
-  '4h': ['-6D', '-4D', '-2D', 'Now'],
-  '1D': ['Open', 'Morning', 'Midday', 'Afternoon', 'Pre-Close', 'Close'],
-  '1W': ['D1', 'D2', 'D3', 'D4', 'Now'],
-  '1M': ['W1', 'W2', 'W3', 'W4', 'Now'],
-  '3M': ['M1', 'M2', 'M3', 'Now'],
-  YTD: ['Jan', 'Q1', 'Mid', 'Q3', 'Now'],
-  '1Y': ['Q1', 'Q2', 'Q3', 'Q4', 'Now'],
-  ALL: ['5Y', '4Y', '3Y', '2Y', '1Y', 'Now'],
+const TF_STEP_SECONDS: Record<Timeframe, number> = {
+  '1m': 60,
+  '5m': 300,
+  '15m': 900,
+  '30m': 1800,
+  '1h': 3600,
+  '4h': 14400,
+  '1D': 300,
+  '1W': 3600,
+  '1M': 14400,
+  '3M': 86400,
+  YTD: 86400,
+  '1Y': 86400,
+  ALL: 604800,
 };
 
-function buildSmoothPath(points: { x: number; y: number }[]): string {
-  if (points.length === 0) return '';
-  if (points.length === 1) return `M${points[0].x},${points[0].y}`;
-  let d = `M${points[0].x.toFixed(1)},${points[0].y.toFixed(1)}`;
-  for (let i = 0; i < points.length - 1; i++) {
-    const p0 = points[i];
-    const p1 = points[i + 1];
-    const cx = ((p0.x + p1.x) / 2).toFixed(1);
-    d += ` C${cx},${p0.y.toFixed(1)} ${cx},${p1.y.toFixed(1)} ${p1.x.toFixed(1)},${p1.y.toFixed(1)}`;
+function detectChartPalette() {
+  if (typeof document === 'undefined') {
+    return {
+      isDark: true,
+      textColor: '#CBD5E1',
+      gridColor: 'rgba(148, 163, 184, 0.09)',
+      borderColor: 'rgba(148, 163, 184, 0.16)',
+      crosshairColor: 'rgba(251, 191, 36, 0.5)',
+      lineColor: '#38BDF8',
+      upColor: '#22C55E',
+      downColor: '#EF4444',
+    };
   }
-  return d;
+  const cls = document.documentElement.classList;
+  const isObsidian = cls.contains('obsidian') || cls.contains('dark');
+  const isParchment = cls.contains('parchment');
+  if (isObsidian) {
+    return {
+      isDark: true,
+      textColor: '#B4C6DA',
+      gridColor: 'rgba(148, 163, 184, 0.09)',
+      borderColor: 'rgba(148, 163, 184, 0.16)',
+      crosshairColor: 'rgba(251, 191, 36, 0.55)',
+      lineColor: '#38BDF8',
+      upColor: '#22C55E',
+      downColor: '#EF4444',
+    };
+  }
+  if (isParchment) {
+    return {
+      isDark: false,
+      textColor: '#4D473C',
+      gridColor: 'rgba(120, 95, 65, 0.10)',
+      borderColor: 'rgba(148, 132, 108, 0.25)',
+      crosshairColor: 'rgba(180, 65, 14, 0.5)',
+      lineColor: '#B4410E',
+      upColor: '#16A34A',
+      downColor: '#DC2626',
+    };
+  }
+  return {
+    isDark: false,
+    textColor: '#454954',
+    gridColor: 'rgba(15, 23, 42, 0.08)',
+    borderColor: 'rgba(15, 23, 42, 0.14)',
+    crosshairColor: 'rgba(0, 102, 204, 0.5)',
+    lineColor: '#0066CC',
+    upColor: '#16A34A',
+    downColor: '#DC2626',
+  };
 }
 
-function buildOhlcCandles(
+function normalizeRealCandles(
   rawCandles: CandlePoint[] | undefined,
+  seriesLen: number
+): NormalizedBar[] {
+  if (!Array.isArray(rawCandles) || rawCandles.length < 2) return [];
+  const bySec = new Map<number, CandlePoint>();
+  for (const b of rawCandles) {
+    if (
+      !Number.isFinite(b.t) ||
+      !Number.isFinite(b.o) ||
+      !Number.isFinite(b.h) ||
+      !Number.isFinite(b.l) ||
+      !Number.isFinite(b.c) ||
+      b.c <= 0 ||
+      b.h < b.l
+    ) {
+      continue;
+    }
+    const sec = Math.floor(b.t / 1000);
+    if (sec <= 0) continue;
+    bySec.set(sec, b);
+  }
+  const sorted = Array.from(bySec.entries()).sort((a, b) => a[0] - b[0]);
+  const total = sorted.length;
+  return sorted.map(([sec, b], idx) => ({
+    ...b,
+    time: sec as UTCTimestamp,
+    seriesIdx: Math.min(
+      Math.max(0, seriesLen - 1),
+      Math.round((idx / Math.max(1, total - 1)) * Math.max(0, seriesLen - 1))
+    ),
+  }));
+}
+
+function normalizeLinePoints(
   series: number[],
   timestamps: number[] | undefined,
-  decimals: number,
-  maxBars = 42
-): Array<CandlePoint & { seriesIdx: number }> {
-  // 1. Prefer real OHLC bars from backend / Yahoo Finance when available
-  if (Array.isArray(rawCandles) && rawCandles.length >= 2) {
-    const valid = rawCandles.filter(
-      (b) =>
-        Number.isFinite(b.o) &&
-        Number.isFinite(b.h) &&
-        Number.isFinite(b.l) &&
-        Number.isFinite(b.c)
-    );
-    if (valid.length >= 2) {
-      if (valid.length <= maxBars) {
-        return valid.map((b, idx) => ({
-          ...b,
-          seriesIdx: Math.min(
-            series.length - 1,
-            Math.round((idx / Math.max(1, valid.length - 1)) * (series.length - 1))
-          ),
-        }));
-      }
-      const step = Math.ceil(valid.length / maxBars);
-      const grouped: Array<CandlePoint & { seriesIdx: number }> = [];
-      for (let i = 0; i < valid.length; i += step) {
-        const chunk = valid.slice(i, i + step);
-        const o = chunk[0].o;
-        const c = chunk[chunk.length - 1].c;
-        const h = Math.max(...chunk.map((x) => x.h));
-        const l = Math.min(...chunk.map((x) => x.l));
-        const lastIdx = Math.min(valid.length - 1, i + chunk.length - 1);
-        grouped.push({
-          t: chunk[chunk.length - 1].t,
-          o,
-          h,
-          l,
-          c,
-          seriesIdx: Math.min(
-            series.length - 1,
-            Math.round((lastIdx / Math.max(1, valid.length - 1)) * (series.length - 1))
-          ),
-        });
-      }
-      return grouped;
+  timeframe: Timeframe
+): NormalizedLinePoint[] {
+  const stepSec = TF_STEP_SECONDS[timeframe] ?? 300;
+  const fallbackEndSec = Math.floor(Date.now() / 1000);
+  const bySec = new Map<number, { value: number; seriesIdx: number }>();
+
+  for (let i = 0; i < series.length; i++) {
+    const val = series[i];
+    if (!Number.isFinite(val)) continue;
+    const rawTs = timestamps?.[i];
+    let sec =
+      typeof rawTs === 'number' && Number.isFinite(rawTs) && rawTs > 1_000_000_000
+        ? Math.floor(rawTs / 1000)
+        : fallbackEndSec - (series.length - 1 - i) * stepSec;
+    if (bySec.has(sec)) {
+      sec += 1;
     }
+    bySec.set(sec, { value: val, seriesIdx: i });
   }
 
-  // 2. Deterministic OHLC bucketing from close series
-  const targetBars = Math.min(maxBars, Math.max(12, Math.floor(series.length / 2)));
-  const chunkSize = Math.max(1, Math.floor(series.length / targetBars));
-  const out: Array<CandlePoint & { seriesIdx: number }> = [];
+  return Array.from(bySec.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([sec, pt]) => ({
+      time: sec as UTCTimestamp,
+      value: pt.value,
+      seriesIdx: pt.seriesIdx,
+    }));
+}
 
-  for (let i = 0; i < series.length; i += chunkSize) {
-    const end = Math.min(series.length, i + chunkSize);
-    const slice = series.slice(i, end);
-    if (slice.length === 0) continue;
-
-    const o = i > 0 ? series[i - 1] : slice[0];
-    const c = slice[slice.length - 1];
-    const rawH = Math.max(o, ...slice);
-    const rawL = Math.min(o, ...slice);
-    const pad =
-      rawH === rawL ? Math.max(Math.pow(10, -decimals), Math.abs(c) * 0.00045) : 0;
-
-    out.push({
-      t: timestamps?.[end - 1] ?? Date.now() - (series.length - end) * 300_000,
-      o: Number(o.toFixed(decimals)),
-      h: Number((rawH + pad).toFixed(decimals)),
-      l: Number((rawL - pad).toFixed(decimals)),
-      c: Number(c.toFixed(decimals)),
-      seriesIdx: end - 1,
-    });
+function formatCrosshairTime(sec: number, timeframe: Timeframe): string {
+  const d = new Date(sec * 1000);
+  if (
+    timeframe === '1m' ||
+    timeframe === '5m' ||
+    timeframe === '15m' ||
+    timeframe === '30m' ||
+    timeframe === '1h' ||
+    timeframe === '4h' ||
+    timeframe === '1D' ||
+    timeframe === '1W'
+  ) {
+    return new Intl.DateTimeFormat('en-US', {
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).format(d);
   }
-
-  return out;
+  return new Intl.DateTimeFormat('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  }).format(d);
 }
 
 export const InteractiveChart: React.FC<InteractiveChartProps> = ({
@@ -161,16 +244,25 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
   timeframe,
   onTimeframeChange,
   onInspectIndexChange,
+  tradeOverlays = null,
   compact = false,
   forceGranularIntraday = false,
   hideTimeframeTabs = false,
   showKeyStats = true,
 }) => {
-  const uid = useId().replace(/:/g, '');
-  const svgRef = useRef<SVGSVGElement | null>(null);
+  const hostRef = useRef<HTMLDivElement | null>(null);
+  const chartRef = useRef<IChartApi | null>(null);
+  const priceSeriesRef = useRef<
+    ISeriesApi<'Candlestick'> | ISeriesApi<'Area'> | null
+  >(null);
+  const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
+  const priceLinesRef = useRef<IPriceLine[]>([]);
+  const fitSignatureRef = useRef<string>('');
+
   const [chartMode, setChartMode] = useState<ChartDisplayMode>('line');
-  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
-  const [pinnedIndex, setPinnedIndex] = useState<number | null>(null);
+  const [hoveredReadout, setHoveredReadout] = useState<HoveredReadout | null>(null);
+  const [isZoomed, setIsZoomed] = useState(false);
+  const [paletteVersion, setPaletteVersion] = useState(0);
 
   const upperId = (asset.id || '').toUpperCase();
   const upperSym = (asset.symbol || '').toUpperCase();
@@ -188,7 +280,6 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
     ? GRANULAR_INTRADAY_TIMEFRAMES
     : STANDARD_TIMEFRAMES;
 
-  // Guard timeframe when switching from granular intraday interval to a non-intraday asset
   useEffect(() => {
     if (!availableTimeframes.includes(timeframe)) {
       onTimeframeChange('1D');
@@ -196,30 +287,34 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
   }, [availableTimeframes, timeframe, onTimeframeChange]);
 
   useEffect(() => {
-    setHoverIndex(null);
-    setPinnedIndex(null);
-  }, [asset.id, timeframe, chartMode]);
+    if (typeof document === 'undefined' || typeof MutationObserver === 'undefined') return;
+    const obs = new MutationObserver(() => {
+      setPaletteVersion((v) => v + 1);
+    });
+    obs.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ['class'],
+    });
+    return () => obs.disconnect();
+  }, []);
 
   const rawSeries = asset.chartSeries[timeframe];
   const hasLoadedSeries =
     timeframe === '1D' || (Array.isArray(rawSeries) && rawSeries.length >= 2);
   const fallback1D = asset.chartSeries['1D'] ?? [];
   const baseSeries = hasLoadedSeries
-    ? (rawSeries && rawSeries.length >= 2 ? rawSeries : fallback1D)
+    ? rawSeries && rawSeries.length >= 2
+      ? rawSeries
+      : fallback1D
     : fallback1D;
-  const series =
-    baseSeries.length >= 2 ? baseSeries : [asset.prevClose || asset.price, asset.price];
+  const series = useMemo(
+    () =>
+      baseSeries.length >= 2
+        ? baseSeries
+        : [asset.prevClose || asset.price, asset.price],
+    [baseSeries, asset.prevClose, asset.price]
+  );
 
-  const isIntradayTf =
-    timeframe === '1m' ||
-    timeframe === '5m' ||
-    timeframe === '15m' ||
-    timeframe === '30m' ||
-    timeframe === '1h' ||
-    timeframe === '4h' ||
-    timeframe === '1D';
-
-  // Anchor split color & horizontal baseline on Opening Price for 1D, or Period Start for intraday/multi-day
   const openBaseline = useMemo(() => {
     if (timeframe === '1D') {
       const parsedOpen = parseFormattedMarketNumber(asset.open);
@@ -229,305 +324,379 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
     return series[0];
   }, [timeframe, asset.open, asset.prevClose, series]);
 
-  const effectiveProgress =
-    timeframe === '1D' && typeof asset.sessionProgressRatio === 'number'
-      ? Math.max(0.15, Math.min(1, asset.sessionProgressRatio))
-      : 1;
-
-  const maxBarsForAsset = isGranularIntradayAsset ? 46 : 38;
-  const rawCandles = useMemo(
-    () =>
-      buildOhlcCandles(
-        asset.chartCandles?.[timeframe],
-        series,
-        asset.chartTimestamps?.[timeframe],
-        asset.decimals,
-        maxBarsForAsset
-      ),
-    [asset.chartCandles, asset.chartTimestamps, asset.decimals, series, timeframe, maxBarsForAsset]
+  const normalizedCandles = useMemo(
+    () => normalizeRealCandles(asset.chartCandles?.[timeframe], series.length),
+    [asset.chartCandles, timeframe, series.length]
   );
 
-  const {
-    coords,
-    candles,
-    candleSlotW,
-    linePath,
-    baselineAreaPath,
-    openingY,
-    minVal,
-    maxVal,
-    midVal,
-    lastCoord,
-    splitPct,
-  } = useMemo(() => {
-    const width = 700;
-    const height = 220;
-    const padY = 18;
-    const drawW = width * effectiveProgress;
+  const normalizedLine = useMemo(
+    () => normalizeLinePoints(series, asset.chartTimestamps?.[timeframe], timeframe),
+    [series, asset.chartTimestamps, timeframe]
+  );
 
-    const candleVals =
-      chartMode === 'candles'
-        ? rawCandles.flatMap((b) => [b.h, b.l])
-        : [];
-    const allVals = [...series, openBaseline, ...candleVals];
-    const min = Math.min(...allVals);
-    const max = Math.max(...allVals);
-    const mid = (min + max) / 2;
-    const span = max - min || Math.max(Math.abs(openBaseline) * 0.002, 1);
-    const toY = (val: number) => padY + ((max - val) / span) * (height - padY * 2);
+  const hasRealOhlc = normalizedCandles.length >= 2;
+  const isCloseOnlyFallback = chartMode === 'candles' && !hasRealOhlc;
+  const hasVolumeBars = useMemo(
+    () =>
+      normalizedCandles.some(
+        (b) => typeof b.v === 'number' && Number.isFinite(b.v) && b.v > 0
+      ),
+    [normalizedCandles]
+  );
 
-    const pts = series.map((val, idx) => {
-      const x = (idx / Math.max(series.length - 1, 1)) * drawW;
-      return { x, y: toY(val), val };
-    });
-
-    const slotW = drawW / Math.max(rawCandles.length, 1);
-    const bodyW = Math.max(4, Math.min(16, slotW * 0.66));
-    const dojiEps = Math.pow(10, -(asset.decimals + 1));
-    const candleShapes: BucketedCandle[] = rawCandles.map((c, idx) => {
-      const x = slotW * (idx + 0.5);
-      return {
-        ...c,
-        x,
-        width: bodyW,
-        openY: toY(c.o),
-        closeY: toY(c.c),
-        highY: toY(c.h),
-        lowY: toY(c.l),
-        isBull: c.c >= c.o,
-        isDoji: Math.abs(c.c - c.o) <= dojiEps,
-      };
-    });
-
-    const rawOpenY = toY(openBaseline);
-    const clampedOpenY = Math.max(8, Math.min(height - 8, rawOpenY));
-    const line = buildSmoothPath(pts);
-    const firstPt = pts[0] ?? { x: 0, y: clampedOpenY, val: openBaseline };
-    const lastPt = pts[pts.length - 1] ?? { x: drawW, y: height / 2, val: asset.price };
-    const baselineArea = `${line} L${lastPt.x.toFixed(1)},${clampedOpenY.toFixed(1)} L${firstPt.x.toFixed(1)},${clampedOpenY.toFixed(1)} Z`;
-
-    return {
-      coords: pts,
-      candles: candleShapes,
-      candleSlotW: slotW,
-      linePath: line,
-      baselineAreaPath: baselineArea,
-      openingY: clampedOpenY,
-      minVal: min,
-      maxVal: max,
-      midVal: mid,
-      lastCoord: lastPt,
-      splitPct: Math.max(0, Math.min(100, (clampedOpenY / height) * 100)),
-    };
-  }, [series, openBaseline, asset.price, asset.decimals, effectiveProgress, chartMode, rawCandles]);
-
-  const activeCount = chartMode === 'candles' ? candles.length : coords.length;
-
-  const resolveIndexFromClientX = (clientX: number): number | null => {
-    const svg = svgRef.current;
-    if (!svg || activeCount === 0) return null;
-    const rect = svg.getBoundingClientRect();
-    const relX = Math.max(0, Math.min(clientX - rect.left, rect.width));
-    const ratio = relX / Math.max(rect.width * effectiveProgress, 1);
-    const idx = Math.round(Math.min(1, ratio) * (activeCount - 1));
-    return Math.max(0, Math.min(activeCount - 1, idx));
-  };
-
-  const inspectIndex = hoverIndex !== null ? hoverIndex : pinnedIndex;
-  const activeCandle =
-    chartMode === 'candles' && inspectIndex !== null ? candles[inspectIndex] ?? null : null;
-  const activePoint =
-    chartMode === 'candles'
-      ? activeCandle
-        ? { x: activeCandle.x, y: activeCandle.closeY, val: activeCandle.c }
-        : null
-      : inspectIndex !== null
-        ? coords[inspectIndex] ?? null
-        : null;
+  // Refs for stable crosshair lookup without re-creating chart
+  const candlesByTimeRef = useRef<Map<number, NormalizedBar>>(new Map());
+  const lineByTimeRef = useRef<Map<number, NormalizedLinePoint>>(new Map());
+  const onInspectRef = useRef(onInspectIndexChange);
+  onInspectRef.current = onInspectIndexChange;
 
   useEffect(() => {
-    if (inspectIndex === null) {
-      onInspectIndexChange?.(null);
-      return;
-    }
-    if (chartMode === 'candles') {
-      const candle = candles[inspectIndex];
-      onInspectIndexChange?.(candle ? candle.seriesIdx : null);
-    } else {
-      onInspectIndexChange?.(inspectIndex);
-    }
-  }, [inspectIndex, chartMode, candles, onInspectIndexChange]);
+    candlesByTimeRef.current = new Map(normalizedCandles.map((b) => [b.time, b]));
+    lineByTimeRef.current = new Map(normalizedLine.map((p) => [p.time, p]));
+  }, [normalizedCandles, normalizedLine]);
 
-  const activeDelta = activePoint ? activePoint.val - openBaseline : 0;
-  const activeDeltaPct = openBaseline ? (activeDelta / openBaseline) * 100 : 0;
+  // Create & manage TradingView Lightweight Charts instance
+  useEffect(() => {
+    const container = hostRef.current;
+    if (!container) return;
 
-  const timeframeSummary = useMemo(() => {
-    const startVal =
-      timeframe === '1D'
-        ? asset.prevClose > 0
-          ? asset.prevClose
-          : openBaseline
-        : series[0] || openBaseline;
-
-    if (activePoint) {
-      const refVal = timeframe === '1D' ? openBaseline : startVal;
-      const delta = activePoint.val - refVal;
-      const pct = refVal > 0 ? (delta / refVal) * 100 : 0;
-      return {
-        startVal: refVal,
-        endVal: activePoint.val,
-        delta,
-        pct,
-        isGain: delta >= 0,
-        isInspecting: true,
-      };
-    }
-
-    if (timeframe === '1D') {
-      return {
-        startVal,
-        endVal: asset.price,
-        delta: asset.changeValue,
-        pct: asset.changePercent,
-        isGain: asset.changePercent >= 0,
-        isInspecting: false,
-      };
-    }
-
-    const endVal = asset.price > 0 ? asset.price : lastCoord.val;
-    const delta = endVal - startVal;
-    const pct = startVal > 0 ? (delta / startVal) * 100 : 0;
-    return {
-      startVal,
-      endVal,
-      delta,
-      pct,
-      isGain: delta >= 0,
-      isInspecting: false,
-    };
-  }, [
-    timeframe,
-    asset.prevClose,
-    asset.price,
-    asset.changeValue,
-    asset.changePercent,
-    openBaseline,
-    series,
-    activePoint,
-    lastCoord.val,
-  ]);
-
-  const lastAboveOpen = lastCoord.val >= openBaseline;
-  const activeAboveOpen = activePoint ? activePoint.val >= openBaseline : lastAboveOpen;
-
-  const formatVal = (val: number) => {
-    const formatted = val.toLocaleString('en-US', {
-      minimumFractionDigits: asset.decimals,
-      maximumFractionDigits: asset.decimals,
-    });
-    return `${asset.currencyPrefix ?? ''}${formatted}${asset.unitSuffix ?? ''}`;
-  };
-
-  const formatTimeHint = (idx: number) => {
-    const seriesIdx =
-      chartMode === 'candles' ? (candles[idx]?.seriesIdx ?? idx) : idx;
-    const ts =
-      chartMode === 'candles'
-        ? candles[idx]?.t
-        : asset.chartTimestamps?.[timeframe]?.[seriesIdx];
-    if (typeof ts === 'number' && Number.isFinite(ts)) {
-      const d = new Date(ts);
-      if (isIntradayTf || timeframe === '1W') {
-        return new Intl.DateTimeFormat('en-US', {
-          month: 'short',
-          day: 'numeric',
-          hour: '2-digit',
-          minute: '2-digit',
-          hour12: false,
-        }).format(d);
-      }
-      return new Intl.DateTimeFormat('en-US', {
-        month: 'short',
-        day: 'numeric',
-        year: 'numeric',
-      }).format(d);
-    }
-    if (timeframe === '1D') {
-      const totalMins = 9 * 60 + 30 + Math.round((seriesIdx / Math.max(coords.length - 1, 1)) * 390);
-      const hh = String(Math.floor(totalMins / 60)).padStart(2, '0');
-      const mm = String(totalMins % 60).padStart(2, '0');
-      return `${hh}:${mm}`;
-    }
-    const labels = TIME_LABELS[timeframe] ?? TIME_LABELS['1D'];
-    const bucket = Math.min(
-      labels.length - 1,
-      Math.floor((idx / Math.max(activeCount, 1)) * labels.length)
-    );
-    return `${timeframe} · ${labels[bucket]}`;
-  };
-
-  // Compute dynamic bottom x-axis labels from real bar timestamps when available
-  const axisLabels = useMemo(() => {
-    const rawTs =
-      chartMode === 'candles'
-        ? candles.map((c) => c.t)
-        : asset.chartTimestamps?.[timeframe];
-    if (Array.isArray(rawTs) && rawTs.length >= 4) {
-      const sampleCount = 5;
-      const out: string[] = [];
-      for (let i = 0; i < sampleCount; i++) {
-        const idx = Math.min(
-          rawTs.length - 1,
-          Math.round((i / (sampleCount - 1)) * (rawTs.length - 1))
-        );
-        const ts = rawTs[idx];
-        const d = new Date(ts);
-        if (!Number.isFinite(d.getTime())) continue;
-        if (
+    const palette = detectChartPalette();
+    const initialHeight = compact ? 228 : 268;
+    const chart = createChart(container, {
+      width: Math.max(260, container.clientWidth || 640),
+      height: Math.max(190, container.clientHeight || initialHeight),
+      layout: {
+        background: { type: ColorType.Solid, color: 'transparent' },
+        textColor: palette.textColor,
+        fontFamily: 'JetBrains Mono, ui-monospace, monospace',
+        fontSize: 10,
+      },
+      grid: {
+        vertLines: { color: palette.gridColor },
+        horzLines: { color: palette.gridColor },
+      },
+      crosshair: {
+        mode: CrosshairMode.Normal,
+        vertLine: {
+          color: palette.crosshairColor,
+          width: 1,
+          style: LineStyle.Dashed,
+          labelBackgroundColor: palette.isDark ? '#1E293B' : '#0F172A',
+        },
+        horzLine: {
+          color: palette.crosshairColor,
+          width: 1,
+          style: LineStyle.Dashed,
+          labelBackgroundColor: palette.isDark ? '#1E293B' : '#0F172A',
+        },
+      },
+      rightPriceScale: {
+        borderColor: palette.borderColor,
+        scaleMargins: {
+          top: 0.1,
+          bottom: hasVolumeBars ? 0.22 : 0.1,
+        },
+      },
+      timeScale: {
+        borderColor: palette.borderColor,
+        timeVisible:
           timeframe === '1m' ||
           timeframe === '5m' ||
           timeframe === '15m' ||
           timeframe === '30m' ||
-          timeframe === '1D'
-        ) {
-          out.push(
-            new Intl.DateTimeFormat('en-GB', {
-              hour: '2-digit',
-              minute: '2-digit',
-              hour12: false,
-            }).format(d)
-          );
-        } else if (timeframe === '1h' || timeframe === '4h') {
-          out.push(
-            new Intl.DateTimeFormat('en-GB', {
-              month: 'short',
-              day: 'numeric',
-              hour: '2-digit',
-              hour12: false,
-            }).format(d)
-          );
-        } else if (timeframe === '1W' || timeframe === '1M') {
-          out.push(
-            new Intl.DateTimeFormat('en-US', {
-              month: 'short',
-              day: 'numeric',
-            }).format(d)
-          );
-        } else {
-          out.push(
-            new Intl.DateTimeFormat('en-US', {
-              month: 'short',
-              year: '2-digit',
-            }).format(d)
-          );
-        }
-      }
-      if (out.length >= 3) return out;
-    }
-    return TIME_LABELS[timeframe] ?? TIME_LABELS['1D'];
-  }, [chartMode, candles, asset.chartTimestamps, timeframe]);
+          timeframe === '1h' ||
+          timeframe === '4h' ||
+          timeframe === '1D' ||
+          timeframe === '1W',
+        secondsVisible: false,
+        rightOffset: 4,
+      },
+      handleScroll: {
+        mouseWheel: true,
+        pressedMouseMove: true,
+        horzTouchDrag: true,
+        vertTouchDrag: false,
+      },
+      handleScale: {
+        axisPressedMouseMove: true,
+        mouseWheel: true,
+        pinch: true,
+      },
+    });
 
-  // Dynamic Price Range computed strictly from the selected timeframe
+    chartRef.current = chart;
+    priceLinesRef.current = [];
+
+    const precision = Math.max(0, Math.min(6, asset.decimals));
+    const minMove = Number((1 / Math.pow(10, precision)).toFixed(precision));
+
+    if (chartMode === 'candles' && hasRealOhlc) {
+      const candleSeries = chart.addSeries(CandlestickSeries, {
+        upColor: palette.upColor,
+        downColor: palette.downColor,
+        borderVisible: false,
+        wickUpColor: palette.upColor,
+        wickDownColor: palette.downColor,
+        priceFormat: {
+          type: 'price',
+          precision,
+          minMove,
+        },
+      });
+      priceSeriesRef.current = candleSeries;
+    } else {
+      const areaSeries = chart.addSeries(AreaSeries, {
+        lineColor: palette.lineColor,
+        topColor: palette.isDark
+          ? 'rgba(56, 189, 248, 0.28)'
+          : 'rgba(0, 102, 204, 0.22)',
+        bottomColor: palette.isDark
+          ? 'rgba(56, 189, 248, 0.02)'
+          : 'rgba(0, 102, 204, 0.02)',
+        lineWidth: 2,
+        priceFormat: {
+          type: 'price',
+          precision,
+          minMove,
+        },
+      });
+      priceSeriesRef.current = areaSeries;
+    }
+
+    if (hasVolumeBars) {
+      const volSeries = chart.addSeries(HistogramSeries, {
+        priceFormat: { type: 'volume' },
+        priceScaleId: 'volume',
+        lastValueVisible: false,
+        priceLineVisible: false,
+      });
+      chart.priceScale('volume').applyOptions({
+        scaleMargins: { top: 0.82, bottom: 0 },
+      });
+      volumeSeriesRef.current = volSeries;
+    } else {
+      volumeSeriesRef.current = null;
+    }
+
+    chart.subscribeCrosshairMove((param) => {
+      if (!param.point || param.time === undefined) {
+        setHoveredReadout(null);
+        onInspectRef.current?.(null);
+        return;
+      }
+      const timeSec =
+        typeof param.time === 'number' ? param.time : Number(param.time);
+      if (!Number.isFinite(timeSec)) {
+        setHoveredReadout(null);
+        onInspectRef.current?.(null);
+        return;
+      }
+
+      const bar = candlesByTimeRef.current.get(timeSec);
+      if (bar) {
+        setHoveredReadout({
+          timeSec,
+          price: bar.c,
+          o: bar.o,
+          h: bar.h,
+          l: bar.l,
+          c: bar.c,
+          v: bar.v,
+        });
+        onInspectRef.current?.(bar.seriesIdx);
+        return;
+      }
+
+      const pt = lineByTimeRef.current.get(timeSec);
+      if (pt) {
+        setHoveredReadout({
+          timeSec,
+          price: pt.value,
+        });
+        onInspectRef.current?.(pt.seriesIdx);
+      }
+    });
+
+    const unsubRange = () => {
+      const handler = () => {
+        setIsZoomed(true);
+      };
+      chart.timeScale().subscribeVisibleTimeRangeChange(handler);
+      return () => chart.timeScale().unsubscribeVisibleTimeRangeChange(handler);
+    };
+    const cleanupRangeSub = unsubRange();
+
+    let ro: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver((entries) => {
+        const entry = entries[0];
+        if (!entry) return;
+        const w = Math.floor(entry.contentRect.width);
+        const h = Math.floor(entry.contentRect.height);
+        if (w > 40 && h > 40) {
+          chart.applyOptions({ width: w, height: h });
+        }
+      });
+      ro.observe(container);
+    }
+
+    fitSignatureRef.current = '';
+
+    return () => {
+      cleanupRangeSub();
+      if (ro) ro.disconnect();
+      chart.remove();
+      chartRef.current = null;
+      priceSeriesRef.current = null;
+      volumeSeriesRef.current = null;
+      priceLinesRef.current = [];
+      setHoveredReadout(null);
+      setIsZoomed(false);
+    };
+  }, [chartMode, hasRealOhlc, hasVolumeBars, timeframe, asset.id, asset.decimals, compact]);
+
+  // Sync theme palette dynamically without resetting zoom
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    const palette = detectChartPalette();
+    chart.applyOptions({
+      layout: { textColor: palette.textColor },
+      grid: {
+        vertLines: { color: palette.gridColor },
+        horzLines: { color: palette.gridColor },
+      },
+      rightPriceScale: { borderColor: palette.borderColor },
+      timeScale: { borderColor: palette.borderColor },
+    });
+  }, [paletteVersion]);
+
+  // Push series data + price lines cleanly on live ticks or overlay updates
+  useEffect(() => {
+    const chart = chartRef.current;
+    const mainSeries = priceSeriesRef.current;
+    if (!chart || !mainSeries) return;
+
+    if (chartMode === 'candles' && hasRealOhlc) {
+      const candleData: CandlestickData<Time>[] = normalizedCandles.map((b) => ({
+        time: b.time,
+        open: b.o,
+        high: b.h,
+        low: b.l,
+        close: b.c,
+      }));
+      (mainSeries as ISeriesApi<'Candlestick'>).setData(candleData);
+    } else {
+      const endColor =
+        (normalizedLine[normalizedLine.length - 1]?.value ?? asset.price) >=
+        openBaseline
+          ? '#22C55E'
+          : '#EF4444';
+      (mainSeries as ISeriesApi<'Area'>).applyOptions({
+        lineColor: endColor,
+        topColor:
+          endColor === '#22C55E'
+            ? 'rgba(34, 197, 94, 0.26)'
+            : 'rgba(239, 68, 68, 0.26)',
+        bottomColor:
+          endColor === '#22C55E'
+            ? 'rgba(34, 197, 94, 0.02)'
+            : 'rgba(239, 68, 68, 0.02)',
+      });
+      const areaData: AreaData<Time>[] = normalizedLine.map((p) => ({
+        time: p.time,
+        value: p.value,
+      }));
+      (mainSeries as ISeriesApi<'Area'>).setData(areaData);
+    }
+
+    if (volumeSeriesRef.current && hasVolumeBars) {
+      const volData: HistogramData<Time>[] = normalizedCandles
+        .filter((b) => typeof b.v === 'number' && b.v >= 0)
+        .map((b) => ({
+          time: b.time,
+          value: b.v ?? 0,
+          color:
+            b.c >= b.o
+              ? 'rgba(34, 197, 94, 0.34)'
+              : 'rgba(239, 68, 68, 0.34)',
+        }));
+      volumeSeriesRef.current.setData(volData);
+    }
+
+    // Clear prior price lines cleanly
+    for (const ln of priceLinesRef.current) {
+      try {
+        mainSeries.removePriceLine(ln);
+      } catch {
+        // ignore detached line
+      }
+    }
+    priceLinesRef.current = [];
+
+    const addLine = (
+      price: number | undefined,
+      title: string,
+      color: string,
+      style: LineStyle,
+      width: 1 | 2 = 1
+    ) => {
+      if (typeof price !== 'number' || !Number.isFinite(price) || price <= 0) return;
+      const ln = mainSeries.createPriceLine({
+        price,
+        color,
+        lineWidth: width,
+        lineStyle: style,
+        axisLabelVisible: true,
+        title,
+      });
+      priceLinesRef.current.push(ln);
+    };
+
+    addLine(
+      openBaseline,
+      timeframe === '1D' ? 'Open' : `${timeframe} Start`,
+      'rgba(148, 163, 184, 0.65)',
+      LineStyle.Dashed,
+      1
+    );
+
+    if (tradeOverlays) {
+      addLine(tradeOverlays.entryLow, 'Entry', '#0EA5E9', LineStyle.Dashed, 1);
+      if (
+        typeof tradeOverlays.entryHigh === 'number' &&
+        tradeOverlays.entryHigh !== tradeOverlays.entryLow
+      ) {
+        addLine(tradeOverlays.entryHigh, 'Entry Hi', '#0EA5E9', LineStyle.Dotted, 1);
+      }
+      addLine(tradeOverlays.stopLoss, 'SL', '#EF4444', LineStyle.Dashed, 2);
+      addLine(tradeOverlays.tp1, 'TP1', '#22C55E', LineStyle.Dashed, 1);
+      addLine(tradeOverlays.tp2, 'TP2', '#16A34A', LineStyle.Dashed, 2);
+      addLine(tradeOverlays.demandLow, 'Demand', 'rgba(34,197,94,0.75)', LineStyle.Dotted, 1);
+      addLine(tradeOverlays.supplyHigh, 'Supply', 'rgba(239,68,68,0.75)', LineStyle.Dotted, 1);
+      addLine(tradeOverlays.asianHigh, 'Asia Hi', '#F59E0B', LineStyle.Dotted, 1);
+      addLine(tradeOverlays.asianLow, 'Asia Lo', '#F59E0B', LineStyle.Dotted, 1);
+    }
+
+    const fitSig = `${asset.id}:${timeframe}:${chartMode}:${hasRealOhlc}`;
+    if (fitSignatureRef.current !== fitSig) {
+      fitSignatureRef.current = fitSig;
+      chart.timeScale().fitContent();
+      setIsZoomed(false);
+    }
+  }, [
+    asset.id,
+    asset.price,
+    timeframe,
+    chartMode,
+    hasRealOhlc,
+    hasVolumeBars,
+    normalizedCandles,
+    normalizedLine,
+    openBaseline,
+    tradeOverlays,
+  ]);
+
   const timeframeRange = useMemo(() => {
     const label =
       timeframe === '1D'
@@ -571,13 +740,17 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         ? Math.max(0, Math.min(100, ((asset.price - low) / span) * 100))
         : 50;
 
-    return {
-      label,
-      low,
-      high,
-      pct,
-    };
-  }, [series, asset.chartCandles, asset.price, asset.dayHigh, asset.dayLow, asset.w52Low, asset.w52High, timeframe]);
+    return { label, low, high, pct };
+  }, [
+    series,
+    asset.chartCandles,
+    asset.price,
+    asset.dayHigh,
+    asset.dayLow,
+    asset.w52Low,
+    asset.w52High,
+    timeframe,
+  ]);
 
   const primaryExtraStat = useMemo(() => {
     const blocked = new Set(['Intraday Spread', '52W Position', '52W Midpoint', 'Venue', 'Range']);
@@ -589,11 +762,16 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
     return candidates.find((c) => c.label && c.value && !blocked.has(c.label)) ?? null;
   }, [asset.avgVolLabel, asset.avgVol, asset.peLabel, asset.peValue, asset.capLabel, asset.capValue]);
 
-  const strokeGradId = `chartSplitStroke-${uid}`;
-  const aboveFillId = `chartAboveFill-${uid}`;
-  const belowFillId = `chartBelowFill-${uid}`;
-  const aboveClipId = `chartAboveClip-${uid}`;
-  const belowClipId = `chartBelowClip-${uid}`;
+  const formatVal = (val: number) => {
+    const formatted = val.toLocaleString('en-US', {
+      minimumFractionDigits: asset.decimals,
+      maximumFractionDigits: asset.decimals,
+    });
+    return `${asset.currencyPrefix ?? ''}${formatted}${asset.unitSuffix ?? ''}`;
+  };
+
+  const activeDelta = hoveredReadout ? hoveredReadout.price - openBaseline : 0;
+  const activeDeltaPct = openBaseline ? (activeDelta / openBaseline) * 100 : 0;
 
   return (
     <div className="flex flex-col gap-3">
@@ -667,18 +845,18 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         </div>
 
         <div className="flex flex-wrap items-center gap-2 sm:gap-3">
-          {pinnedIndex !== null && (
+          {isZoomed && (
             <button
               type="button"
               onClick={() => {
-                setPinnedIndex(null);
-                setHoverIndex(null);
+                chartRef.current?.timeScale().fitContent();
+                setIsZoomed(false);
               }}
               className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full liquid-glass-pill text-[11px] font-bold text-[#1C1C1E] dark:text-white hover:opacity-85 transition-opacity"
-              title="Clear pinned chart point"
+              title="Reset chart zoom and scroll"
             >
               <RotateCcw className="w-3 h-3" />
-              Reset point
+              Reset Zoom
             </button>
           )}
 
@@ -709,304 +887,72 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         </div>
       </div>
 
-      {/* Unified Interactive SVG Canvas + Integrated Key Statistics Card */}
+      {/* Unified TradingView Lightweight Charts Canvas + Key Statistics */}
       <div className="liquid-glass-card rounded-2xl p-3 sm:p-4 flex flex-col gap-3">
         <div
           data-no-view-swipe="true"
           className={`relative w-full ${
-            compact ? 'h-56 sm:h-64' : 'h-64 sm:h-72'
-          } flex flex-col justify-between overflow-hidden select-none touch-pan-y`}
+            compact ? 'h-60 sm:h-68' : 'h-72 sm:h-80'
+          } flex flex-col justify-between overflow-hidden select-none`}
         >
-        {/* Range Bounds + Timeframe Span Hint */}
-        <div className="flex items-center justify-between gap-2 text-[10px] font-mono font-semibold tabular-nums text-[#52525A] dark:text-[#B4B4BE] z-10 pointer-events-none">
-          <span>High: {formatVal(maxVal)}</span>
-          <span className="hidden sm:inline">
-            {timeframe} Span: {formatVal(timeframeSummary.startVal)} → {formatVal(timeframeSummary.endVal)}
-          </span>
-          <span>Low: {formatVal(minVal)}</span>
-        </div>
-
-        {/* Floating Tooltip Overlay (visible on hover OR pinned click) */}
-        {activePoint && inspectIndex !== null && (
-          <div
-            className="liquid-glass-strong absolute top-3 z-20 pointer-events-none px-3 py-1.5 rounded-xl shadow-lg text-xs flex flex-col"
-            style={{
-              left: `clamp(12px, calc(${(activePoint.x / 700) * 100}% - 72px), calc(100% - 220px))`,
-            }}
-          >
-            <span className="text-[10px] text-[#52525A] dark:text-[#B4B4BE] font-semibold">
-              {formatTimeHint(inspectIndex)} · vs {timeframe === '1D' ? 'Open' : `${timeframe} Start`}
-            </span>
-            <span className="font-bold text-sm text-[#1C1C1E] dark:text-white tabular-nums font-mono">
-              {formatVal(activePoint.val)}
-            </span>
-            {activeCandle && (
-              <div className="grid grid-cols-2 gap-x-2.5 gap-y-0.5 text-[10px] font-mono tabular-nums text-[#52525A] dark:text-[#B4B4BE] mt-0.5">
-                <span>O: {formatVal(activeCandle.o)}</span>
-                <span>H: {formatVal(activeCandle.h)}</span>
-                <span>L: {formatVal(activeCandle.l)}</span>
-                <span>C: {formatVal(activeCandle.c)}</span>
-                <span className="col-span-2 text-[9.5px] opacity-85">
-                  Rng: {formatVal(Math.max(0, activeCandle.h - activeCandle.l))}
+          {/* Compact Top HUD: OHLC Crosshair Legend / Trade Overlay Pill */}
+          <div className="flex flex-wrap items-center justify-between gap-2 text-[10.5px] font-mono tabular-nums text-[#52525A] dark:text-[#B4C6DA] z-10 pb-1">
+            {hoveredReadout ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-semibold text-[#1C1C1E] dark:text-white">
+                  {formatCrosshairTime(hoveredReadout.timeSec, timeframe)}
+                </span>
+                {typeof hoveredReadout.o === 'number' &&
+                typeof hoveredReadout.h === 'number' &&
+                typeof hoveredReadout.l === 'number' &&
+                typeof hoveredReadout.c === 'number' ? (
+                  <span>
+                    O {formatVal(hoveredReadout.o)} · H {formatVal(hoveredReadout.h)} · L{' '}
+                    {formatVal(hoveredReadout.l)} · C {formatVal(hoveredReadout.c)}
+                  </span>
+                ) : (
+                  <span className="font-bold text-[#1C1C1E] dark:text-white">
+                    {formatVal(hoveredReadout.price)}
+                  </span>
+                )}
+                <span
+                  className={
+                    activeDelta >= 0
+                      ? 'font-bold text-[#0F7033] dark:text-[#4ADE80]'
+                      : 'font-bold text-[#C41C16] dark:text-[#FF6B63]'
+                  }
+                >
+                  ({activeDelta >= 0 ? '+' : ''}
+                  {activeDeltaPct.toFixed(2)}%)
                 </span>
               </div>
-            )}
-            <span
-              className={`text-[11px] font-extrabold tabular-nums font-mono ${
-                activeDelta >= 0
-                  ? 'text-[#0F7033] dark:text-[#4ADE80]'
-                  : 'text-[#C41C16] dark:text-[#FF5A52]'
-              }`}
-            >
-              {activeDelta >= 0 ? '+' : ''}
-              {activeDelta.toFixed(asset.decimals >= 3 ? asset.decimals : 2)} (
-              {activeDeltaPct >= 0 ? '+' : ''}
-              {activeDeltaPct.toFixed(2)}%)
-            </span>
-          </div>
-        )}
-
-        <div className="relative flex-1 min-h-0 flex items-center">
-          {/* Right-side Mid Reference Tick */}
-          {chartMode === 'candles' && (
-            <span className="absolute right-0.5 top-1/2 -translate-y-1/2 z-10 pointer-events-none text-[9px] font-mono tabular-nums text-[#52525A]/80 dark:text-[#B4B4BE]/80 bg-white/55 dark:bg-black/40 px-1 rounded">
-              {formatVal(midVal)}
-            </span>
-          )}
-
-          <svg
-            ref={svgRef}
-            className="w-full h-full cursor-crosshair overflow-visible"
-            viewBox="0 0 700 220"
-            preserveAspectRatio="none"
-            data-chart-mode={chartMode}
-            onPointerMove={(e) => {
-              const idx = resolveIndexFromClientX(e.clientX);
-              if (idx !== null) setHoverIndex(idx);
-            }}
-            onPointerDown={(e) => {
-              const idx = resolveIndexFromClientX(e.clientX);
-              if (idx !== null) {
-                setHoverIndex(idx);
-                setPinnedIndex((prev) => (prev === idx ? null : idx));
-              }
-            }}
-            onPointerLeave={() => setHoverIndex(null)}
-            onTouchStart={(e) => {
-              if (e.touches[0]) {
-                const idx = resolveIndexFromClientX(e.touches[0].clientX);
-                if (idx !== null) {
-                  setHoverIndex(idx);
-                  setPinnedIndex(idx);
-                }
-              }
-            }}
-            onTouchMove={(e) => {
-              if (e.touches[0]) {
-                const idx = resolveIndexFromClientX(e.touches[0].clientX);
-                if (idx !== null) {
-                  setHoverIndex(idx);
-                  setPinnedIndex(idx);
-                }
-              }
-            }}
-            onTouchEnd={() => setHoverIndex(null)}
-          >
-            <defs>
-              <linearGradient
-                id={strokeGradId}
-                gradientUnits="userSpaceOnUse"
-                x1="0"
-                y1="0"
-                x2="0"
-                y2="220"
-              >
-                <stop offset="0%" stopColor="#22C55E" />
-                <stop offset={`${splitPct}%`} stopColor="#22C55E" />
-                <stop offset={`${splitPct}%`} stopColor="#EF4444" />
-                <stop offset="100%" stopColor="#EF4444" />
-              </linearGradient>
-
-              <linearGradient
-                id={aboveFillId}
-                gradientUnits="userSpaceOnUse"
-                x1="0"
-                y1="0"
-                x2="0"
-                y2={String(Math.max(1, openingY))}
-              >
-                <stop offset="0%" stopColor="#22C55E" stopOpacity="0.34" />
-                <stop offset="100%" stopColor="#22C55E" stopOpacity="0.05" />
-              </linearGradient>
-
-              <linearGradient
-                id={belowFillId}
-                gradientUnits="userSpaceOnUse"
-                x1="0"
-                y1={String(openingY)}
-                x2="0"
-                y2="220"
-              >
-                <stop offset="0%" stopColor="#EF4444" stopOpacity="0.05" />
-                <stop offset="100%" stopColor="#EF4444" stopOpacity="0.34" />
-              </linearGradient>
-
-              <clipPath id={aboveClipId}>
-                <rect x="0" y="0" width="700" height={openingY} />
-              </clipPath>
-              <clipPath id={belowClipId}>
-                <rect x="0" y={openingY} width="700" height={Math.max(0, 220 - openingY)} />
-              </clipPath>
-            </defs>
-
-            {/* Technical Price Gridlines */}
-            {[55, 110, 165].map((gy) => (
-              <line
-                key={gy}
-                x1="0"
-                y1={gy}
-                x2="700"
-                y2={gy}
-                stroke="currentColor"
-                className="text-black/8 dark:text-white/10"
-                strokeWidth="0.75"
-                strokeDasharray="2 4"
-              />
-            ))}
-
-            {/* Horizontal Dashed Opening / Timeframe Start Reference Line */}
-            <line
-              x1="0"
-              y1={openingY}
-              x2="700"
-              y2={openingY}
-              stroke="#8E8E98"
-              strokeWidth="1.5"
-              strokeDasharray="3 5"
-              strokeLinecap="round"
-              opacity="0.75"
-            />
-
-            {chartMode === 'line' ? (
-              <>
-                <path
-                  d={baselineAreaPath}
-                  clipPath={`url(#${aboveClipId})`}
-                  fill={`url(#${aboveFillId})`}
-                />
-                <path
-                  d={baselineAreaPath}
-                  clipPath={`url(#${belowClipId})`}
-                  fill={`url(#${belowFillId})`}
-                />
-                <path
-                  d={linePath}
-                  fill="none"
-                  stroke={`url(#${strokeGradId})`}
-                  strokeWidth="2.6"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-                {timeframe === '1D' && asset.marketSessionOpen && !activePoint && (
-                  <circle
-                    cx={lastCoord.x}
-                    cy={lastCoord.y}
-                    r="4.2"
-                    fill={lastAboveOpen ? '#22C55E' : '#EF4444'}
-                    stroke="#FFFFFF"
-                    strokeWidth="1.5"
-                    className="pointer-events-none"
-                  />
-                )}
-              </>
             ) : (
-              <g data-testid="candlestick-series">
-                {/* Active Candle Vertical Spotlight */}
-                {activeCandle && (
-                  <rect
-                    x={activeCandle.x - candleSlotW * 0.45}
-                    y="0"
-                    width={candleSlotW * 0.9}
-                    height="220"
-                    fill="currentColor"
-                    className="text-black/5 dark:text-white/6 pointer-events-none"
-                    rx="2"
-                  />
+              <div className="flex flex-wrap items-center gap-2">
+                <span>
+                  High {formatVal(timeframeRange.high)} · Low {formatVal(timeframeRange.low)}
+                </span>
+                {tradeOverlays?.direction && tradeOverlays.direction !== 'WAIT' && (
+                  <span className="px-1.5 py-0.5 rounded bg-[#0EA5E9]/14 text-[#0284C7] dark:text-[#38BDF8] font-bold">
+                    {tradeOverlays.direction} Plan Overlay
+                  </span>
                 )}
-                {candles.map((c, idx) => {
-                  const bodyTop = Math.min(c.openY, c.closeY);
-                  const rawH = Math.abs(c.closeY - c.openY);
-                  const bodyHeight = Math.max(2.5, rawH);
-                  const fillColor = c.isBull ? '#22C55E' : '#EF4444';
-                  const rimColor = c.isBull ? '#16A34A' : '#DC2626';
-                  const isInspected = inspectIndex === idx;
-                  return (
-                    <g
-                      key={`${c.t}-${idx}`}
-                      opacity={inspectIndex !== null && !isInspected ? 0.68 : 1}
-                    >
-                      {/* High-Low Wick */}
-                      <line
-                        x1={c.x}
-                        y1={c.highY}
-                        x2={c.x}
-                        y2={c.lowY}
-                        stroke={rimColor}
-                        strokeWidth={isInspected ? 2 : 1.35}
-                        strokeLinecap="round"
-                      />
-                      {/* Open-Close Candle Body */}
-                      <rect
-                        x={c.x - c.width / 2}
-                        y={c.isDoji ? bodyTop - 1 : bodyTop}
-                        width={c.width}
-                        height={bodyHeight}
-                        rx="1.5"
-                        fill={fillColor}
-                        stroke={isInspected ? '#FFFFFF' : rimColor}
-                        strokeWidth={isInspected ? 1.25 : 0.75}
-                      />
-                    </g>
-                  );
-                })}
-              </g>
+              </div>
             )}
 
-            {/* Crosshair & Active Tracker Dot */}
-            {activePoint && (
-              <>
-                <line
-                  x1={activePoint.x}
-                  y1="0"
-                  x2={activePoint.x}
-                  y2="220"
-                  stroke="currentColor"
-                  className="text-[#1C1C1E]/45 dark:text-white/55 pointer-events-none"
-                  strokeWidth="1"
-                  strokeDasharray="3,3"
-                />
-                {chartMode === 'line' && (
-                  <circle
-                    cx={activePoint.x}
-                    cy={activePoint.y}
-                    r="5.5"
-                    fill="#FFFFFF"
-                    stroke={activeAboveOpen ? '#16A34A' : '#DC2626'}
-                    strokeWidth="3"
-                    className="pointer-events-none"
-                  />
-                )}
-              </>
+            {isCloseOnlyFallback && (
+              <span className="px-2 py-0.5 rounded-md bg-[#D97706]/15 text-[#9A5A0A] dark:text-[#FBBF24] text-[10px] font-bold">
+                Close-only series (No Exchange OHLC)
+              </span>
             )}
-          </svg>
-        </div>
-
-          {/* Time Axis Labels */}
-          <div className="flex items-center justify-between text-[10px] text-[#52525A] dark:text-[#B4B4BE] font-semibold pt-2 border-t border-black/10 dark:border-white/10 tabular-nums">
-            {axisLabels.map((lbl, idx) => (
-              <span key={`${lbl}-${idx}`}>{lbl}</span>
-            ))}
           </div>
+
+          {/* TradingView Lightweight Charts Canvas Container */}
+          <div
+            ref={hostRef}
+            data-testid={chartMode === 'candles' ? 'candlestick-series' : 'line-series'}
+            data-chart-mode={chartMode}
+            className="relative flex-1 min-h-0 w-full cursor-crosshair"
+          />
         </div>
 
         {/* Key Statistics & Dynamic Timeframe Range Incorporated Directly Into Chart */}

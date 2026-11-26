@@ -67,7 +67,7 @@ export function extractBarsForTf(
   asset: MarketAsset,
   candidates: Timeframe[],
   minBars = 6
-): { bars: CandlePoint[]; timeframe: Timeframe } {
+): { bars: CandlePoint[]; timeframe: Timeframe; isRealOhlc: boolean } {
   for (const tf of candidates) {
     const rawCandles = asset.chartCandles?.[tf];
     if (Array.isArray(rawCandles) && rawCandles.length >= minBars) {
@@ -77,46 +77,74 @@ export function extractBarsForTf(
           Number.isFinite(b.h) &&
           Number.isFinite(b.l) &&
           Number.isFinite(b.c) &&
-          b.c > 0
+          b.c > 0 &&
+          b.h >= b.l
       );
       if (valid.length >= minBars) {
-        return { bars: valid.slice(-120), timeframe: tf };
+        return { bars: valid.slice(-120), timeframe: tf, isRealOhlc: true };
       }
     }
   }
 
-  for (const tf of candidates) {
-    const rawSeries = asset.chartSeries?.[tf];
-    if (Array.isArray(rawSeries) && rawSeries.length >= minBars) {
-      const tsList = asset.chartTimestamps?.[tf];
-      const stepMs = TF_DURATION_MS[tf] ?? 900_000;
-      const out: CandlePoint[] = [];
-      for (let i = 0; i < rawSeries.length; i++) {
-        const c = rawSeries[i];
-        const o = i > 0 ? rawSeries[i - 1] : c;
-        const pad = Math.abs(c - o) * 0.25;
-        out.push({
-          t: tsList?.[i] ?? Date.now() - (rawSeries.length - i) * stepMs,
-          o,
-          h: Math.max(o, c) + pad,
-          l: Math.min(o, c) - pad,
-          c,
-        });
-      }
-      return { bars: out.slice(-120), timeframe: tf };
-    }
-  }
-
-  const p0 = asset.prevClose > 0 ? asset.prevClose : asset.price;
-  const p1 = asset.price;
   return {
-    bars: [
-      { t: Date.now() - 600_000, o: p0, h: Math.max(p0, p1), l: Math.min(p0, p1), c: p0 },
-      { t: Date.now() - 300_000, o: p0, h: Math.max(p0, p1), l: Math.min(p0, p1), c: (p0 + p1) / 2 },
-      { t: Date.now(), o: (p0 + p1) / 2, h: Math.max(p0, p1), l: Math.min(p0, p1), c: p1 },
-    ],
-    timeframe: '1D',
+    bars: [],
+    timeframe: candidates[0] ?? '15m',
+    isRealOhlc: false,
   };
+}
+
+export function computeSetupGrade(params: {
+  direction: IctDirection;
+  inKillzone: boolean;
+  volatilityPassed: boolean;
+  newsBlocked: boolean;
+  confidence: number;
+  realRr: number;
+  htfAligned: boolean;
+}): { setupGrade: 'A+' | 'A' | 'B' | 'WAIT'; isAPlusSetup: boolean } {
+  const {
+    direction,
+    inKillzone,
+    volatilityPassed,
+    newsBlocked,
+    confidence,
+    realRr,
+    htfAligned,
+  } = params;
+  if (direction === 'NEUTRAL') {
+    return { setupGrade: 'WAIT', isAPlusSetup: false };
+  }
+  if (
+    inKillzone &&
+    volatilityPassed &&
+    !newsBlocked &&
+    confidence >= 80 &&
+    realRr >= 2.5 &&
+    htfAligned
+  ) {
+    return { setupGrade: 'A+', isAPlusSetup: true };
+  }
+  if (confidence >= 72 && realRr >= 2.0) {
+    return { setupGrade: 'A', isAPlusSetup: false };
+  }
+  return { setupGrade: 'B', isAPlusSetup: false };
+}
+
+export function resolveUsdExposure(
+  assetId: string,
+  direction: IctDirection
+): 'LONG_USD' | 'SHORT_USD' | undefined {
+  if (direction === 'NEUTRAL') return undefined;
+  const usdBase = assetId === 'USDJPY' || assetId === 'USDCHF' || assetId === 'USDCAD';
+  const usdQuote =
+    assetId === 'EURUSD' ||
+    assetId === 'GBPUSD' ||
+    assetId === 'AUDUSD' ||
+    assetId === 'NZDUSD' ||
+    assetId === 'XAUUSD';
+  if (usdBase) return direction === 'BUY' ? 'LONG_USD' : 'SHORT_USD';
+  if (usdQuote) return direction === 'BUY' ? 'SHORT_USD' : 'LONG_USD';
+  return undefined;
 }
 
 export function computeAtr(bars: CandlePoint[], period = 14): number {
@@ -502,26 +530,45 @@ export function checkLiveSetupValidity(params: {
 //    Used exclusively for BTC/USD and XAU/USD
 // ============================================================================
 
-function resolvePureIctKillzoneLabel(now = new Date()): { label: string; inKillzone: boolean } {
-  const utcHour = now.getUTCHours();
-  const utcMin = now.getUTCMinutes();
-  const utcTotalMin = utcHour * 60 + utcMin;
+function getZonedClockParts(
+  date: Date,
+  timeZone: string
+): { hour: number; minute: number; totalMin: number } {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone,
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(date);
+  const rawHour = Number(parts.find((p) => p.type === 'hour')?.value ?? '0');
+  const hour = rawHour === 24 ? 0 : rawHour;
+  const minute = Number(parts.find((p) => p.type === 'minute')?.value ?? '0');
+  return { hour, minute, totalMin: hour * 60 + minute };
+}
 
-  // NY AM / London Overlap: 12:00–16:00 UTC (19:00–23:00 WIB)
-  if (utcTotalMin >= 12 * 60 && utcTotalMin < 16 * 60) {
-    return { label: 'NY AM / London Overlap', inKillzone: true };
+function resolvePureIctKillzoneLabel(now = new Date()): { label: string; inKillzone: boolean } {
+  const london = getZonedClockParts(now, 'Europe/London');
+  const ny = getZonedClockParts(now, 'America/New_York');
+
+  // NY AM Killzone (08:00–11:00 NY local time, automatically tracks EST/EDT DST)
+  if (ny.totalMin >= 8 * 60 && ny.totalMin < 11 * 60) {
+    const isLondonOverlap = london.totalMin >= 12 * 60 && london.totalMin < 17 * 60;
+    return {
+      label: isLondonOverlap ? 'NY AM / London Overlap' : 'NY AM Killzone',
+      inKillzone: true,
+    };
   }
-  // London Open Killzone: 07:00–10:00 UTC (14:00–17:00 WIB)
-  if (utcTotalMin >= 7 * 60 && utcTotalMin < 10 * 60) {
+  // London Open Killzone (07:00–10:00 London local time, automatically tracks GMT/BST DST)
+  if (london.totalMin >= 7 * 60 && london.totalMin < 10 * 60) {
     return { label: 'London Open Killzone', inKillzone: true };
   }
-  // Asia Session Range: 00:00–05:00 UTC (07:00–12:00 WIB)
-  if (utcTotalMin >= 0 && utcTotalMin < 5 * 60) {
-    return { label: 'Asia Session Range', inKillzone: false };
-  }
-  // NY PM Silver Bullet: 18:00–20:00 UTC (01:00–03:00 WIB)
-  if (utcTotalMin >= 18 * 60 && utcTotalMin < 20 * 60) {
+  // NY PM Silver Bullet (13:30–16:00 NY local time)
+  if (ny.totalMin >= 13 * 60 + 30 && ny.totalMin < 16 * 60) {
     return { label: 'NY PM Silver Bullet', inKillzone: true };
+  }
+  // Asian Session Range (19:00–00:00 NY local time)
+  if (ny.totalMin >= 19 * 60) {
+    return { label: 'Asia Session Range', inKillzone: false };
   }
   return { label: 'Inter-Session Consolidation', inKillzone: false };
 }
@@ -610,7 +657,50 @@ function computePureIctSignalForXauBtc(
     ? [preferredTimeframe, ...ICT_TIMEFRAME_PRIORITY.filter((tf) => tf !== preferredTimeframe)]
     : ICT_TIMEFRAME_PRIORITY;
 
-  const { bars: rawBars, timeframe } = extractBarsForTf(asset, candidates, 12);
+  const { bars: rawBars, timeframe, isRealOhlc } = extractBarsForTf(asset, candidates, 12);
+  if (!isRealOhlc || rawBars.length < 12) {
+    const { label: killzone } = resolvePureIctKillzoneLabel();
+    const atr15mMetrics = compute15mAtrMetrics(asset, asset.price);
+    const warmingPrice = formatPriceWithAsset(asset.price, asset);
+    return {
+      assetId: asset.id,
+      symbol: asset.symbol,
+      name: asset.shortName,
+      direction: 'NEUTRAL',
+      confidence: 20,
+      setupName: 'WAIT · Warming Real OHLCV Bars',
+      pdZone: 'Equilibrium',
+      entryZone: warmingPrice,
+      stopLoss: warmingPrice,
+      targetPrice: warmingPrice,
+      riskReward: 'WAIT',
+      triggers: ['Awaiting real 15m/5m OHLC bars'],
+      timeframe,
+      currentPrice: asset.price,
+      decimals: asset.decimals,
+      currencyPrefix: asset.currencyPrefix,
+      unitSuffix: asset.unitSuffix,
+      evaluatedAt: asset.updatedAtEpoch ?? Date.now(),
+      htfBias: 'Ranging',
+      killzone,
+      sessionLabel: killzone,
+      assetClassLabel: atr15mMetrics.assetClassLabel,
+      volatilityThresholdPct: atr15mMetrics.minPct,
+      volatilityMaxPct: atr15mMetrics.maxPct,
+      volatilityStatus: 'warming',
+      volatilityPassed: false,
+      atrSource: 'warming',
+      executionStatus: 'standby',
+      candleStageLabel: 'Awaiting Real OHLC',
+      isClosedCandleConfirmed: false,
+      isRealOhlc: false,
+      setupGrade: 'WAIT',
+      isAPlusSetup: false,
+      invalidationTrigger: 'Hold flat until real OHLC candlestick bars finish syncing.',
+      invalidationNote: 'Awaiting verified multi-bar OHLC data (synthetic candle fallback disabled).',
+    };
+  }
+
   const {
     evalBars: closedOrLiveBars,
     isClosedCandleConfirmed,
@@ -1103,6 +1193,20 @@ function computePureIctSignalForXauBtc(
 
   const projectedLevelsSummary = `Ref Zone ${formatBand(entryLow, entryHigh, asset)} · SL Ref ${formatPriceWithAsset(slVal, asset)} · Draw ${formatPriceWithAsset(tp2Val, asset)}`;
 
+  const { setupGrade, isAPlusSetup } = computeSetupGrade({
+    direction,
+    inKillzone,
+    volatilityPassed,
+    newsBlocked,
+    confidence,
+    realRr,
+    htfAligned:
+      direction === 'BUY'
+        ? htf.bias === 'Bullish' || htf.bullDemandAligned
+        : htf.bias === 'Bearish' || htf.bearSupplyAligned,
+  });
+  const usdExposure = resolveUsdExposure(asset.id, direction);
+
   return {
     assetId: asset.id,
     symbol: asset.symbol,
@@ -1154,6 +1258,10 @@ function computePureIctSignalForXauBtc(
     candleStageLabel,
     newsBlackoutActive: newsBlackout.active,
     newsBlackoutReason: newsBlackout.reason,
+    isRealOhlc: true,
+    setupGrade,
+    isAPlusSetup,
+    usdExposure,
   };
 }
 
@@ -1167,36 +1275,42 @@ function resolveCurrentSession(now = new Date()): {
   killzone: 'london' | 'ny' | 'asia' | 'off';
   inKillzone: boolean;
 } {
-  // WIB = UTC + 7
-  const wibHour = (now.getUTCHours() + 7) % 24;
-  const wibMin = now.getUTCMinutes();
-  const wibTotalMin = wibHour * 60 + wibMin;
+  const london = getZonedClockParts(now, 'Europe/London');
+  const ny = getZonedClockParts(now, 'America/New_York');
 
-  if (wibTotalMin >= 7 * 60 && wibTotalMin < 12 * 60) {
-    return { label: 'Asian Range Window (07:00–12:00 WIB)', killzone: 'asia', inKillzone: false };
+  // NY Killzone (08:00–11:00 NY local, tracks EST/EDT automatically)
+  if (ny.totalMin >= 8 * 60 && ny.totalMin < 11 * 60) {
+    return { label: 'New York Killzone (08:00–11:00 NY DST)', killzone: 'ny', inKillzone: true };
   }
-  if (wibTotalMin >= 14 * 60 && wibTotalMin < 17 * 60) {
-    return { label: 'London Killzone (14:00–17:00 WIB)', killzone: 'london', inKillzone: true };
+  // London Killzone (07:00–10:00 London local, tracks GMT/BST automatically)
+  if (london.totalMin >= 7 * 60 && london.totalMin < 10 * 60) {
+    return { label: 'London Killzone (07:00–10:00 LDN DST)', killzone: 'london', inKillzone: true };
   }
-  if (wibTotalMin >= 20 * 60 + 30 && wibTotalMin < 23 * 60) {
-    return { label: 'New York Killzone (20:30–23:00 WIB)', killzone: 'ny', inKillzone: true };
+  // NY PM Silver Bullet (13:30–16:00 NY local)
+  if (ny.totalMin >= 13 * 60 + 30 && ny.totalMin < 16 * 60) {
+    return { label: 'NY PM Silver Bullet (13:30–16:00 NY DST)', killzone: 'ny', inKillzone: true };
+  }
+  // Asian Session Range (19:00–00:00 NY local, tracks DST cleanly)
+  if (ny.totalMin >= 19 * 60) {
+    return { label: 'Asian Range Window (19:00–00:00 NY)', killzone: 'asia', inKillzone: false };
   }
   return { label: 'Inter-Session Transition (Outside Killzone)', killzone: 'off', inKillzone: false };
 }
 
 function isKillzoneUtcTimestamp(tsMs: number): boolean {
   const d = new Date(tsMs);
-  const wibTotal = ((d.getUTCHours() + 7) % 24) * 60 + d.getUTCMinutes();
-  const inLondon = wibTotal >= 14 * 60 && wibTotal <= 17 * 60 + 15;
-  const inNy = wibTotal >= 20 * 60 + 30 && wibTotal <= 23 * 60 + 15;
-  return inLondon || inNy;
+  const london = getZonedClockParts(d, 'Europe/London');
+  const ny = getZonedClockParts(d, 'America/New_York');
+  const inLondon = london.totalMin >= 7 * 60 && london.totalMin <= 10 * 60 + 15;
+  const inNyAm = ny.totalMin >= 8 * 60 && ny.totalMin <= 11 * 60 + 15;
+  const inNyPm = ny.totalMin >= 13 * 60 + 30 && ny.totalMin <= 16 * 60;
+  return inLondon || inNyAm || inNyPm;
 }
 
 function isAsianSessionUtcTimestamp(tsMs: number): boolean {
-  const d = new Date(tsMs);
-  const utcTotal = d.getUTCHours() * 60 + d.getUTCMinutes();
-  // 00:00–05:00 UTC == 07:00–12:00 WIB == 19:00–00:00 EST
-  return utcTotal >= 0 && utcTotal < 5 * 60;
+  const ny = getZonedClockParts(new Date(tsMs), 'America/New_York');
+  // 19:00–00:00 America/New_York automatically shifts for EST/EDT
+  return ny.totalMin >= 19 * 60;
 }
 
 interface HtfAnalysis {
@@ -1300,17 +1414,64 @@ function computeAsianSweepIctSignalForFx(
   enforceNewsBlackout = true
 ): IctSignalAnalysis {
   const sessionInfo = resolveCurrentSession();
-  const { bars: rawMtfBars, timeframe: mtfTf } = extractBarsForTf(
+  const { bars: rawMtfBars, timeframe: mtfTf, isRealOhlc: hasRealMtf } = extractBarsForTf(
     asset,
     preferredTimeframe === '30m' ? ['30m', '15m', '1h', '1D'] : ['15m', '30m', '1h', '1D'],
     6
   );
-  const mtfSplit = splitConfirmedClosedBars(rawMtfBars, mtfTf);
-  const mtfBars = mtfSplit.evalBars;
-
   const ltfPriority: Timeframe[] =
     preferredTimeframe === '1m' ? ['1m', '5m', '15m', '1D'] : ['5m', '1m', '15m', '1D'];
-  const { bars: rawLtfBars, timeframe: ltfTf } = extractBarsForTf(asset, ltfPriority, 6);
+  const { bars: rawLtfBars, timeframe: ltfTf, isRealOhlc: hasRealLtf } = extractBarsForTf(
+    asset,
+    ltfPriority,
+    6
+  );
+
+  if (!hasRealMtf || !hasRealLtf || rawMtfBars.length < 6 || rawLtfBars.length < 6) {
+    const atr15mMetrics = compute15mAtrMetrics(asset, asset.price);
+    const warmingPrice = formatPriceWithAsset(asset.price, asset);
+    return {
+      assetId: asset.id,
+      symbol: asset.symbol,
+      name: asset.shortName,
+      direction: 'NEUTRAL',
+      confidence: 20,
+      setupName: 'WAIT · Warming Real OHLCV Bars',
+      pdZone: 'Equilibrium',
+      entryZone: `Standby (${warmingPrice})`,
+      stopLoss: warmingPrice,
+      targetPrice: warmingPrice,
+      riskReward: 'WAIT',
+      triggers: ['Awaiting real 15m/5m OHLC bars'],
+      timeframe: ltfTf,
+      currentPrice: asset.price,
+      decimals: asset.decimals,
+      currencyPrefix: asset.currencyPrefix,
+      unitSuffix: asset.unitSuffix,
+      evaluatedAt: asset.updatedAtEpoch ?? Date.now(),
+      htfBias: 'Ranging',
+      killzone: sessionInfo.label,
+      sessionLabel: sessionInfo.label,
+      sweepMssStatus: 'Awaiting verified multi-bar OHLC candles for Asian Range & MSS analysis.',
+      assetClassLabel: atr15mMetrics.assetClassLabel,
+      volatilityThresholdPct: atr15mMetrics.minPct,
+      volatilityMaxPct: atr15mMetrics.maxPct,
+      volatilityStatus: 'warming',
+      volatilityPassed: false,
+      atrSource: 'warming',
+      executionStatus: 'standby',
+      candleStageLabel: 'Awaiting Real OHLC',
+      isClosedCandleConfirmed: false,
+      isRealOhlc: false,
+      setupGrade: 'WAIT',
+      isAPlusSetup: false,
+      invalidationTrigger: 'Hold flat until real OHLC candlestick bars finish syncing.',
+      invalidationNote: 'Awaiting verified multi-bar OHLC data (synthetic candle fallback disabled).',
+    };
+  }
+
+  const mtfSplit = splitConfirmedClosedBars(rawMtfBars, mtfTf);
+  const mtfBars = mtfSplit.evalBars;
   const ltfSplit = splitConfirmedClosedBars(rawLtfBars, ltfTf);
   const ltfBars = ltfSplit.evalBars;
 
@@ -1782,6 +1943,20 @@ function computeAsianSweepIctSignalForFx(
 
   const projectedLevelsSummary = `Asian ${formatBand(asianLow, asianHigh, asset)} · SL Ref ${formatPriceWithAsset(slVal, asset)} · Pool ${formatPriceWithAsset(tp2Val, asset)}`;
 
+  const { setupGrade, isAPlusSetup } = computeSetupGrade({
+    direction,
+    inKillzone: sessionInfo.inKillzone,
+    volatilityPassed,
+    newsBlocked,
+    confidence,
+    realRr: rrRatio,
+    htfAligned:
+      direction === 'BUY'
+        ? htf.bias === 'Bullish' || htf.bullDemandAligned
+        : htf.bias === 'Bearish' || htf.bearSupplyAligned,
+  });
+  const usdExposure = resolveUsdExposure(asset.id, direction);
+
   return {
     assetId: asset.id,
     symbol: asset.symbol,
@@ -1845,6 +2020,10 @@ function computeAsianSweepIctSignalForFx(
     candleStageLabel: ltfSplit.candleStageLabel,
     newsBlackoutActive: newsBlackout.active,
     newsBlackoutReason: newsBlackout.reason,
+    isRealOhlc: true,
+    setupGrade,
+    isAPlusSetup,
+    usdExposure,
   };
 }
 

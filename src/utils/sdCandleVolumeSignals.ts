@@ -12,15 +12,39 @@ import {
   checkMacroNewsBlackout,
   compute15mAtrMetrics,
   computeAtr,
+  computeSetupGrade,
+  detectSwingStructureBias,
   extractBarsForTf,
   findUnmitigatedFvgAndOb,
   formatBand,
   formatPriceWithAsset,
   getAssetStopFloorBuffer,
   isIctEligibleAsset,
+  resolveUsdExposure,
   splitConfirmedClosedBars,
   TF_BAR_MINUTES,
 } from './ictSignals';
+
+function isSdcvActiveKillzone(now = new Date()): boolean {
+  const toMin = (tz: string) => {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz,
+      hour12: false,
+      hour: '2-digit',
+      minute: '2-digit',
+    }).formatToParts(now);
+    const h = Number(parts.find((p) => p.type === 'hour')?.value ?? '0') % 24;
+    const m = Number(parts.find((p) => p.type === 'minute')?.value ?? '0');
+    return h * 60 + m;
+  };
+  const londonMin = toMin('Europe/London');
+  const nyMin = toMin('America/New_York');
+  return (
+    (londonMin >= 7 * 60 && londonMin < 10 * 60) ||
+    (nyMin >= 8 * 60 && nyMin < 11 * 60) ||
+    (nyMin >= 13 * 60 + 30 && nyMin < 16 * 60)
+  );
+}
 
 const SD_TF_PRIORITY: Timeframe[] = ['15m', '1h', '30m', '5m', '4h', '1m', '1D'];
 
@@ -268,7 +292,62 @@ export function computeSdCandleVolumeSignal(
     ? [preferredTimeframe, ...SD_TF_PRIORITY.filter((tf) => tf !== preferredTimeframe)]
     : SD_TF_PRIORITY;
 
-  const { bars: rawBars, timeframe } = extractBarsForTf(asset, candidates, 10);
+  const { bars: rawBars, timeframe, isRealOhlc } = extractBarsForTf(asset, candidates, 10);
+  if (!isRealOhlc || rawBars.length < 10) {
+    const atr15m = compute15mAtrMetrics(asset, asset.price);
+    const warmingPrice = formatPriceWithAsset(asset.price, asset);
+    return {
+      assetId: asset.id,
+      symbol: asset.symbol,
+      name: asset.shortName,
+      assetClassLabel: atr15m.assetClassLabel,
+      direction: 'NEUTRAL',
+      confidence: 20,
+      timeframe,
+      currentPrice: asset.price,
+      decimals: asset.decimals,
+      currencyPrefix: asset.currencyPrefix,
+      unitSuffix: asset.unitSuffix,
+      evaluatedAt: asset.updatedAtEpoch ?? Date.now(),
+      zoneBias: 'Mid-Range',
+      zoneStatus: 'Mid-Range',
+      demandZone: '—',
+      supplyZone: '—',
+      candlePattern: 'Awaiting Real OHLC',
+      candleTone: 'neutral',
+      candleDetail: 'Waiting for real multi-bar OHLC candlestick history to load.',
+      volumeRatio: 1,
+      volumeState: 'Normal',
+      volumeSource: 'Tick-Range Effort',
+      entryZone: `Standby (${warmingPrice})`,
+      stopLoss: '—',
+      tp1: '—',
+      tp2: '—',
+      riskReward: 'WAIT',
+      atr15mPct: atr15m.atr15mPct,
+      volatilityMinPct: atr15m.minPct,
+      volatilityMaxPct: atr15m.maxPct,
+      volatilityStatus: 'warming',
+      volatilityPassed: false,
+      atrSource: 'warming',
+      executionStatus: 'standby',
+      projectedLevelsSummary: `Warming real ${timeframe} OHLCV bars for ${asset.symbol}`,
+      invalidationTrigger: 'Hold flat until real OHLC candlestick bars finish syncing.',
+      actionSummary: 'WAIT · Warming Real OHLCV Bars — synthetic fallback candles disabled.',
+      triggers: [
+        'Awaiting Real OHLC',
+        'Supply & Demand Warming',
+        'Tick-Range Effort Pending',
+        'Warming 15m Bars',
+      ],
+      isClosedCandleConfirmed: false,
+      candleStageLabel: 'Awaiting Real OHLC',
+      isRealOhlc: false,
+      setupGrade: 'WAIT',
+      isAPlusSetup: false,
+    };
+  }
+
   const {
     evalBars: closedOrLiveBars,
     isClosedCandleConfirmed,
@@ -478,6 +557,25 @@ export function computeSdCandleVolumeSignal(
 
   const projectedLevelsSummary = `Ref Zone ${formatBand(entryLow, entryHigh, asset)} · SL Ref ${formatPriceWithAsset(slVal, asset)} · Opposing ${formatPriceWithAsset(tp2Val, asset)}`;
 
+  const htfSample = extractBarsForTf(asset, ['1h', '4h', '1D'], 6);
+  const htfBias = htfSample.isRealOhlc ? detectSwingStructureBias(htfSample.bars, currentPrice) : 'Ranging';
+  const htfAligned =
+    direction === 'BUY'
+      ? htfBias === 'Bullish'
+      : direction === 'SELL'
+        ? htfBias === 'Bearish'
+        : false;
+  const { setupGrade, isAPlusSetup } = computeSetupGrade({
+    direction,
+    inKillzone: isSdcvActiveKillzone(),
+    volatilityPassed,
+    newsBlocked,
+    confidence,
+    realRr: rr,
+    htfAligned,
+  });
+  const usdExposure = resolveUsdExposure(asset.id, direction);
+
   return {
     assetId: asset.id,
     symbol: asset.symbol,
@@ -529,6 +627,10 @@ export function computeSdCandleVolumeSignal(
     candleStageLabel,
     newsBlackoutActive: newsBlackout.active,
     newsBlackoutReason: newsBlackout.reason,
+    isRealOhlc: true,
+    setupGrade,
+    isAPlusSetup,
+    usdExposure,
   };
 }
 

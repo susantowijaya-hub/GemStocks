@@ -1108,13 +1108,13 @@ export function computeUnifiedMarketPulse(params: {
     50 + Math.max(-45, Math.min(45, activeSignal.score))
   );
 
-  // Unified 4-vector composite blending macro Risk-On/Off, Vol & Cross-Asset Fear/Greed,
-  // NLP headline sentiment, and active instrument technicals
+  // Unified 4-vector composite blending macro Risk-On/Off (36%), Vol & Cross-Asset Fear/Greed (28%),
+  // NLP headline sentiment (8% to avoid headline keyword noise), and active instrument technicals (28%)
   const compositeScore = clamp0100(
-    riskRegime.score * 0.30 +
-      fearGreedScore * 0.25 +
-      clamp0100(headlineSentimentScore) * 0.20 +
-      (activeTechScore * 0.65 + activeFearGreed.score * 0.35) * 0.25
+    riskRegime.score * 0.36 +
+      fearGreedScore * 0.28 +
+      clamp0100(headlineSentimentScore) * 0.08 +
+      (activeTechScore * 0.65 + activeFearGreed.score * 0.35) * 0.28
   );
 
   let stanceLabel: RiskRegimeStatus = 'Neutral';
@@ -1275,6 +1275,10 @@ export function computeStockTradeStrategy(stock: StockMover): StockTradePlan {
       supplyZoneLabel,
       bandarFlowBias,
       executionNote: `BUY limit/market near ${formatStockCurrencyValue(entryPrice, cur)} on ${bandarFlowBias}; take 50% at ${formatStockCurrencyValue(tp1, cur)} (Supply), trail runner to ${formatStockCurrencyValue(tp2, cur)}, SL below demand at ${formatStockCurrencyValue(stopLoss, cur)}.`,
+      demandLowNum: demandLow,
+      demandHighNum: demandHigh,
+      supplyLowNum: supplyLow,
+      supplyHighNum: supplyHigh,
     };
   }
 
@@ -1306,6 +1310,10 @@ export function computeStockTradeStrategy(stock: StockMover): StockTradePlan {
       supplyZoneLabel,
       bandarFlowBias,
       executionNote: `SELL / Take-Profit near Supply ${formatStockCurrencyValue(entryPrice, cur)} on distribution flow; scale down into ${formatStockCurrencyValue(tp1, cur)} & Demand ${formatStockCurrencyValue(tp2, cur)}, hard SL above ${formatStockCurrencyValue(stopLoss, cur)}.`,
+      demandLowNum: demandLow,
+      demandHighNum: demandHigh,
+      supplyLowNum: supplyLow,
+      supplyHighNum: supplyHigh,
     };
   }
 
@@ -1331,6 +1339,10 @@ export function computeStockTradeStrategy(stock: StockMover): StockTradePlan {
     supplyZoneLabel,
     bandarFlowBias,
     executionNote: `WAIT mid-range: only place BUY limit inside Demand ${demandZoneLabel} on volume/foreign confirmation (TP ${formatStockCurrencyValue(tp1, cur)}, SL ${formatStockCurrencyValue(stopLoss, cur)}), or sell rallies into ${supplyZoneLabel}.`,
+    demandLowNum: demandLow,
+    demandHighNum: demandHigh,
+    supplyLowNum: supplyLow,
+    supplyHighNum: supplyHigh,
   };
 }
 

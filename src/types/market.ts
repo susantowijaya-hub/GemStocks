@@ -109,9 +109,13 @@ export interface IctSignalAnalysis {
   tp2Num?: number;
   tp3Num?: number;
   isClosedCandleConfirmed?: boolean;
-  candleStageLabel?: 'Confirmed Close' | 'Forming Preview';
+  candleStageLabel?: 'Confirmed Close' | 'Forming Preview' | 'Awaiting Real OHLC';
   newsBlackoutActive?: boolean;
   newsBlackoutReason?: string;
+  isRealOhlc?: boolean;
+  setupGrade?: 'A+' | 'A' | 'B' | 'WAIT';
+  isAPlusSetup?: boolean;
+  usdExposure?: 'LONG_USD' | 'SHORT_USD';
 }
 
 export interface SdCandleVolumeSignal {
@@ -159,9 +163,13 @@ export interface SdCandleVolumeSignal {
   tp1Num?: number;
   tp2Num?: number;
   isClosedCandleConfirmed?: boolean;
-  candleStageLabel?: 'Confirmed Close' | 'Forming Preview';
+  candleStageLabel?: 'Confirmed Close' | 'Forming Preview' | 'Awaiting Real OHLC';
   newsBlackoutActive?: boolean;
   newsBlackoutReason?: string;
+  isRealOhlc?: boolean;
+  setupGrade?: 'A+' | 'A' | 'B' | 'WAIT';
+  isAPlusSetup?: boolean;
+  usdExposure?: 'LONG_USD' | 'SHORT_USD';
 }
 
 export type WatchlistCategory =
@@ -364,6 +372,29 @@ export interface StockTradePlan {
   supplyZoneLabel: string;
   bandarFlowBias: string;
   executionNote: string;
+  demandLowNum?: number;
+  demandHighNum?: number;
+  supplyLowNum?: number;
+  supplyHighNum?: number;
+  ema20Num?: number;
+  ema50Num?: number;
+  trendFilterLabel?: 'Uptrend (EMA20 > EMA50)' | 'Downtrend (EMA20 < EMA50)' | 'Neutral';
+}
+
+export interface ChartTradeOverlays {
+  symbolLabel?: string;
+  direction?: 'BUY' | 'SELL' | 'WAIT';
+  entryLow?: number;
+  entryHigh?: number;
+  stopLoss?: number;
+  tp1?: number;
+  tp2?: number;
+  demandLow?: number;
+  demandHigh?: number;
+  supplyLow?: number;
+  supplyHigh?: number;
+  asianHigh?: number;
+  asianLow?: number;
 }
 
 export interface StockMover {
@@ -601,6 +632,13 @@ export interface PriceAlertItem {
   ictTimeframe?: Timeframe;
   confidence?: number;
   outcomeStatus?: 'pending' | 'win' | 'be' | 'loss';
+  autoGraded?: boolean;
+  outcomeGradedAt?: number;
+  entryLowNum?: number;
+  entryHighNum?: number;
+  stopLossNum?: number;
+  tp1Num?: number;
+  tp2Num?: number;
   bandarFromPhase?: BandarmologyPhase;
   bandarToPhase?: BandarmologyPhase;
   bandarScore?: number;

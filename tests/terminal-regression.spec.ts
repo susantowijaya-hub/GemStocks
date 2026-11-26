@@ -742,7 +742,7 @@ test.describe('Stocks Terminal E2E & Visual Contrast Regression', () => {
     await chartToggle.getByRole('button', { name: 'Candles' }).click();
     const candleGroup = page.getByTestId('candlestick-series');
     await expect(candleGroup).toBeVisible();
-    expect(await candleGroup.locator('rect').count()).toBeGreaterThanOrEqual(4);
+    expect(await candleGroup.locator('canvas').count()).toBeGreaterThanOrEqual(1);
     await chartToggle.getByRole('button', { name: 'Line' }).click();
     await expect(candleGroup).toHaveCount(0);
 
@@ -1060,7 +1060,9 @@ test.describe('Stocks Terminal E2E & Visual Contrast Regression', () => {
     const modalChartToggle = modal.getByTestId('chart-type-toggle');
     await expect(modalChartToggle).toBeVisible({ timeout: 15_000 });
     await modalChartToggle.getByRole('button', { name: 'Candles' }).click();
-    await expect(modal.getByTestId('candlestick-series')).toBeVisible();
+    const modalCandles = modal.getByTestId('candlestick-series');
+    await expect(modalCandles).toBeVisible();
+    expect(await modalCandles.locator('canvas').count()).toBeGreaterThanOrEqual(1);
     await modal.getByRole('button', { name: 'Close chart modal' }).click();
     await expect(modal).toHaveCount(0);
 

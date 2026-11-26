@@ -277,10 +277,9 @@ export function useLiveMarket() {
   }, []);
 
   /**
-   * Adaptive jitter-buffer + outlier guard + exponential moving average smoother.
-   * - Closed markets snap directly to official settlement price with zero lag/drift.
-   * - Single-tick spikes deviating sharply without confirmation are buffered until a 2nd tick confirms.
-   * - Rapid live oscillations are smoothed over a 5-sample median/EMA blend.
+   * Live tick validator + outlier spike guard.
+   * - Closed markets and normal live ticks snap directly to incoming spot price with zero EMA damping lag.
+   * - Single-tick flash spikes deviating > 2.5%–3.5% from rolling median are held 1 tick until a 2nd sample confirms.
    */
   const smoothTickPrice = useCallback(
     (
@@ -319,7 +318,9 @@ export function useLiveMarket() {
           pending && Math.abs(incomingPrice - pending.price) / Math.max(1e-6, pending.price) < 0.015;
         if (!matchesPending) {
           pendingOutlierRef.current[assetId] = { price: incomingPrice, count: 1 };
-          return Number((emaPriceRef.current[assetId] ?? median).toFixed(decimals));
+          return currentDisplayPrice > 0
+            ? Number(currentDisplayPrice.toFixed(decimals))
+            : Number(median.toFixed(decimals));
         }
         // 2nd tick confirmed breakout: reset buffer cleanly to new price regime
         delete pendingOutlierRef.current[assetId];
@@ -329,18 +330,10 @@ export function useLiveMarket() {
       }
 
       delete pendingOutlierRef.current[assetId];
-      const nextWindow = [...window.slice(-(JITTER_WINDOW_SIZE - 1)), incomingPrice];
-      tickWindowRef.current[assetId] = nextWindow;
+      tickWindowRef.current[assetId] = [...window.slice(-(JITTER_WINDOW_SIZE - 1)), incomingPrice];
+      emaPriceRef.current[assetId] = incomingPrice;
 
-      const prevEma = emaPriceRef.current[assetId] ?? median;
-      // Blend trimmed window median (noise suppressor) + incoming tick with responsive alpha
-      const trimmedMedian = computeMedian(nextWindow);
-      const targetSample = 0.68 * incomingPrice + 0.32 * trimmedMedian;
-      const alpha = nextWindow.length <= 2 ? 0.8 : 0.62;
-      const smoothed = alpha * targetSample + (1 - alpha) * prevEma;
-      emaPriceRef.current[assetId] = smoothed;
-
-      return Number(smoothed.toFixed(decimals));
+      return Number(incomingPrice.toFixed(decimals));
     },
     []
   );
