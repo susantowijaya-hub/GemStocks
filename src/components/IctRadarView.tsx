@@ -31,14 +31,21 @@ import {
   Asset5mVolatility,
   ChartTradeOverlays,
   EconomicEvent,
+  IctExecutionPosture,
   IctSignalAnalysis,
   MarketAsset,
   PriceAlertItem,
   SdCandleVolumeSignal,
+  SyncedRadarConfig,
   Timeframe,
 } from '../types/market';
 import { formatAssetPrice } from '../utils/formatters';
-import { computeIctSignal, isIctEligibleAsset, scanAllIctSignals } from '../utils/ictSignals';
+import {
+  computeIctSignal,
+  evaluateLiveExecutionPosture,
+  isIctEligibleAsset,
+  scanAllIctSignals,
+} from '../utils/ictSignals';
 import {
   computeSdCandleVolumeSignal,
   scanAllSdCandleVolumeSignals,
@@ -56,12 +63,19 @@ interface IctRadarViewProps {
     timeframe?: Timeframe,
     enforceVol?: boolean,
     enforceNews?: boolean
-  ) => number;
+  ) => number | Promise<number>;
   onTriggerIctAlert: (signal: IctSignalAnalysis, strategy?: 'ict' | 'sdcv') => void;
   onLoadTimeframe?: (assetId: string, tf: Timeframe) => void;
   onInspectChart?: (assetId: string, overlays: ChartTradeOverlays, tf: Timeframe) => void;
   onMarkAlertRead?: (id: string) => void;
   onUpdateAlertOutcome?: (id: string, outcome: 'pending' | 'win' | 'be' | 'loss') => void;
+  onSyncRadarConfig?: (config: SyncedRadarConfig) => void;
+  jumpTarget?: {
+    assetId: string;
+    strategy?: 'ict' | 'sdcv';
+    timeframe?: Timeframe;
+    nonce: number;
+  } | null;
   flashMap?: Record<string, 'gain' | 'loss'>;
   volatility5mMap?: Record<string, Asset5mVolatility>;
   searchQuery?: string;
@@ -138,30 +152,300 @@ function loadRadarPrefs(): RadarPrefs {
   }
 }
 
-function getDirectionBadgeStyle(direction: IctSignalAnalysis['direction']): {
-  label: 'BUY' | 'SELL' | 'WAIT';
+type DirectionalBias = 'BUY' | 'SELL' | 'NEUTRAL';
+
+function resolveIctExpectedBias(sig: IctSignalAnalysis): DirectionalBias {
+  if (sig.direction === 'BUY') return 'BUY';
+  if (sig.direction === 'SELL') return 'SELL';
+
+  const statusLower = `${sig.sweepMssStatus ?? ''} ${sig.setupName ?? ''}`.toLowerCase();
+  const bothSwept = statusLower.includes('both sides');
+  if (!bothSwept) {
+    if (
+      statusLower.includes('ssl swept') ||
+      statusLower.includes('asian low swept') ||
+      statusLower.includes('bullish mss') ||
+      statusLower.includes('bullish fvg')
+    ) {
+      return 'BUY';
+    }
+    if (
+      statusLower.includes('bsl swept') ||
+      statusLower.includes('asian high swept') ||
+      statusLower.includes('bearish mss') ||
+      statusLower.includes('bearish fvg')
+    ) {
+      return 'SELL';
+    }
+  }
+
+  const targetUpper = (sig.liquidityTarget ?? '').trim().toUpperCase();
+  if (targetUpper.startsWith('BSL')) return 'BUY';
+  if (targetUpper.startsWith('SSL')) return 'SELL';
+
+  if (
+    typeof sig.tp2Num === 'number' &&
+    typeof sig.stopLossNum === 'number' &&
+    Number.isFinite(sig.tp2Num) &&
+    Number.isFinite(sig.stopLossNum) &&
+    sig.tp2Num !== sig.stopLossNum
+  ) {
+    return sig.tp2Num > sig.stopLossNum ? 'BUY' : 'SELL';
+  }
+
+  if (sig.htfBias === 'Bullish') return 'BUY';
+  if (sig.htfBias === 'Bearish') return 'SELL';
+  if (sig.pdZone === 'Discount') return 'BUY';
+  if (sig.pdZone === 'Premium') return 'SELL';
+  return 'NEUTRAL';
+}
+
+function resolveSdcvExpectedBias(sig: SdCandleVolumeSignal): DirectionalBias {
+  if (sig.direction === 'BUY') return 'BUY';
+  if (sig.direction === 'SELL') return 'SELL';
+  if (sig.zoneBias === 'Demand') return 'BUY';
+  if (sig.zoneBias === 'Supply') return 'SELL';
+  if (sig.candleTone === 'bull') return 'BUY';
+  if (sig.candleTone === 'bear') return 'SELL';
+  if (
+    typeof sig.tp2Num === 'number' &&
+    typeof sig.stopLossNum === 'number' &&
+    Number.isFinite(sig.tp2Num) &&
+    Number.isFinite(sig.stopLossNum) &&
+    sig.tp2Num !== sig.stopLossNum
+  ) {
+    return sig.tp2Num > sig.stopLossNum ? 'BUY' : 'SELL';
+  }
+  return 'NEUTRAL';
+}
+
+function getDirectionBadgeStyle(
+  direction: IctSignalAnalysis['direction'],
+  expectedBias: DirectionalBias = 'NEUTRAL',
+  posture?: IctExecutionPosture
+): {
+  label:
+    | 'BUY'
+    | 'SELL'
+    | 'BUY LIMIT'
+    | 'SELL LIMIT'
+    | 'PULLBACK · BUY'
+    | 'PULLBACK · SELL'
+    | 'WAIT FOR BUY'
+    | 'WAIT FOR SELL'
+    | 'WAIT · RANGING';
+  lean: DirectionalBias;
   classes: string;
 } {
   if (direction === 'BUY') {
+    if (posture === 'limit_pullback_only') {
+      return {
+        label: 'PULLBACK · BUY',
+        lean: 'BUY',
+        classes:
+          'bg-[#D97706]/18 text-[#0B5D2A] dark:bg-[#F59E0B]/20 dark:text-[#6EE7B7] border-[#D97706]/60 shadow-[0_0_10px_rgba(245,158,11,0.16)]',
+      };
+    }
+    if (posture === 'armed_limit') {
+      return {
+        label: 'BUY LIMIT',
+        lean: 'BUY',
+        classes:
+          'bg-[#16A34A]/16 text-[#0B5D2A] dark:bg-[#22C55E]/18 dark:text-[#4ADE80] border-[#16A34A]/50 shadow-[0_0_10px_rgba(34,197,94,0.14)]',
+      };
+    }
     return {
       label: 'BUY',
+      lean: 'BUY',
       classes:
         'bg-[#16A34A]/20 text-[#0B5D2A] dark:bg-[#22C55E]/22 dark:text-[#4ADE80] border-[#16A34A]/55 shadow-[0_0_10px_rgba(34,197,94,0.18)]',
     };
   }
   if (direction === 'SELL') {
+    if (posture === 'limit_pullback_only') {
+      return {
+        label: 'PULLBACK · SELL',
+        lean: 'SELL',
+        classes:
+          'bg-[#D97706]/18 text-[#991B1B] dark:bg-[#F59E0B]/20 dark:text-[#FCA5A5] border-[#D97706]/60 shadow-[0_0_10px_rgba(245,158,11,0.16)]',
+      };
+    }
+    if (posture === 'armed_limit') {
+      return {
+        label: 'SELL LIMIT',
+        lean: 'SELL',
+        classes:
+          'bg-[#DC2626]/16 text-[#B91C1C] dark:bg-[#EF4444]/18 dark:text-[#FF6B63] border-[#DC2626]/50 shadow-[0_0_10px_rgba(239,68,68,0.14)]',
+      };
+    }
     return {
       label: 'SELL',
+      lean: 'SELL',
       classes:
         'bg-[#DC2626]/20 text-[#B91C1C] dark:bg-[#EF4444]/22 dark:text-[#FF6B63] border-[#DC2626]/55 shadow-[0_0_10px_rgba(239,68,68,0.18)]',
     };
   }
+  if (expectedBias === 'BUY') {
+    return {
+      label: 'WAIT FOR BUY',
+      lean: 'BUY',
+      classes:
+        'bg-[#D97706]/18 text-[#0B5D2A] dark:bg-[#F59E0B]/18 dark:text-[#6EE7B7] border-[#16A34A]/50 dark:border-[#34D399]/50 shadow-[0_0_10px_rgba(16,185,129,0.14)]',
+    };
+  }
+  if (expectedBias === 'SELL') {
+    return {
+      label: 'WAIT FOR SELL',
+      lean: 'SELL',
+      classes:
+        'bg-[#D97706]/18 text-[#991B1B] dark:bg-[#F59E0B]/18 dark:text-[#FCA5A5] border-[#DC2626]/50 dark:border-[#F87171]/50 shadow-[0_0_10px_rgba(239,68,68,0.14)]',
+    };
+  }
   return {
-    label: 'WAIT',
+    label: 'WAIT · RANGING',
+    lean: 'NEUTRAL',
     classes:
       'bg-[#D97706]/20 text-[#9A5A0A] dark:bg-[#F59E0B]/22 dark:text-[#FBBF24] border-[#D97706]/55 shadow-[0_0_10px_rgba(245,158,11,0.14)]',
   };
 }
+
+function formatNumericWithAsset(value: number | undefined, asset?: MarketAsset, fallbackDecimals = 4): string {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '—';
+  if (asset) {
+    return formatAssetPrice({ ...asset, price: value });
+  }
+  return value.toLocaleString('en-US', {
+    minimumFractionDigits: fallbackDecimals,
+    maximumFractionDigits: fallbackDecimals,
+  });
+}
+
+const ExecutionDecisionBanner: React.FC<{
+  direction: IctSignalAnalysis['direction'];
+  posture: IctExecutionPosture;
+  limitEntryPriceNum?: number;
+  limitRr?: number;
+  spotRr?: number;
+  chaseProgressPct: number;
+  asset?: MarketAsset;
+  fallbackDecimals: number;
+}> = ({
+  direction,
+  posture,
+  limitEntryPriceNum,
+  limitRr,
+  spotRr,
+  chaseProgressPct,
+  asset,
+  fallbackDecimals,
+}) => {
+  const limitPriceFormatted = formatNumericWithAsset(limitEntryPriceNum, asset, fallbackDecimals);
+  const isActive = direction === 'BUY' || direction === 'SELL';
+
+  let headline = 'HOLD FLAT · AWAITING CONFLUENCE';
+  let subline = 'No chase risk — setup stays locked until structural confirmation completes.';
+  let toneClasses =
+    'bg-black/[0.03] dark:bg-white/[0.04] border-black/10 dark:border-white/12 text-[#1C1C1E] dark:text-[#F1F5F9]';
+  let tagLabel = 'STANDBY';
+  let tagClasses =
+    'bg-[#D97706]/18 text-[#9A5A0A] dark:bg-[#F59E0B]/20 dark:text-[#FBBF24] border-[#D97706]/45';
+
+  if (isActive && posture === 'enter_now') {
+    headline = `ENTER NOW · ${direction} MARKET / ZONE FILL`;
+    subline = 'Spot is trading inside the optimal Entry Zone with protected R:R. Execute cleanly with Stop Loss.';
+    toneClasses =
+      direction === 'BUY'
+        ? 'bg-[#16A34A]/10 dark:bg-[#22C55E]/12 border-[#16A34A]/40 text-[#0B5D2A] dark:text-[#4ADE80]'
+        : 'bg-[#DC2626]/10 dark:bg-[#EF4444]/12 border-[#DC2626]/40 text-[#B91C1C] dark:text-[#FF6B63]';
+    tagLabel = 'IN ENTRY ZONE';
+    tagClasses =
+      direction === 'BUY'
+        ? 'bg-[#16A34A] text-white border-[#16A34A]'
+        : 'bg-[#DC2626] text-white border-[#DC2626]';
+  } else if (isActive && posture === 'armed_limit') {
+    headline = `SET ${direction} LIMIT ORDER @ ${limitPriceFormatted}`;
+    subline = 'Setup armed with full confluence — place pending Limit Order at proximal sweet-spot and wait for fill.';
+    toneClasses =
+      direction === 'BUY'
+        ? 'bg-[#16A34A]/8 dark:bg-[#22C55E]/10 border-[#16A34A]/35 text-[#0B5D2A] dark:text-[#4ADE80]'
+        : 'bg-[#DC2626]/8 dark:bg-[#EF4444]/10 border-[#DC2626]/35 text-[#B91C1C] dark:text-[#FF6B63]';
+    tagLabel = 'ARMED LIMIT';
+    tagClasses =
+      'bg-[#0066CC]/15 text-[#005BB8] dark:bg-[#38BDF8]/18 dark:text-[#7DD3FC] border-[#0066CC]/40';
+  } else if (isActive && posture === 'limit_pullback_only') {
+    headline = `PULLBACK LIMIT ONLY · DO NOT CHASE (${direction} LIMIT @ ${limitPriceFormatted})`;
+    subline = `Price displaced +${chaseProgressPct}% toward TP1 beyond Entry Zone. Wait for pullback fill rather than paying poor Spot R:R.`;
+    toneClasses =
+      'bg-[#D97706]/12 dark:bg-[#F59E0B]/14 border-[#D97706]/45 text-[#9A5A0A] dark:text-[#FBBF24]';
+    tagLabel = 'CHASE GUARD';
+    tagClasses =
+      'bg-[#D97706] text-white border-[#D97706]';
+  } else if (posture === 'invalidated') {
+    headline = 'SETUP INVALIDATED · DO NOT ENTER';
+    subline = 'Live spot breached invalidation stop level. Wait for next fresh Liquidity Sweep + MSS.';
+    toneClasses =
+      'bg-[#DC2626]/8 dark:bg-[#EF4444]/10 border-[#DC2626]/35 text-[#B91C1C] dark:text-[#FF6B63]';
+    tagLabel = 'INVALIDATED';
+    tagClasses = 'bg-[#DC2626]/20 text-[#B91C1C] dark:text-[#FF6B63] border-[#DC2626]/45';
+  } else if (posture === 'missed') {
+    headline = 'TP1 TARGET REACHED · SETUP MISSED';
+    subline = 'Move completed without returning to Entry Zone. Wait for new dealing range.';
+    tagLabel = 'MISSED';
+  }
+
+  return (
+    <div
+      data-testid="ict-execution-banner"
+      data-posture={posture}
+      className={`rounded-xl px-3.5 py-2.5 border flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 ${toneClasses}`}
+    >
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <span
+            className={`inline-flex items-center px-1.5 py-0.5 rounded border text-[9.5px] font-mono font-black uppercase tracking-wider whitespace-nowrap shrink-0 ${tagClasses}`}
+          >
+            {tagLabel}
+          </span>
+          <span className="text-xs sm:text-[13px] font-extrabold tracking-tight text-[#1C1C1E] dark:text-white">
+            {headline}
+          </span>
+        </div>
+        <p className="text-[11px] font-medium text-[#4A4D57] dark:text-[#C7CBD6] mt-0.5 leading-snug">
+          {subline}
+        </p>
+      </div>
+
+      <div
+        data-testid="ict-rr-comparison"
+        className="flex items-center gap-2.5 shrink-0 font-mono tabular-nums text-[11px] px-2.5 py-1.5 rounded-lg bg-white/60 dark:bg-black/25 border border-black/8 dark:border-white/10"
+      >
+        <div className="flex flex-col items-end">
+          <span className="text-[9px] font-bold uppercase tracking-wider text-[#6C6C70] dark:text-[#9EB5C8]">
+            Spot R:R
+          </span>
+          <span
+            className={`font-extrabold ${
+              typeof spotRr === 'number' && spotRr < 1.5
+                ? 'text-[#C41C16] dark:text-[#FF6B63]'
+                : 'text-[#1C1C1E] dark:text-white'
+            }`}
+          >
+            {typeof spotRr === 'number' ? `1:${spotRr.toFixed(1)}` : '—'}
+          </span>
+        </div>
+        <span className="h-5 w-px bg-black/10 dark:bg-white/15" aria-hidden="true" />
+        <div className="flex flex-col items-end">
+          <span className="text-[9px] font-bold uppercase tracking-wider text-[#6C6C70] dark:text-[#9EB5C8]">
+            Limit R:R
+          </span>
+          <span className="font-extrabold text-[#0F7033] dark:text-[#4ADE80]">
+            {typeof limitRr === 'number' ? `1:${limitRr.toFixed(1)}` : '—'}
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+};
 
 function formatWibDateTime(ts: number): string {
   const datePart = new Intl.DateTimeFormat('en-GB', {
@@ -446,12 +730,24 @@ function computeSpotProximity(params: {
   tp1?: number;
   direction: IctSignalAnalysis['direction'];
   executionStatus?: 'active' | 'standby' | 'invalidated' | 'missed';
+  posture?: IctExecutionPosture;
+  chaseProgressPct?: number;
 }): {
   label: string;
   tone: 'in-zone' | 'near' | 'risk' | 'neutral';
   isInEntryZone: boolean;
 } {
-  const { currentPrice, entryLow, entryHigh, stopLoss, tp1, direction, executionStatus } = params;
+  const {
+    currentPrice,
+    entryLow,
+    entryHigh,
+    stopLoss,
+    tp1,
+    direction,
+    executionStatus,
+    posture,
+    chaseProgressPct,
+  } = params;
 
   if (direction === 'NEUTRAL') {
     if (executionStatus === 'invalidated') {
@@ -492,17 +788,24 @@ function computeSpotProximity(params: {
   if (currentPrice >= lo && currentPrice <= hi) {
     return { label: 'IN ENTRY ZONE', tone: 'in-zone', isInEntryZone: true };
   }
+  if (posture === 'limit_pullback_only') {
+    return {
+      label: `CHASE GUARD · +${chaseProgressPct ?? 0}% to TP1`,
+      tone: 'risk',
+      isInEntryZone: false,
+    };
+  }
   if (currentPrice > hi) {
     const distPct = ((currentPrice - hi) / currentPrice) * 100;
     return {
-      label: `${distPct.toFixed(2)}% above Entry`,
+      label: `${distPct.toFixed(2)}% above Entry · Set Limit`,
       tone: distPct <= 0.15 ? 'near' : 'neutral',
       isInEntryZone: false,
     };
   }
   const distPct = ((lo - currentPrice) / currentPrice) * 100;
   return {
-    label: `${distPct.toFixed(2)}% below Entry`,
+    label: `${distPct.toFixed(2)}% below Entry · Set Limit`,
     tone: distPct <= 0.15 ? 'near' : 'neutral',
     isInEntryZone: false,
   };
@@ -515,6 +818,7 @@ function computePositionSizeMetrics(params: {
   direction: IctSignalAnalysis['direction'];
   entryLow?: number;
   entryHigh?: number;
+  limitEntryPriceNum?: number;
   stopLoss?: number;
   accountBalance: number;
   riskPct: number;
@@ -532,6 +836,7 @@ function computePositionSizeMetrics(params: {
     direction,
     entryLow,
     entryHigh,
+    limitEntryPriceNum,
     stopLoss,
     accountBalance,
     riskPct,
@@ -544,8 +849,13 @@ function computePositionSizeMetrics(params: {
     typeof entryLow === 'number' &&
     typeof entryHigh === 'number' &&
     typeof stopLoss === 'number';
-  const entryMid = hasValidLevels ? (entryLow + entryHigh) / 2 : 0;
-  const stopDist = hasValidLevels ? Math.abs(entryMid - stopLoss) : 0;
+  const entryAnchor =
+    typeof limitEntryPriceNum === 'number' && Number.isFinite(limitEntryPriceNum)
+      ? limitEntryPriceNum
+      : hasValidLevels
+        ? (entryLow + entryHigh) / 2
+        : 0;
+  const stopDist = hasValidLevels ? Math.abs(entryAnchor - stopLoss) : 0;
   const validSpread = Number.isFinite(stopDist) && stopDist > 1e-8;
 
   const id = assetId.toUpperCase();
@@ -693,6 +1003,13 @@ function toAlertSignalFromSdcv(sdcv: SdCandleVolumeSignal): IctSignalAnalysis {
     setupGrade: sdcv.setupGrade,
     isAPlusSetup: sdcv.isAPlusSetup,
     usdExposure: sdcv.usdExposure,
+    executionPosture: sdcv.executionPosture,
+    recommendedOrderType: sdcv.recommendedOrderType,
+    limitEntryPriceNum: sdcv.limitEntryPriceNum,
+    limitRr: sdcv.limitRr,
+    spotRr: sdcv.spotRr,
+    chaseProgressPct: sdcv.chaseProgressPct,
+    hasRunAway: sdcv.hasRunAway,
   };
 }
 
@@ -708,6 +1025,8 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
   onInspectChart,
   onMarkAlertRead,
   onUpdateAlertOutcome,
+  onSyncRadarConfig,
+  jumpTarget,
   flashMap = {},
   volatility5mMap = {},
   searchQuery = '',
@@ -805,6 +1124,12 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
     } catch {
       // ignore storage quota errors
     }
+    onSyncRadarConfig?.({
+      strategyMode,
+      timeframe: selectedTf,
+      enforceVolatilityFilter: volatilityFilterEnabled,
+      enforceNewsBlackout: newsBlackoutEnabled,
+    });
   }, [
     strategyMode,
     selectedTf,
@@ -814,7 +1139,19 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
     newsBlackoutEnabled,
     accountBalance,
     riskPct,
+    onSyncRadarConfig,
   ]);
+
+  useEffect(() => {
+    if (!jumpTarget) return;
+    setFocusedAssetId(jumpTarget.assetId);
+    if (jumpTarget.strategy === 'sdcv' || jumpTarget.strategy === 'ict') {
+      setStrategyMode(jumpTarget.strategy);
+    }
+    if (jumpTarget.timeframe && ICT_TIMEFRAMES.includes(jumpTarget.timeframe)) {
+      setSelectedTf(jumpTarget.timeframe);
+    }
+  }, [jumpTarget]);
 
   useEffect(() => {
     const id = window.setInterval(() => setNowTick(Date.now()), 15_000);
@@ -1067,7 +1404,16 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
     let win = 0;
     let be = 0;
     let loss = 0;
+    let awaitingFill = 0;
+    let expiredUnfilled = 0;
     for (const a of ictAlertHistory) {
+      if (a.fillStatus === 'expired_unfilled') {
+        expiredUnfilled += 1;
+        continue;
+      }
+      if (a.fillStatus === 'awaiting_fill' && a.outcomeStatus === 'pending') {
+        awaitingFill += 1;
+      }
       if (a.outcomeStatus === 'win') win += 1;
       else if (a.outcomeStatus === 'be') be += 1;
       else if (a.outcomeStatus === 'loss') loss += 1;
@@ -1075,7 +1421,17 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
     const decided = win + loss;
     const winRate = decided > 0 ? Math.round((win / decided) * 100) : null;
     const netR = win * 2 - loss;
-    return { win, be, loss, total: win + be + loss, decided, winRate, netR };
+    return {
+      win,
+      be,
+      loss,
+      total: win + be + loss,
+      decided,
+      winRate,
+      netR,
+      awaitingFill,
+      expiredUnfilled,
+    };
   }, [ictAlertHistory]);
 
   const actionableCounts = useMemo(() => {
@@ -1114,19 +1470,80 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
     }
   };
 
-  const focusedSignalLabel =
-    focusedSignal?.direction === 'BUY'
-      ? 'BUY'
-      : focusedSignal?.direction === 'SELL'
-        ? 'SELL'
-        : 'WAIT';
+  const activeFocusedId =
+    strategyMode === 'ict' ? focusedSignal?.assetId : focusedSdcvSignal?.assetId;
+  const focusedSpotAsset = activeFocusedId ? assetById.get(activeFocusedId) : undefined;
 
-  const focusedSdcvLabel =
-    focusedSdcvSignal?.direction === 'BUY'
-      ? 'BUY'
-      : focusedSdcvSignal?.direction === 'SELL'
-        ? 'SELL'
-        : 'WAIT';
+  const focusedIctExpectedBias: DirectionalBias = focusedSignal
+    ? resolveIctExpectedBias(focusedSignal)
+    : 'NEUTRAL';
+  const focusedIctLivePosture = useMemo(() => {
+    if (!focusedSignal) return null;
+    const livePx =
+      focusedSignal.assetId === focusedSpotAsset?.id
+        ? focusedSpotAsset.price
+        : assetById.get(focusedSignal.assetId)?.price ?? focusedSignal.currentPrice;
+    const atrAbs =
+      typeof focusedSignal.atrPct === 'number' && livePx > 0
+        ? livePx * (focusedSignal.atrPct / 100)
+        : undefined;
+    return evaluateLiveExecutionPosture({
+      direction: focusedSignal.direction,
+      setupArmed: focusedSignal.direction !== 'NEUTRAL',
+      armedBias: focusedIctExpectedBias === 'SELL' ? 'SELL' : 'BUY',
+      currentPrice: livePx,
+      entryLow: focusedSignal.entryLowNum,
+      entryHigh: focusedSignal.entryHighNum,
+      stopLoss: focusedSignal.stopLossNum,
+      tp1: focusedSignal.tp1Num,
+      tp2: focusedSignal.tp2Num,
+      atr: atrAbs,
+      executionStatus: focusedSignal.executionStatus,
+    });
+  }, [focusedSignal, focusedSpotAsset, assetById, focusedIctExpectedBias]);
+
+  const focusedIctBadge = focusedSignal
+    ? getDirectionBadgeStyle(
+        focusedSignal.direction,
+        focusedIctExpectedBias,
+        focusedIctLivePosture?.posture ?? focusedSignal.executionPosture
+      )
+    : getDirectionBadgeStyle('NEUTRAL', 'NEUTRAL');
+  const focusedSignalLabel = focusedIctBadge.label;
+
+  const focusedSdcvExpectedBias: DirectionalBias = focusedSdcvSignal
+    ? resolveSdcvExpectedBias(focusedSdcvSignal)
+    : 'NEUTRAL';
+  const focusedSdcvLivePosture = useMemo(() => {
+    if (!focusedSdcvSignal) return null;
+    const livePx =
+      focusedSdcvSignal.assetId === focusedSpotAsset?.id
+        ? focusedSpotAsset.price
+        : assetById.get(focusedSdcvSignal.assetId)?.price ?? focusedSdcvSignal.currentPrice;
+    const atrAbs = livePx > 0 ? livePx * (focusedSdcvSignal.atr15mPct / 100) : undefined;
+    return evaluateLiveExecutionPosture({
+      direction: focusedSdcvSignal.direction,
+      setupArmed: focusedSdcvSignal.direction !== 'NEUTRAL',
+      armedBias: focusedSdcvExpectedBias === 'SELL' ? 'SELL' : 'BUY',
+      currentPrice: livePx,
+      entryLow: focusedSdcvSignal.entryLowNum,
+      entryHigh: focusedSdcvSignal.entryHighNum,
+      stopLoss: focusedSdcvSignal.stopLossNum,
+      tp1: focusedSdcvSignal.tp1Num,
+      tp2: focusedSdcvSignal.tp2Num,
+      atr: atrAbs,
+      executionStatus: focusedSdcvSignal.executionStatus,
+    });
+  }, [focusedSdcvSignal, focusedSpotAsset, assetById, focusedSdcvExpectedBias]);
+
+  const focusedSdcvBadge = focusedSdcvSignal
+    ? getDirectionBadgeStyle(
+        focusedSdcvSignal.direction,
+        focusedSdcvExpectedBias,
+        focusedSdcvLivePosture?.posture ?? focusedSdcvSignal.executionPosture
+      )
+    : getDirectionBadgeStyle('NEUTRAL', 'NEUTRAL');
+  const focusedSdcvLabel = focusedSdcvBadge.label;
 
   const isPureIctFocused = Boolean(
     focusedSignal &&
@@ -1140,9 +1557,6 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
     return getConfluenceChecks(focusedSignal, isPureIctFocused);
   }, [focusedSignal, isPureIctFocused]);
 
-  const activeFocusedId =
-    strategyMode === 'ict' ? focusedSignal?.assetId : focusedSdcvSignal?.assetId;
-  const focusedSpotAsset = activeFocusedId ? assetById.get(activeFocusedId) : undefined;
   const activeCountTotal =
     strategyMode === 'ict' ? allSignals.length : allSdcvSignals.length;
   const activeDualConfluence = activeFocusedId
@@ -1159,6 +1573,9 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
         tp1: focusedSignal.tp1Num,
         direction: focusedSignal.direction,
         executionStatus: focusedSignal.executionStatus,
+        posture: focusedIctLivePosture?.posture ?? focusedSignal.executionPosture,
+        chaseProgressPct:
+          focusedIctLivePosture?.chaseProgressPct ?? focusedSignal.chaseProgressPct,
       });
     }
     if (strategyMode === 'sdcv' && focusedSdcvSignal) {
@@ -1170,10 +1587,20 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
         tp1: focusedSdcvSignal.tp1Num,
         direction: focusedSdcvSignal.direction,
         executionStatus: focusedSdcvSignal.executionStatus,
+        posture: focusedSdcvLivePosture?.posture ?? focusedSdcvSignal.executionPosture,
+        chaseProgressPct:
+          focusedSdcvLivePosture?.chaseProgressPct ?? focusedSdcvSignal.chaseProgressPct,
       });
     }
     return { label: 'Evaluating Spot', tone: 'neutral' as const, isInEntryZone: false };
-  }, [strategyMode, focusedSignal, focusedSdcvSignal, focusedSpotAsset]);
+  }, [
+    strategyMode,
+    focusedSignal,
+    focusedSdcvSignal,
+    focusedSpotAsset,
+    focusedIctLivePosture,
+    focusedSdcvLivePosture,
+  ]);
 
   const focusedConfidenceGauge = useMemo(() => {
     const activeSig = strategyMode === 'ict' ? focusedSignal : focusedSdcvSignal;
@@ -1198,6 +1625,8 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
         direction: focusedSignal.direction,
         entryLow: focusedSignal.entryLowNum,
         entryHigh: focusedSignal.entryHighNum,
+        limitEntryPriceNum:
+          focusedIctLivePosture?.limitEntryPriceNum ?? focusedSignal.limitEntryPriceNum,
         stopLoss: focusedSignal.stopLossNum,
         accountBalance,
         riskPct,
@@ -1211,6 +1640,8 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
         direction: focusedSdcvSignal.direction,
         entryLow: focusedSdcvSignal.entryLowNum,
         entryHigh: focusedSdcvSignal.entryHighNum,
+        limitEntryPriceNum:
+          focusedSdcvLivePosture?.limitEntryPriceNum ?? focusedSdcvSignal.limitEntryPriceNum,
         stopLoss: focusedSdcvSignal.stopLossNum,
         accountBalance,
         riskPct,
@@ -1228,6 +1659,8 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
     focusedSignal,
     focusedSdcvSignal,
     focusedSpotAsset,
+    focusedIctLivePosture,
+    focusedSdcvLivePosture,
     accountBalance,
     riskPct,
   ]);
@@ -1235,19 +1668,32 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
   const handleCopyTicket = async () => {
     const activeObj = strategyMode === 'ict' ? focusedSignal : focusedSdcvSignal;
     if (!activeObj) return;
+    const livePosture =
+      strategyMode === 'ict' ? focusedIctLivePosture : focusedSdcvLivePosture;
     const dirLabel =
-      activeObj.direction === 'BUY'
-        ? 'BUY'
-        : activeObj.direction === 'SELL'
-          ? 'SELL'
-          : 'WAIT';
-    const isWait = dirLabel === 'WAIT';
+      strategyMode === 'ict' ? focusedIctBadge.label : focusedSdcvBadge.label;
+    const isWait = activeObj.direction === 'NEUTRAL';
     const spotStr = focusedSpotAsset
       ? formatAssetPrice(focusedSpotAsset)
       : String(activeObj.currentPrice);
+    const limitStr =
+      typeof livePosture?.limitEntryPriceNum === 'number'
+        ? formatNumericWithAsset(livePosture.limitEntryPriceNum, focusedSpotAsset, activeObj.decimals)
+        : undefined;
+    const orderLine = isWait
+      ? '[STANDBY / PROJECTED LEVELS - DO NOT ENTER]'
+      : livePosture?.posture === 'enter_now'
+        ? 'Order Type: MARKET / ZONE FILL (Spot inside Entry Zone)'
+        : livePosture?.posture === 'limit_pullback_only'
+          ? `Order Type: PULLBACK LIMIT ONLY (${activeObj.direction} LIMIT @ ${limitStr ?? activeObj.entryZone}) — DO NOT CHASE`
+          : `Order Type: ${activeObj.direction} LIMIT @ ${limitStr ?? activeObj.entryZone}`;
+    const rrComparisonLine =
+      typeof livePosture?.spotRr === 'number' || typeof livePosture?.limitRr === 'number'
+        ? `R:R Telemetry: Spot 1:${(livePosture?.spotRr ?? 0).toFixed(1)} vs Limit 1:${(livePosture?.limitRr ?? 0).toFixed(1)}`
+        : '';
     const lines = [
       `${activeObj.symbol} · ${strategyMode === 'ict' ? 'ICT Liquidity' : 'S&D · Candle & Volume'} · ${dirLabel} (${activeObj.confidence}%)`,
-      isWait ? '[STANDBY / PROJECTED LEVELS - DO NOT ENTER]' : '',
+      orderLine,
       `Spot: ${spotStr} (${focusedProximity.label}) · Entry TF: ${activeObj.timeframe}`,
       `${isWait ? 'Projected Zone Ref' : 'Entry Zone'}: ${activeObj.entryZone}`,
       `${isWait ? 'Invalidation Ref' : 'Stop Loss'}: ${activeObj.stopLoss}${focusedPositionMetrics.stopDistLabel !== '—' ? ` (Dist: ${focusedPositionMetrics.stopDistLabel})` : ''}`,
@@ -1256,6 +1702,7 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
         : focusedSdcvSignal
           ? `Targets: ${focusedSdcvSignal.tp1} / ${focusedSdcvSignal.tp2} (${focusedSdcvSignal.riskReward})`
           : '',
+      rrComparisonLine,
       isWait
         ? `Risk Allocation (${riskPct}% of $${accountBalance.toLocaleString('en-US')} = $${focusedPositionMetrics.riskUsd.toFixed(0)}): Standby (Unlocks on BUY/SELL)`
         : `Position Size (${riskPct}% of $${accountBalance.toLocaleString('en-US')} = $${focusedPositionMetrics.riskUsd.toFixed(0)}): ${focusedPositionMetrics.positionSizeLabel} (${focusedPositionMetrics.unitsSecondaryLabel})`,
@@ -1422,7 +1869,7 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
             data-testid="radar-strategy-switcher"
             role="tablist"
             aria-label="Radar trading strategy system"
-            className="inline-flex items-center gap-1 rounded-xl liquid-glass-pill p-1 w-fit max-w-full overflow-x-auto no-scrollbar"
+            className="flex sm:inline-flex items-center gap-1 rounded-xl liquid-glass-pill p-1 w-full sm:w-fit max-w-full overflow-x-auto no-scrollbar"
           >
             <button
               type="button"
@@ -1430,7 +1877,7 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
               data-testid="strategy-tab-ict"
               aria-selected={strategyMode === 'ict'}
               onClick={() => setStrategyMode('ict')}
-              className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all whitespace-nowrap shrink-0 ${
+              className={`inline-flex items-center justify-center gap-1.5 flex-1 sm:flex-none px-2.5 sm:px-3.5 py-1.5 rounded-lg text-[11px] sm:text-xs font-bold transition-all whitespace-nowrap shrink-0 ${
                 strategyMode === 'ict'
                   ? 'bg-[#0066CC] dark:bg-[#B45309] text-white shadow-sm'
                   : 'text-[#4A4D57] dark:text-[#C7CBD6] hover:text-[#1C1C1E] dark:hover:text-white'
@@ -1445,7 +1892,7 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
               data-testid="strategy-tab-sdcv"
               aria-selected={strategyMode === 'sdcv'}
               onClick={() => setStrategyMode('sdcv')}
-              className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all whitespace-nowrap shrink-0 ${
+              className={`inline-flex items-center justify-center gap-1.5 flex-1 sm:flex-none px-2.5 sm:px-3.5 py-1.5 rounded-lg text-[11px] sm:text-xs font-bold transition-all whitespace-nowrap shrink-0 ${
                 strategyMode === 'sdcv'
                   ? 'bg-[#0066CC] dark:bg-[#B45309] text-white shadow-sm'
                   : 'text-[#4A4D57] dark:text-[#C7CBD6] hover:text-[#1C1C1E] dark:hover:text-white'
@@ -1541,15 +1988,15 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
             })}
           </div>
 
-          <div className="flex flex-wrap items-center justify-between gap-2.5">
+          <div className="flex flex-wrap items-center justify-between gap-2.5 min-w-0">
             {/* Automatic Active Signal Sort Toggle: Time Since Occurrence vs Asset Volatility */}
             <div
               data-testid="ict-sort-toggle"
               role="group"
               aria-label="Sort active signals"
-              className="inline-flex items-center gap-1 rounded-xl liquid-glass-pill p-1 shrink-0"
+              className="inline-flex flex-wrap sm:flex-nowrap items-center gap-1 rounded-xl liquid-glass-pill p-1 max-w-full"
             >
-              <span className="inline-flex items-center gap-1 text-[10.5px] font-bold uppercase tracking-wider text-[#6C6C70] dark:text-[#9EB5C8] px-2">
+              <span className="inline-flex items-center gap-1 text-[10.5px] font-bold uppercase tracking-wider text-[#6C6C70] dark:text-[#9EB5C8] px-1.5 sm:px-2">
                 <ArrowUpDown className="w-3 h-3" />
                 Sort:
               </span>
@@ -1558,7 +2005,7 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
                 data-testid="ict-sort-occurrence"
                 aria-pressed={sortMode === 'occurrence'}
                 onClick={() => setSortMode('occurrence')}
-                className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-colors whitespace-nowrap ${
+                className={`px-2 sm:px-2.5 py-1 rounded-lg text-[10.5px] sm:text-[11px] font-bold transition-colors whitespace-nowrap ${
                   sortMode === 'occurrence'
                     ? 'bg-[#0066CC] dark:bg-[#B45309] text-white shadow-xs'
                     : 'text-[#4A4D57] dark:text-[#C7CBD6] hover:text-[#1C1C1E] dark:hover:text-white'
@@ -1571,7 +2018,7 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
                 data-testid="ict-sort-volatility"
                 aria-pressed={sortMode === 'volatility'}
                 onClick={() => setSortMode('volatility')}
-                className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-colors whitespace-nowrap ${
+                className={`px-2 sm:px-2.5 py-1 rounded-lg text-[10.5px] sm:text-[11px] font-bold transition-colors whitespace-nowrap ${
                   sortMode === 'volatility'
                     ? 'bg-[#0066CC] dark:bg-[#B45309] text-white shadow-xs'
                     : 'text-[#4A4D57] dark:text-[#C7CBD6] hover:text-[#1C1C1E] dark:hover:text-white'
@@ -1581,11 +2028,11 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
               </button>
             </div>
 
-            <div className="flex flex-col items-end gap-0.5">
+            <div className="flex flex-col items-start sm:items-end gap-0.5 w-full sm:w-auto max-w-full">
               <div
                 role="tablist"
                 aria-label="Evaluation timeframe"
-                className="flex items-center gap-1 overflow-x-auto no-scrollbar"
+                className="flex flex-wrap sm:flex-nowrap items-center gap-1 max-w-full"
               >
                 <span className="text-[11px] font-bold uppercase tracking-wider text-[#6C6C70] dark:text-[#9EB5C8] mr-1 shrink-0">
                   Entry TF:
@@ -1657,7 +2104,7 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
               data-testid="ict-focused-setup"
               className="rounded-2xl liquid-glass-card p-4 sm:p-5 flex flex-col gap-4"
             >
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3.5">
+              <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-3.5">
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="text-lg sm:text-xl font-extrabold text-[#1C1C1E] dark:text-white">
@@ -1708,23 +2155,19 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
                         </span>
                       )}
                   </div>
-                  <p className="text-xs font-bold text-[#1C1C1E] dark:text-[#F1F5F9] mt-1">
-                    <span className="text-[#6C6C70] dark:text-[#9EB5C8] uppercase tracking-wider mr-1.5">
-                      {isPureIctFocused ? 'PURE ICT ENGINE:' : 'ASIAN SWEEP ENGINE:'}
-                    </span>
-                    <span>
-                      {focusedSignal.setupName} · {focusedSignal.pdZone} · {focusedSignal.sessionLabel ?? focusedSignal.killzone}
-                    </span>
+                  <p className="text-xs font-bold text-[#1C1C1E] dark:text-[#F1F5F9] mt-1 leading-relaxed">
+                    {isPureIctFocused ? 'PURE ICT ENGINE: ' : 'ASIAN SWEEP ENGINE: '}
+                    {focusedSignal.setupName} · {focusedSignal.pdZone} · {focusedSignal.sessionLabel ?? focusedSignal.killzone}
                   </p>
                 </div>
 
-                <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+                <div className="flex flex-wrap items-center gap-2.5 w-full xl:w-auto min-w-0">
                   {/* Prominent 3D Illuminated Live Spot Price Plaque + Proximity Status */}
                   {focusedSpotAsset && (
                     <div
                       data-testid="ict-focused-spot-price"
                       data-in-entry-zone={focusedProximity.isInEntryZone ? 'true' : 'false'}
-                      className={`spot-plaque-surface rounded-xl px-4 py-2.5 flex flex-col items-end justify-center shrink-0 transition-shadow ${
+                      className={`spot-plaque-surface rounded-xl px-3.5 sm:px-4 py-2.5 flex flex-col items-start sm:items-end justify-center w-full sm:w-auto max-w-full transition-shadow ${
                         focusedSignal.direction === 'BUY'
                           ? 'spot-plaque-active-buy'
                           : focusedSignal.direction === 'SELL'
@@ -1745,12 +2188,37 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
                           {focusedSpotAsset.changePercent.toFixed(2)}%
                         </span>
                       </div>
-                      <span
-                        data-price-flash={focusedSpotFlash ?? 'none'}
-                        className={`spot-price-3d-hero text-2xl sm:text-3xl font-mono font-black tracking-tight tabular-nums leading-none mt-0.5 ${getPriceFlashClass(focusedSpotFlash)}`}
-                      >
-                        {formatAssetPrice(focusedSpotAsset)}
-                      </span>
+                      <div className="flex flex-wrap items-center gap-2 mt-0.5 max-w-full">
+                        <span
+                          data-price-flash={focusedSpotFlash ?? 'none'}
+                          className={`spot-price-3d-hero text-xl sm:text-3xl font-mono font-black tracking-tight tabular-nums leading-none ${getPriceFlashClass(focusedSpotFlash)}`}
+                        >
+                          {formatAssetPrice(focusedSpotAsset)}
+                        </span>
+                        <span
+                          data-testid="ict-focused-spot-bias-badge"
+                          className={`inline-flex items-center gap-1 px-2 py-1 rounded-md border text-[10px] sm:text-[10.5px] font-extrabold uppercase tracking-wider leading-none whitespace-nowrap shrink-0 ${focusedIctBadge.classes}`}
+                        >
+                          {focusedSignal.direction === 'BUY' ? (
+                            <ArrowUp className="w-3 h-3 stroke-[2.75]" />
+                          ) : focusedSignal.direction === 'SELL' ? (
+                            <ArrowDown className="w-3 h-3 stroke-[2.75]" />
+                          ) : focusedIctBadge.lean === 'BUY' ? (
+                            <>
+                              <Clock className="w-2.5 h-2.5" />
+                              <ArrowUp className="w-2.5 h-2.5 stroke-[2.75]" />
+                            </>
+                          ) : focusedIctBadge.lean === 'SELL' ? (
+                            <>
+                              <Clock className="w-2.5 h-2.5" />
+                              <ArrowDown className="w-2.5 h-2.5 stroke-[2.75]" />
+                            </>
+                          ) : (
+                            <Clock className="w-2.5 h-2.5" />
+                          )}
+                          {focusedIctBadge.label}
+                        </span>
+                      </div>
                       <span
                         data-testid="ict-spot-proximity"
                         className={`text-[10px] font-mono font-extrabold tabular-nums mt-1 ${
@@ -1768,15 +2236,25 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
                     </div>
                   )}
 
-                  <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                  <div className="flex flex-wrap items-center gap-1.5 w-full sm:w-auto min-w-0">
                     <span
                       data-testid="ict-focused-signal-badge"
-                      className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-xs font-extrabold tracking-wide whitespace-nowrap ${getDirectionBadgeStyle(focusedSignal.direction).classes}`}
+                      className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-xs font-extrabold tracking-wide whitespace-nowrap ${focusedIctBadge.classes}`}
                     >
                       {focusedSignal.direction === 'BUY' ? (
                         <ArrowUp className="w-3.5 h-3.5 stroke-[2.5]" />
                       ) : focusedSignal.direction === 'SELL' ? (
                         <ArrowDown className="w-3.5 h-3.5 stroke-[2.5]" />
+                      ) : focusedIctBadge.lean === 'BUY' ? (
+                        <>
+                          <Clock className="w-3 h-3" />
+                          <ArrowUp className="w-3 h-3 stroke-[2.5]" />
+                        </>
+                      ) : focusedIctBadge.lean === 'SELL' ? (
+                        <>
+                          <Clock className="w-3 h-3" />
+                          <ArrowDown className="w-3 h-3 stroke-[2.5]" />
+                        </>
                       ) : (
                         <Clock className="w-3.5 h-3.5" />
                       )}
@@ -1847,6 +2325,26 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
                 </div>
               </div>
 
+              {/* Enter Now vs Set Limit Execution Decision Banner + Spot R:R vs Limit R:R */}
+              <ExecutionDecisionBanner
+                direction={focusedSignal.direction}
+                posture={
+                  focusedIctLivePosture?.posture ??
+                  focusedSignal.executionPosture ??
+                  (focusedSignal.direction === 'NEUTRAL' ? 'standby' : 'armed_limit')
+                }
+                limitEntryPriceNum={
+                  focusedIctLivePosture?.limitEntryPriceNum ?? focusedSignal.limitEntryPriceNum
+                }
+                limitRr={focusedIctLivePosture?.limitRr ?? focusedSignal.limitRr}
+                spotRr={focusedIctLivePosture?.spotRr ?? focusedSignal.spotRr}
+                chaseProgressPct={
+                  focusedIctLivePosture?.chaseProgressPct ?? focusedSignal.chaseProgressPct ?? 0
+                }
+                asset={focusedSpotAsset}
+                fallbackDecimals={focusedSignal.decimals}
+              />
+
               {/* Plain-English Action Callout Banner */}
               <div
                 data-testid="ict-action-callout"
@@ -1861,10 +2359,22 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <span className="text-xs font-extrabold uppercase tracking-wider">
                     {focusedSignal.direction === 'BUY'
-                      ? 'ACTION: PREPARE BUY LIMIT — Place order inside Entry Zone below'
+                      ? focusedIctLivePosture?.posture === 'enter_now'
+                        ? 'ACTION: BUY NOW (IN ENTRY ZONE) — Execute Market/Zone Fill with SL below'
+                        : focusedIctLivePosture?.posture === 'limit_pullback_only'
+                          ? 'ACTION: BUY LIMIT PULLBACK ONLY — Do not chase displacement; bid inside Entry Zone'
+                          : 'ACTION: BUY LIMIT ARMED — Place Buy Limit inside Entry Zone below'
                       : focusedSignal.direction === 'SELL'
-                        ? 'ACTION: PREPARE SELL LIMIT — Place order inside Entry Zone below'
-                        : 'ACTION: DO NOT ENTER YET (WAIT) — Stay flat until conditions confirm'}
+                        ? focusedIctLivePosture?.posture === 'enter_now'
+                          ? 'ACTION: SELL NOW (IN ENTRY ZONE) — Execute Market/Zone Fill with SL above'
+                          : focusedIctLivePosture?.posture === 'limit_pullback_only'
+                            ? 'ACTION: SELL LIMIT PULLBACK ONLY — Do not chase displacement; offer inside Entry Zone'
+                            : 'ACTION: SELL LIMIT ARMED — Place Sell Limit inside Entry Zone below'
+                        : focusedIctBadge.lean === 'BUY'
+                          ? 'ACTION: WAIT FOR BUY — Stay flat until bullish Sweep/MSS/FVG confirms'
+                          : focusedIctBadge.lean === 'SELL'
+                            ? 'ACTION: WAIT FOR SELL — Stay flat until bearish Sweep/MSS/FVG confirms'
+                            : 'ACTION: DO NOT ENTER YET (WAIT) — Stay flat until directional conditions confirm'}
                   </span>
                   <span className="text-[11px] font-mono font-bold tabular-nums opacity-90">
                     {isPureIctFocused
@@ -2172,7 +2682,7 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
               data-testid="ict-focused-setup"
               className="rounded-2xl liquid-glass-card p-4 sm:p-5 flex flex-col gap-4"
             >
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3.5">
+              <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-3.5">
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="text-lg sm:text-xl font-extrabold text-[#1C1C1E] dark:text-white">
@@ -2220,23 +2730,18 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
                       {getVolatilityStatusLabel(focusedSdcvSignal.volatilityStatus, focusedSdcvSignal.volatilityPassed)})
                     </span>
                   </div>
-                  <p className="text-xs font-bold text-[#1C1C1E] dark:text-[#F1F5F9] mt-1">
-                    <span className="text-[#6C6C70] dark:text-[#9EB5C8] uppercase tracking-wider mr-1.5">
-                      S&amp;D · CANDLE &amp; VOLUME:
-                    </span>
-                    <span>
-                      {focusedSdcvSignal.zoneStatus} {focusedSdcvSignal.zoneBias} · {focusedSdcvSignal.candlePattern} ·{' '}
-                      {focusedSdcvSignal.volumeRatio.toFixed(2)}x {focusedSdcvSignal.volumeSource}
-                    </span>
+                  <p className="text-xs font-bold text-[#1C1C1E] dark:text-[#F1F5F9] mt-1 leading-relaxed">
+                    S&amp;D · CANDLE &amp; VOLUME: {focusedSdcvSignal.zoneStatus} {focusedSdcvSignal.zoneBias} · {focusedSdcvSignal.candlePattern} ·{' '}
+                    {focusedSdcvSignal.volumeRatio.toFixed(2)}x {focusedSdcvSignal.volumeSource}
                   </p>
                 </div>
 
-                <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+                <div className="flex flex-wrap items-center gap-2.5 w-full xl:w-auto min-w-0">
                   {focusedSpotAsset && (
                     <div
                       data-testid="ict-focused-spot-price"
                       data-in-entry-zone={focusedProximity.isInEntryZone ? 'true' : 'false'}
-                      className={`spot-plaque-surface rounded-xl px-4 py-2.5 flex flex-col items-end justify-center shrink-0 transition-shadow ${
+                      className={`spot-plaque-surface rounded-xl px-3.5 sm:px-4 py-2.5 flex flex-col items-start sm:items-end justify-center w-full sm:w-auto max-w-full transition-shadow ${
                         focusedSdcvSignal.direction === 'BUY'
                           ? 'spot-plaque-active-buy'
                           : focusedSdcvSignal.direction === 'SELL'
@@ -2257,12 +2762,37 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
                           {focusedSpotAsset.changePercent.toFixed(2)}%
                         </span>
                       </div>
-                      <span
-                        data-price-flash={focusedSpotFlash ?? 'none'}
-                        className={`spot-price-3d-hero text-2xl sm:text-3xl font-mono font-black tracking-tight tabular-nums leading-none mt-0.5 ${getPriceFlashClass(focusedSpotFlash)}`}
-                      >
-                        {formatAssetPrice(focusedSpotAsset)}
-                      </span>
+                      <div className="flex flex-wrap items-center gap-2 mt-0.5 max-w-full">
+                        <span
+                          data-price-flash={focusedSpotFlash ?? 'none'}
+                          className={`spot-price-3d-hero text-xl sm:text-3xl font-mono font-black tracking-tight tabular-nums leading-none ${getPriceFlashClass(focusedSpotFlash)}`}
+                        >
+                          {formatAssetPrice(focusedSpotAsset)}
+                        </span>
+                        <span
+                          data-testid="ict-focused-spot-bias-badge"
+                          className={`inline-flex items-center gap-1 px-2 py-1 rounded-md border text-[10px] sm:text-[10.5px] font-extrabold uppercase tracking-wider leading-none whitespace-nowrap shrink-0 ${focusedSdcvBadge.classes}`}
+                        >
+                          {focusedSdcvSignal.direction === 'BUY' ? (
+                            <ArrowUp className="w-3 h-3 stroke-[2.75]" />
+                          ) : focusedSdcvSignal.direction === 'SELL' ? (
+                            <ArrowDown className="w-3 h-3 stroke-[2.75]" />
+                          ) : focusedSdcvBadge.lean === 'BUY' ? (
+                            <>
+                              <Clock className="w-2.5 h-2.5" />
+                              <ArrowUp className="w-2.5 h-2.5 stroke-[2.75]" />
+                            </>
+                          ) : focusedSdcvBadge.lean === 'SELL' ? (
+                            <>
+                              <Clock className="w-2.5 h-2.5" />
+                              <ArrowDown className="w-2.5 h-2.5 stroke-[2.75]" />
+                            </>
+                          ) : (
+                            <Clock className="w-2.5 h-2.5" />
+                          )}
+                          {focusedSdcvBadge.label}
+                        </span>
+                      </div>
                       <span
                         data-testid="ict-spot-proximity"
                         className={`text-[10px] font-mono font-extrabold tabular-nums mt-1 ${
@@ -2280,15 +2810,25 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
                     </div>
                   )}
 
-                  <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                  <div className="flex flex-wrap items-center gap-1.5 w-full sm:w-auto min-w-0">
                     <span
                       data-testid="ict-focused-signal-badge"
-                      className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-xs font-extrabold tracking-wide whitespace-nowrap ${getDirectionBadgeStyle(focusedSdcvSignal.direction).classes}`}
+                      className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-xs font-extrabold tracking-wide whitespace-nowrap ${focusedSdcvBadge.classes}`}
                     >
                       {focusedSdcvSignal.direction === 'BUY' ? (
                         <ArrowUp className="w-3.5 h-3.5 stroke-[2.5]" />
                       ) : focusedSdcvSignal.direction === 'SELL' ? (
                         <ArrowDown className="w-3.5 h-3.5 stroke-[2.5]" />
+                      ) : focusedSdcvBadge.lean === 'BUY' ? (
+                        <>
+                          <Clock className="w-3 h-3" />
+                          <ArrowUp className="w-3 h-3 stroke-[2.5]" />
+                        </>
+                      ) : focusedSdcvBadge.lean === 'SELL' ? (
+                        <>
+                          <Clock className="w-3 h-3" />
+                          <ArrowDown className="w-3 h-3 stroke-[2.5]" />
+                        </>
                       ) : (
                         <Clock className="w-3.5 h-3.5" />
                       )}
@@ -2367,6 +2907,29 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
                 </div>
               </div>
 
+              {/* Enter Now vs Set Limit Execution Decision Banner + Spot R:R vs Limit R:R */}
+              <ExecutionDecisionBanner
+                direction={focusedSdcvSignal.direction}
+                posture={
+                  focusedSdcvLivePosture?.posture ??
+                  focusedSdcvSignal.executionPosture ??
+                  (focusedSdcvSignal.direction === 'NEUTRAL' ? 'standby' : 'armed_limit')
+                }
+                limitEntryPriceNum={
+                  focusedSdcvLivePosture?.limitEntryPriceNum ??
+                  focusedSdcvSignal.limitEntryPriceNum
+                }
+                limitRr={focusedSdcvLivePosture?.limitRr ?? focusedSdcvSignal.limitRr}
+                spotRr={focusedSdcvLivePosture?.spotRr ?? focusedSdcvSignal.spotRr}
+                chaseProgressPct={
+                  focusedSdcvLivePosture?.chaseProgressPct ??
+                  focusedSdcvSignal.chaseProgressPct ??
+                  0
+                }
+                asset={focusedSpotAsset}
+                fallbackDecimals={focusedSdcvSignal.decimals}
+              />
+
               {/* Plain-English Action Callout */}
               <div
                 data-testid="ict-action-callout"
@@ -2381,10 +2944,22 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <span className="text-xs font-extrabold uppercase tracking-wider">
                     {focusedSdcvSignal.direction === 'BUY'
-                      ? 'ACTION: BUY DEMAND REACTION — Candle + Volume confirmed at Demand Zone'
+                      ? focusedSdcvLivePosture?.posture === 'enter_now'
+                        ? 'ACTION: BUY NOW (IN DEMAND ZONE) — Candle + Volume confirmed at Demand Zone'
+                        : focusedSdcvLivePosture?.posture === 'limit_pullback_only'
+                          ? 'ACTION: BUY LIMIT PULLBACK ONLY — Do not chase displacement away from Demand'
+                          : 'ACTION: BUY LIMIT ARMED — Set Buy Limit at Fresh Demand Zone'
                       : focusedSdcvSignal.direction === 'SELL'
-                        ? 'ACTION: SELL SUPPLY REJECTION — Candle + Volume confirmed at Supply Zone'
-                        : 'ACTION: WAIT FOR CONFLUENCE — Awaiting S&D Zone Tap + Candle + Volume >= 1.08x'}
+                        ? focusedSdcvLivePosture?.posture === 'enter_now'
+                          ? 'ACTION: SELL NOW (IN SUPPLY ZONE) — Candle + Volume confirmed at Supply Zone'
+                          : focusedSdcvLivePosture?.posture === 'limit_pullback_only'
+                            ? 'ACTION: SELL LIMIT PULLBACK ONLY — Do not chase displacement away from Supply'
+                            : 'ACTION: SELL LIMIT ARMED — Set Sell Limit at Fresh Supply Zone'
+                        : focusedSdcvBadge.lean === 'BUY'
+                          ? 'ACTION: WAIT FOR BUY — Awaiting Demand Zone tap + bullish Candle + Volume >= 1.05x'
+                          : focusedSdcvBadge.lean === 'SELL'
+                            ? 'ACTION: WAIT FOR SELL — Awaiting Supply Zone tap + bearish Candle + Volume >= 1.05x'
+                            : 'ACTION: WAIT FOR CONFLUENCE — Awaiting S&D Zone tap + Candle + Volume >= 1.05x'}
                   </span>
                   <span className="text-[11px] font-mono font-bold tabular-nums opacity-90">
                     Entry TF: {focusedSdcvSignal.timeframe}
@@ -2651,13 +3226,13 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
 
           {/* Cross-Instrument Radar Matrix (Zero Charts) */}
           <section className="rounded-2xl liquid-glass-card p-4 sm:p-5 flex flex-col gap-3">
-            <div className="flex items-center justify-between gap-2">
-              <h2 className="text-sm sm:text-base font-bold text-[#1C1C1E] dark:text-white">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 sm:gap-2">
+              <h2 className="text-sm sm:text-base font-bold text-[#1C1C1E] dark:text-white leading-snug">
                 {strategyMode === 'ict'
                   ? 'ICT Precision Matrix: XAU/USD, BTC/USD & G10 FX'
                   : 'S&D · Candle & Volume Matrix: XAU/USD, BTC/USD & G10 FX'}
               </h2>
-              <span className="text-xs font-mono tabular-nums text-[#6C6C70] dark:text-[#9EB5C8]">
+              <span className="text-[11px] sm:text-xs font-mono tabular-nums text-[#6C6C70] dark:text-[#9EB5C8] shrink-0">
                 {(strategyMode === 'ict' ? filteredSignals : filteredSdcvSignals).length} instruments ·{' '}
                 {actionableCounts.buys} BUY / {actionableCounts.sells} SELL
               </span>
@@ -2672,15 +3247,40 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
                   const isSell = sig.direction === 'SELL';
                   const isPureIctCard =
                     sig.assetId === 'BTCUSD' || sig.assetId === 'XAUUSD' || Boolean(sig.oteZone);
-                  const badgeMeta = getDirectionBadgeStyle(sig.direction);
+                  const expectedBias = resolveIctExpectedBias(sig);
+                  const liveCardPrice = asset?.price ?? sig.currentPrice;
+                  const cardAtrAbs =
+                    typeof sig.atrPct === 'number' && liveCardPrice > 0
+                      ? liveCardPrice * (sig.atrPct / 100)
+                      : undefined;
+                  const cardPosture = evaluateLiveExecutionPosture({
+                    direction: sig.direction,
+                    setupArmed: sig.direction !== 'NEUTRAL',
+                    armedBias: expectedBias === 'SELL' ? 'SELL' : 'BUY',
+                    currentPrice: liveCardPrice,
+                    entryLow: sig.entryLowNum,
+                    entryHigh: sig.entryHighNum,
+                    stopLoss: sig.stopLossNum,
+                    tp1: sig.tp1Num,
+                    tp2: sig.tp2Num,
+                    atr: cardAtrAbs,
+                    executionStatus: sig.executionStatus,
+                  });
+                  const badgeMeta = getDirectionBadgeStyle(
+                    sig.direction,
+                    expectedBias,
+                    cardPosture.posture
+                  );
                   const cardProximity = computeSpotProximity({
-                    currentPrice: asset?.price ?? sig.currentPrice,
+                    currentPrice: liveCardPrice,
                     entryLow: sig.entryLowNum,
                     entryHigh: sig.entryHighNum,
                     stopLoss: sig.stopLossNum,
                     tp1: sig.tp1Num,
                     direction: sig.direction,
                     executionStatus: sig.executionStatus,
+                    posture: cardPosture.posture,
+                    chaseProgressPct: cardPosture.chaseProgressPct,
                   });
                   const cardFlash = flashMap[sig.assetId] ?? localFlashMap[sig.assetId];
                   const cardGauge = computeSignalConfidenceGauge(
@@ -2706,8 +3306,8 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
                               : 'hover:brightness-[1.01]'
                       } ${getSpotPulseClass(cardProximity.isInEntryZone, sig.direction)}`}
                     >
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="min-w-0">
+                      <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-2">
+                        <div className="min-w-0 w-full sm:flex-1">
                           <div className="flex items-center gap-1.5 flex-wrap">
                             <span className="text-sm font-extrabold text-[#1C1C1E] dark:text-white">
                               {sig.symbol}
@@ -2753,16 +3353,26 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
                           </p>
                         </div>
 
-                        <div className="flex flex-col items-end gap-1 shrink-0">
-                          <div className="flex items-center gap-1 flex-wrap justify-end">
+                        <div className="flex flex-col items-start sm:items-end gap-1 w-full sm:w-auto sm:shrink-0">
+                          <div className="flex items-center gap-1.5 flex-wrap justify-start sm:justify-end">
                             <span
                               data-testid="ict-card-status-badge"
-                              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[11px] font-extrabold font-mono tabular-nums whitespace-nowrap ${badgeMeta.classes}`}
+                              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[10.5px] sm:text-[11px] font-extrabold font-mono tabular-nums whitespace-nowrap ${badgeMeta.classes}`}
                             >
                               {isBuy ? (
                                 <ArrowUp className="w-3 h-3 stroke-[2.5]" />
                               ) : isSell ? (
                                 <ArrowDown className="w-3 h-3 stroke-[2.5]" />
+                              ) : badgeMeta.lean === 'BUY' ? (
+                                <>
+                                  <Clock className="w-2.5 h-2.5" />
+                                  <ArrowUp className="w-2.5 h-2.5 stroke-[2.5]" />
+                                </>
+                              ) : badgeMeta.lean === 'SELL' ? (
+                                <>
+                                  <Clock className="w-2.5 h-2.5" />
+                                  <ArrowDown className="w-2.5 h-2.5 stroke-[2.5]" />
+                                </>
                               ) : (
                                 <Clock className="w-3 h-3" />
                               )}
@@ -2785,8 +3395,8 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
                         </div>
                       </div>
 
-                      <div className="grid grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)_minmax(0,1fr)] gap-1.5 text-[10px] font-mono tabular-nums pt-1.5 border-t border-black/8 dark:border-white/10">
-                        <div className="min-w-0">
+                      <div className="grid grid-cols-2 sm:grid-cols-[minmax(0,1.45fr)_minmax(0,0.95fr)_minmax(0,1fr)] gap-2 sm:gap-1.5 text-[10px] font-mono tabular-nums pt-1.5 border-t border-black/8 dark:border-white/10">
+                        <div className="col-span-2 sm:col-span-1 min-w-0">
                           <span className="text-[#6C6C70] dark:text-[#9EB5C8] block">Spot</span>
                           <div className="flex items-center gap-1.5 flex-wrap mt-0.5">
                             <span
@@ -2797,11 +3407,15 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
                             </span>
                             <span
                               data-testid="ict-card-spot-bias-badge"
-                              className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded border text-[9px] font-extrabold uppercase tracking-wider leading-none shrink-0 ${badgeMeta.classes}`}
+                              className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded border text-[9px] font-extrabold uppercase tracking-wider leading-none whitespace-nowrap shrink-0 ${badgeMeta.classes}`}
                             >
                               {isBuy ? (
                                 <ArrowUp className="w-2.5 h-2.5 stroke-[2.75]" />
                               ) : isSell ? (
+                                <ArrowDown className="w-2.5 h-2.5 stroke-[2.75]" />
+                              ) : badgeMeta.lean === 'BUY' ? (
+                                <ArrowUp className="w-2.5 h-2.5 stroke-[2.75]" />
+                              ) : badgeMeta.lean === 'SELL' ? (
                                 <ArrowDown className="w-2.5 h-2.5 stroke-[2.75]" />
                               ) : (
                                 <Clock className="w-2.5 h-2.5" />
@@ -2838,15 +3452,38 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
                   const selected = focusedSdcvSignal?.assetId === sig.assetId;
                   const isBuy = sig.direction === 'BUY';
                   const isSell = sig.direction === 'SELL';
-                  const badgeMeta = getDirectionBadgeStyle(sig.direction);
+                  const expectedBias = resolveSdcvExpectedBias(sig);
+                  const liveCardPrice = asset?.price ?? sig.currentPrice;
+                  const cardAtrAbs =
+                    liveCardPrice > 0 ? liveCardPrice * (sig.atr15mPct / 100) : undefined;
+                  const cardPosture = evaluateLiveExecutionPosture({
+                    direction: sig.direction,
+                    setupArmed: sig.direction !== 'NEUTRAL',
+                    armedBias: expectedBias === 'SELL' ? 'SELL' : 'BUY',
+                    currentPrice: liveCardPrice,
+                    entryLow: sig.entryLowNum,
+                    entryHigh: sig.entryHighNum,
+                    stopLoss: sig.stopLossNum,
+                    tp1: sig.tp1Num,
+                    tp2: sig.tp2Num,
+                    atr: cardAtrAbs,
+                    executionStatus: sig.executionStatus,
+                  });
+                  const badgeMeta = getDirectionBadgeStyle(
+                    sig.direction,
+                    expectedBias,
+                    cardPosture.posture
+                  );
                   const cardProximity = computeSpotProximity({
-                    currentPrice: asset?.price ?? sig.currentPrice,
+                    currentPrice: liveCardPrice,
                     entryLow: sig.entryLowNum,
                     entryHigh: sig.entryHighNum,
                     stopLoss: sig.stopLossNum,
                     tp1: sig.tp1Num,
                     direction: sig.direction,
                     executionStatus: sig.executionStatus,
+                    posture: cardPosture.posture,
+                    chaseProgressPct: cardPosture.chaseProgressPct,
                   });
                   const cardFlash = flashMap[sig.assetId] ?? localFlashMap[sig.assetId];
                   const cardGauge = computeSignalConfidenceGauge(
@@ -2872,8 +3509,8 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
                               : 'hover:brightness-[1.01]'
                       } ${getSpotPulseClass(cardProximity.isInEntryZone, sig.direction)}`}
                     >
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="min-w-0">
+                      <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-2">
+                        <div className="min-w-0 w-full sm:flex-1">
                           <div className="flex items-center gap-1.5 flex-wrap">
                             <span className="text-sm font-extrabold text-[#1C1C1E] dark:text-white">
                               {sig.symbol}
@@ -2919,16 +3556,26 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
                           </p>
                         </div>
 
-                        <div className="flex flex-col items-end gap-1 shrink-0">
-                          <div className="flex items-center gap-1 flex-wrap justify-end">
+                        <div className="flex flex-col items-start sm:items-end gap-1 w-full sm:w-auto sm:shrink-0">
+                          <div className="flex items-center gap-1.5 flex-wrap justify-start sm:justify-end">
                             <span
                               data-testid="ict-card-status-badge"
-                              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[11px] font-extrabold font-mono tabular-nums whitespace-nowrap ${badgeMeta.classes}`}
+                              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[10.5px] sm:text-[11px] font-extrabold font-mono tabular-nums whitespace-nowrap ${badgeMeta.classes}`}
                             >
                               {isBuy ? (
                                 <ArrowUp className="w-3 h-3 stroke-[2.5]" />
                               ) : isSell ? (
                                 <ArrowDown className="w-3 h-3 stroke-[2.5]" />
+                              ) : badgeMeta.lean === 'BUY' ? (
+                                <>
+                                  <Clock className="w-2.5 h-2.5" />
+                                  <ArrowUp className="w-2.5 h-2.5 stroke-[2.5]" />
+                                </>
+                              ) : badgeMeta.lean === 'SELL' ? (
+                                <>
+                                  <Clock className="w-2.5 h-2.5" />
+                                  <ArrowDown className="w-2.5 h-2.5 stroke-[2.5]" />
+                                </>
                               ) : (
                                 <Clock className="w-3 h-3" />
                               )}
@@ -2949,8 +3596,8 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
                         </div>
                       </div>
 
-                      <div className="grid grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)_minmax(0,1fr)] gap-1.5 text-[10px] font-mono tabular-nums pt-1.5 border-t border-black/8 dark:border-white/10">
-                        <div className="min-w-0">
+                      <div className="grid grid-cols-2 sm:grid-cols-[minmax(0,1.45fr)_minmax(0,0.95fr)_minmax(0,1fr)] gap-2 sm:gap-1.5 text-[10px] font-mono tabular-nums pt-1.5 border-t border-black/8 dark:border-white/10">
+                        <div className="col-span-2 sm:col-span-1 min-w-0">
                           <span className="text-[#6C6C70] dark:text-[#9EB5C8] block">Spot</span>
                           <div className="flex items-center gap-1.5 flex-wrap mt-0.5">
                             <span
@@ -2961,11 +3608,15 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
                             </span>
                             <span
                               data-testid="ict-card-spot-bias-badge"
-                              className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded border text-[9px] font-extrabold uppercase tracking-wider leading-none shrink-0 ${badgeMeta.classes}`}
+                              className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded border text-[9px] font-extrabold uppercase tracking-wider leading-none whitespace-nowrap shrink-0 ${badgeMeta.classes}`}
                             >
                               {isBuy ? (
                                 <ArrowUp className="w-2.5 h-2.5 stroke-[2.75]" />
                               ) : isSell ? (
+                                <ArrowDown className="w-2.5 h-2.5 stroke-[2.75]" />
+                              ) : badgeMeta.lean === 'BUY' ? (
+                                <ArrowUp className="w-2.5 h-2.5 stroke-[2.75]" />
+                              ) : badgeMeta.lean === 'SELL' ? (
                                 <ArrowDown className="w-2.5 h-2.5 stroke-[2.75]" />
                               ) : (
                                 <Clock className="w-2.5 h-2.5" />
@@ -3011,7 +3662,7 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
                 <h2 className="text-sm sm:text-base font-bold text-[#1C1C1E] dark:text-white">
                   Radar Signal Alert Log
                 </h2>
-                {alertOutcomeSummary.total > 0 && (
+                {(alertOutcomeSummary.total > 0 || alertOutcomeSummary.expiredUnfilled > 0) && (
                   <span
                     data-testid="ict-alert-expectancy"
                     className="text-[10.5px] font-mono font-bold tabular-nums text-[#0B5D2A] dark:text-[#4ADE80]"
@@ -3020,13 +3671,16 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
                     {alertOutcomeSummary.winRate !== null
                       ? ` (${alertOutcomeSummary.winRate}% WR · ${alertOutcomeSummary.netR >= 0 ? '+' : ''}${alertOutcomeSummary.netR}R)`
                       : ''}
+                    {alertOutcomeSummary.expiredUnfilled > 0
+                      ? ` · ${alertOutcomeSummary.expiredUnfilled} Unfilled`
+                      : ''}
                   </span>
                 )}
               </div>
               <p className="text-[11px] text-[#6C6C70] dark:text-[#9EB5C8] mt-0.5">
                 {ictPopupsEnabled
-                  ? 'Pop-up notifications Active — setups persist 48h here with Win/BE/Loss outcome tracking.'
-                  : 'Pop-up notifications Deactivated — signals persist 48h silently here with exact timestamps.'}
+                  ? 'Pop-up notifications Active — fills are verified against Entry Zone before Win/Loss grading.'
+                  : 'Pop-up notifications Deactivated — signals persist 48h silently with fill verification.'}
               </p>
             </div>
             <span className="text-xs font-mono font-bold tabular-nums px-2 py-0.5 rounded-lg liquid-glass-inset text-[#1C1C1E] dark:text-white shrink-0">
@@ -3062,6 +3716,9 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
                       } else if (item.ictStrategy === 'ict') {
                         setStrategyMode('ict');
                       }
+                      if (item.ictTimeframe && ICT_TIMEFRAMES.includes(item.ictTimeframe)) {
+                        setSelectedTf(item.ictTimeframe);
+                      }
                     }}
                     role="button"
                     tabIndex={0}
@@ -3078,7 +3735,7 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
                         : 'liquid-glass-inset hover:border-[#0071E3]/40 dark:hover:border-[#F59E0B]/40'
                     }`}
                   >
-                    <div className="flex items-center justify-between gap-2">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 sm:gap-2">
                       <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
                         <span className="text-xs font-extrabold text-[#1C1C1E] dark:text-white">
                           {item.symbol}
@@ -3101,12 +3758,39 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
                           )}
                           {stratPrefix} {item.ictAction ?? 'WAIT'} · {item.ictTimeframe ?? '15m'}
                         </span>
+                        {item.ictStage && (
+                          <span className="px-1.5 py-0.5 rounded bg-black/[0.05] dark:bg-white/[0.08] text-[9.5px] font-bold uppercase text-[#4A4D57] dark:text-[#C7CBD6] whitespace-nowrap">
+                            {item.ictStage === 'triggered'
+                              ? 'In Zone'
+                              : item.ictStage === 'pullback_limit'
+                                ? 'Pullback Limit'
+                                : 'Armed Limit'}
+                          </span>
+                        )}
+                        {item.fillStatus && (
+                          <span
+                            data-testid="ict-alert-fill-status"
+                            className={`px-1.5 py-0.5 rounded text-[9.5px] font-bold uppercase whitespace-nowrap ${
+                              item.fillStatus === 'filled'
+                                ? 'bg-[#16A34A]/14 text-[#0B5D2A] dark:text-[#4ADE80]'
+                                : item.fillStatus === 'expired_unfilled'
+                                  ? 'bg-black/[0.08] dark:bg-white/[0.12] text-[#6C6C70] dark:text-[#9CA3AF]'
+                                  : 'bg-[#D97706]/14 text-[#9A5A0A] dark:text-[#FBBF24]'
+                            }`}
+                          >
+                            {item.fillStatus === 'filled'
+                              ? 'Filled'
+                              : item.fillStatus === 'expired_unfilled'
+                                ? 'Expired Unfilled'
+                                : 'Awaiting Fill'}
+                          </span>
+                        )}
                         <span className="text-[10px] font-mono font-bold tabular-nums text-[#4A4D57] dark:text-[#C7CBD6]">
                           {item.confidence ?? 45}%
                         </span>
                       </div>
 
-                      <div className="flex flex-col items-end gap-0.5 shrink-0 text-right">
+                      <div className="flex flex-row sm:flex-col items-center sm:items-end justify-between sm:justify-start gap-2 sm:gap-0.5 shrink-0 text-left sm:text-right">
                         <span
                           data-testid="ict-alert-relative-time"
                           className="text-[10px] font-mono font-bold tabular-nums text-[#005BB8] dark:text-[#FBBF24]"

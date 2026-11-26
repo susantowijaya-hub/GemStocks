@@ -21,7 +21,6 @@ import {
   TrendingUp,
   X,
 } from 'lucide-react';
-import { AnimatePresence, motion } from 'motion/react';
 import { getThemeMeta, THEME_OPTIONS } from '../hooks/useTheme';
 import {
   AppRoute,
@@ -113,6 +112,42 @@ function formatDropdownPrice(item: StockSearchResult): string {
   })}`;
 }
 
+const HeaderLiveClock: React.FC = React.memo(() => {
+  const [tickNow, setTickNow] = useState(() => new Date());
+
+  useEffect(() => {
+    const id = window.setInterval(() => setTickNow(new Date()), 1000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  const clock = formatWibClock(tickNow);
+  return (
+    <>
+      <span
+        data-testid="header-clock-full"
+        className="hidden xl:inline text-xs font-mono font-semibold text-[#4A4D57] dark:text-[#B4B8C4] tabular-nums whitespace-nowrap"
+      >
+        {clock.full}
+      </span>
+      <span
+        data-testid="header-clock-short"
+        className="hidden sm:inline xl:hidden text-xs font-mono font-semibold text-[#4A4D57] dark:text-[#B4B8C4] tabular-nums whitespace-nowrap"
+      >
+        {clock.short}
+      </span>
+      <span className="sm:hidden text-[9px] font-mono font-semibold text-[#4A4D57] dark:text-[#B4B8C4] tabular-nums whitespace-nowrap truncate">
+        {tickNow.toLocaleTimeString('en-GB', {
+          timeZone: 'Asia/Jakarta',
+          hour: '2-digit',
+          minute: '2-digit',
+          hour12: false,
+        })}{' '}
+        WIB
+      </span>
+    </>
+  );
+});
+
 export const Header: React.FC<HeaderProps> = ({
   activeRoute,
   onNavigate,
@@ -171,7 +206,7 @@ export const Header: React.FC<HeaderProps> = ({
   }, []);
 
   useEffect(() => {
-    const id = window.setInterval(() => setNow(new Date()), 1000);
+    const id = window.setInterval(() => setNow(new Date()), 30_000);
     return () => window.clearInterval(id);
   }, []);
 
@@ -496,27 +531,7 @@ export const Header: React.FC<HeaderProps> = ({
               <span className="text-base sm:text-lg lg:text-xl font-extrabold tracking-tight text-[#1C1C1E] dark:text-white whitespace-nowrap">
                 Stocks
               </span>
-              <span
-                data-testid="header-clock-full"
-                className="hidden xl:inline text-xs font-mono font-semibold text-[#4A4D57] dark:text-[#B4B8C4] tabular-nums whitespace-nowrap"
-              >
-                {clock.full}
-              </span>
-              <span
-                data-testid="header-clock-short"
-                className="hidden sm:inline xl:hidden text-xs font-mono font-semibold text-[#4A4D57] dark:text-[#B4B8C4] tabular-nums whitespace-nowrap"
-              >
-                {clock.short}
-              </span>
-              <span className="sm:hidden text-[9px] font-mono font-semibold text-[#4A4D57] dark:text-[#B4B8C4] tabular-nums whitespace-nowrap truncate">
-                {now.toLocaleTimeString('en-GB', {
-                  timeZone: 'Asia/Jakarta',
-                  hour: '2-digit',
-                  minute: '2-digit',
-                  hour12: false,
-                })}{' '}
-                WIB
-              </span>
+              <HeaderLiveClock />
             </div>
           </button>
         </div>
@@ -816,35 +831,32 @@ export const Header: React.FC<HeaderProps> = ({
             const Icon = tab.icon;
             const isActive = activeRoute === tab.id;
             return (
-              <motion.button
+              <button
                 key={tab.id}
                 type="button"
-                whileTap={{ scale: 0.92 }}
                 onMouseEnter={() => onPrefetchRoute?.(tab.id)}
                 onFocus={() => onPrefetchRoute?.(tab.id)}
                 onClick={() => handleNavClick(tab.id)}
-                className={`relative px-2.5 xl:px-3 py-1.5 rounded-full text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors focus:outline-none ${
+                className={`relative px-2.5 xl:px-3 py-1.5 rounded-full text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-all duration-150 active:scale-[0.92] focus:outline-none ${
                   isActive
                     ? 'text-white'
                     : 'text-[#6C6C70] dark:text-[#AEAEB2] hover:text-[#1C1C1E] dark:hover:text-white'
                 }`}
               >
                 {isActive && (
-                  <motion.span
-                    layoutId="header-active-tab-pill"
-                    transition={{ type: 'spring', stiffness: 460, damping: 32 }}
-                    className="absolute inset-0 rounded-full bg-[#0066CC] dark:bg-[#0066CC] shadow-[0_2px_10px_rgba(0,102,204,0.35)]"
+                  <span
+                    className="absolute inset-0 rounded-full bg-[#0066CC] dark:bg-[#0066CC] shadow-[0_2px_10px_rgba(0,102,204,0.35)] transition-all duration-200"
                   />
                 )}
-                <motion.span
-                  animate={isActive ? { scale: [1, 1.18, 1] } : { scale: 1 }}
-                  transition={{ duration: 0.28 }}
-                  className="relative z-10 inline-flex items-center"
+                <span
+                  className={`relative z-10 inline-flex items-center transition-transform duration-200 ${
+                    isActive ? 'scale-105' : 'scale-100'
+                  }`}
                 >
                   <Icon className="w-3.5 h-3.5" />
-                </motion.span>
+                </span>
                 <span className="relative z-10">{tab.label}</span>
-              </motion.button>
+              </button>
             );
           })}
         </nav>
@@ -959,22 +971,20 @@ export const Header: React.FC<HeaderProps> = ({
       </div>
 
       {/* Lazy-Loaded Morning Briefing Pack Pop-Up Modal */}
-      <AnimatePresence>
-        {morningBriefOpen && (
-          <WidgetErrorBoundary widgetName="Morning Briefing Pack">
-            <Suspense fallback={null}>
-              <MorningBriefModal
-                clockFull={clock.full}
-                morningBriefSentence={morningBriefSentence}
-                morningBriefPack={morningBriefPack}
-                onClose={() => setMorningBriefOpen(false)}
-                onSelectAsset={onSelectAsset}
-                onNavigate={onNavigate}
-              />
-            </Suspense>
-          </WidgetErrorBoundary>
-        )}
-      </AnimatePresence>
+      {morningBriefOpen && (
+        <WidgetErrorBoundary widgetName="Morning Briefing Pack">
+          <Suspense fallback={null}>
+            <MorningBriefModal
+              clockFull={clock.full}
+              morningBriefSentence={morningBriefSentence}
+              morningBriefPack={morningBriefPack}
+              onClose={() => setMorningBriefOpen(false)}
+              onSelectAsset={onSelectAsset}
+              onNavigate={onNavigate}
+            />
+          </Suspense>
+        </WidgetErrorBoundary>
+      )}
     </header>
   );
 };

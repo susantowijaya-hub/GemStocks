@@ -14,6 +14,7 @@ import {
   computeAtr,
   computeSetupGrade,
   detectSwingStructureBias,
+  evaluateLiveExecutionPosture,
   extractBarsForTf,
   findUnmitigatedFvgAndOb,
   formatBand,
@@ -345,6 +346,10 @@ export function computeSdCandleVolumeSignal(
       isRealOhlc: false,
       setupGrade: 'WAIT',
       isAPlusSetup: false,
+      executionPosture: 'standby',
+      recommendedOrderType: 'WAIT',
+      chaseProgressPct: 0,
+      hasRunAway: false,
     };
   }
 
@@ -374,9 +379,9 @@ export function computeSdCandleVolumeSignal(
   const supplyHi = Math.max(supplyLow, supplyHigh);
 
   const touchingDemand =
-    currentPrice >= demandLo - atr * 0.45 && currentPrice <= demandHi + atr * 1.1;
+    currentPrice >= demandLo - atr * 0.45 && currentPrice <= demandHi + atr * 1.45;
   const touchingSupply =
-    currentPrice <= supplyHi + atr * 0.45 && currentPrice >= supplyLo - atr * 1.1;
+    currentPrice <= supplyHi + atr * 0.45 && currentPrice >= supplyLo - atr * 1.45;
 
   const zoneBias: SdCandleVolumeSignal['zoneBias'] = touchingDemand && !touchingSupply
     ? 'Demand'
@@ -443,10 +448,13 @@ export function computeSdCandleVolumeSignal(
   const rr = Math.abs(tp2Val - entryMid) / riskAbs;
   const stopTooWide = riskAbs > maxSlDist;
 
-  // Fusion Decision Logic with Real R:R >= 2.0, Stop Cap, Volatility Band, News Guard & Live Validity
+  const htfSample = extractBarsForTf(asset, ['1h', '4h', '1D'], 6);
+  const htfBias = htfSample.isRealOhlc ? detectSwingStructureBias(htfSample.bars, currentPrice) : 'Ranging';
+
+  // Two-stage Decision Logic: Triggered (candle+volume) OR Armed Limit (fresh zone / HTF alignment without opposing rejection)
   let direction: IctDirection = 'NEUTRAL';
   let executionStatus: SdCandleVolumeSignal['executionStatus'] = 'standby';
-  const volumeConfirmed = volume.ratio >= 1.08;
+  const volumeConfirmed = volume.ratio >= 1.05 || (candle.strength >= 26 && volume.ratio >= 0.95);
   let invalidationReason = '';
 
   if (
@@ -456,7 +464,18 @@ export function computeSdCandleVolumeSignal(
     !stopTooWide &&
     rr >= 2.0
   ) {
-    if (zoneBias === 'Demand' && candle.tone === 'bull' && volumeConfirmed) {
+    const bullConfirmed = candle.tone === 'bull' && volumeConfirmed;
+    const bullArmed =
+      (zoneStatus === 'Fresh' || htfBias === 'Bullish') &&
+      candle.tone !== 'bear' &&
+      volume.ratio >= 0.92;
+    const bearConfirmed = candle.tone === 'bear' && volumeConfirmed;
+    const bearArmed =
+      (zoneStatus === 'Fresh' || htfBias === 'Bearish') &&
+      candle.tone !== 'bull' &&
+      volume.ratio >= 0.92;
+
+    if (zoneBias === 'Demand' && (bullConfirmed || bullArmed)) {
       const liveCheck = checkLiveSetupValidity({
         direction: 'BUY',
         currentPrice,
@@ -470,7 +489,7 @@ export function computeSdCandleVolumeSignal(
         executionStatus = liveCheck.status;
         invalidationReason = liveCheck.reason ?? '';
       }
-    } else if (zoneBias === 'Supply' && candle.tone === 'bear' && volumeConfirmed) {
+    } else if (zoneBias === 'Supply' && (bearConfirmed || bearArmed)) {
       const liveCheck = checkLiveSetupValidity({
         direction: 'SELL',
         currentPrice,
@@ -487,6 +506,20 @@ export function computeSdCandleVolumeSignal(
     }
   }
 
+  const postureEval = evaluateLiveExecutionPosture({
+    direction,
+    setupArmed: direction !== 'NEUTRAL',
+    armedBias: bullPlan ? 'BUY' : 'SELL',
+    currentPrice,
+    entryLow,
+    entryHigh,
+    stopLoss: slVal,
+    tp1: tp1Val,
+    tp2: tp2Val,
+    atr: atr15m.atr15m > 0 ? atr15m.atr15m : atr,
+    executionStatus,
+  });
+
   const invalidationTrigger = buildAssetInvalidationTrigger({
     assetClassLabel: atr15m.assetClassLabel,
     biasBullish: bullPlan,
@@ -496,9 +529,21 @@ export function computeSdCandleVolumeSignal(
 
   let actionSummary: string;
   if (direction === 'BUY') {
-    actionSummary = `${zoneStatus} Demand reaction confirmed by ${candle.pattern} on ${volume.ratio.toFixed(2)}x ${volume.source} (1:${rr.toFixed(1)} to Supply).`;
+    if (postureEval.posture === 'limit_pullback_only') {
+      actionSummary = `${zoneStatus} Demand displaced (+${postureEval.chaseProgressPct}% to TP1) — BUY LIMIT pullback to ${formatPriceWithAsset(postureEval.limitEntryPriceNum ?? entryMid, asset)} only, do not chase.`;
+    } else if (postureEval.posture === 'armed_limit') {
+      actionSummary = `${zoneStatus} Demand armed above zone — set BUY LIMIT @ ${formatPriceWithAsset(postureEval.limitEntryPriceNum ?? entryMid, asset)} (Limit 1:${(postureEval.limitRr ?? rr).toFixed(1)}).`;
+    } else {
+      actionSummary = `${zoneStatus} Demand reaction confirmed by ${candle.pattern} on ${volume.ratio.toFixed(2)}x ${volume.source} (1:${rr.toFixed(1)} to Supply).`;
+    }
   } else if (direction === 'SELL') {
-    actionSummary = `${zoneStatus} Supply rejection confirmed by ${candle.pattern} on ${volume.ratio.toFixed(2)}x ${volume.source} (1:${rr.toFixed(1)} to Demand).`;
+    if (postureEval.posture === 'limit_pullback_only') {
+      actionSummary = `${zoneStatus} Supply displaced (+${postureEval.chaseProgressPct}% to TP1) — SELL LIMIT pullback to ${formatPriceWithAsset(postureEval.limitEntryPriceNum ?? entryMid, asset)} only, do not chase.`;
+    } else if (postureEval.posture === 'armed_limit') {
+      actionSummary = `${zoneStatus} Supply armed below zone — set SELL LIMIT @ ${formatPriceWithAsset(postureEval.limitEntryPriceNum ?? entryMid, asset)} (Limit 1:${(postureEval.limitRr ?? rr).toFixed(1)}).`;
+    } else {
+      actionSummary = `${zoneStatus} Supply rejection confirmed by ${candle.pattern} on ${volume.ratio.toFixed(2)}x ${volume.source} (1:${rr.toFixed(1)} to Demand).`;
+    }
   } else if (invalidationReason) {
     actionSummary = invalidationReason;
   } else if (newsBlocked && newsBlackout.reason) {
@@ -517,7 +562,7 @@ export function computeSdCandleVolumeSignal(
   } else if (zoneBias === 'Mid-Range') {
     actionSummary = `Price is mid-range between Demand (${formatBand(demandLo, demandHi, asset)}) and Supply (${formatBand(supplyLo, supplyHi, asset)}). Wait for zone tap + volume spike.`;
   } else if (!volumeConfirmed) {
-    actionSummary = `Inside ${zoneBias} zone (${candle.pattern}), but ${volume.source} is only ${volume.ratio.toFixed(2)}x (< 1.08x threshold). Awaiting participation expansion.`;
+    actionSummary = `Inside ${zoneBias} zone (${candle.pattern}), but ${volume.source} is only ${volume.ratio.toFixed(2)}x (< 1.05x threshold). Awaiting participation expansion.`;
   } else {
     actionSummary = `Inside ${zoneBias} zone with ${volume.ratio.toFixed(2)}x ${volume.source}, awaiting decisive ${zoneBias === 'Demand' ? 'bullish' : 'bearish'} reversal candle close.`;
   }
@@ -557,8 +602,6 @@ export function computeSdCandleVolumeSignal(
 
   const projectedLevelsSummary = `Ref Zone ${formatBand(entryLow, entryHigh, asset)} · SL Ref ${formatPriceWithAsset(slVal, asset)} · Opposing ${formatPriceWithAsset(tp2Val, asset)}`;
 
-  const htfSample = extractBarsForTf(asset, ['1h', '4h', '1D'], 6);
-  const htfBias = htfSample.isRealOhlc ? detectSwingStructureBias(htfSample.bars, currentPrice) : 'Ranging';
   const htfAligned =
     direction === 'BUY'
       ? htfBias === 'Bullish'
@@ -631,6 +674,13 @@ export function computeSdCandleVolumeSignal(
     setupGrade,
     isAPlusSetup,
     usdExposure,
+    executionPosture: postureEval.posture,
+    recommendedOrderType: postureEval.recommendedOrderType,
+    limitEntryPriceNum: postureEval.limitEntryPriceNum,
+    limitRr: postureEval.limitRr,
+    spotRr: postureEval.spotRr,
+    chaseProgressPct: postureEval.chaseProgressPct,
+    hasRunAway: postureEval.hasRunAway,
   };
 }
 

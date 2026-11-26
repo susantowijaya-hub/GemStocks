@@ -72,7 +72,7 @@ export default defineConfig(() => {
           clientsClaim: true,
           skipWaiting: true,
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
-          navigateFallbackDenylist: [/^\/api\//],
+          navigateFallbackDenylist: [/^\/api\//, /^\/@vite\//, /^\/src\//, /^\/assets\//, /^\/node_modules\//],
           runtimeCaching: [
             {
               urlPattern: /^\/api\/.*/i,
@@ -305,11 +305,10 @@ export default defineConfig(() => {
       },
     },
     server: {
-      // HMR is disabled in AI Studio via DISABLE_HMR env var.
-      // Do not modify—file watching is disabled to prevent flickering during agent edits.
-      hmr: process.env.DISABLE_HMR !== 'true',
-      // Disable file watching when DISABLE_HMR is true to save CPU during agent edits.
-      watch: process.env.DISABLE_HMR === 'true' ? null : {},
+      // HMR and file watching are disabled in AI Studio to prevent flickering and WS port conflicts.
+      hmr: false,
+      ws: false as const,
+      watch: null,
     },
   };
 });

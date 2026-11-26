@@ -129,6 +129,15 @@ export const PriceAlertToastStack: React.FC<{
                           ? `${toast.ictStrategy === 'sdcv' ? 'S&D' : 'ICT'} ${toast.ictAction ?? 'WAIT'}`
                           : '5m Alert'}
                     </span>
+                    {isIct && toast.ictStage && (
+                      <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-black/5 dark:bg-white/10 text-[#4A4D57] dark:text-[#C7CBD6] whitespace-nowrap">
+                        {toast.ictStage === 'triggered'
+                          ? 'In Zone'
+                          : toast.ictStage === 'pullback_limit'
+                            ? 'Pullback Limit'
+                            : 'Armed Limit'}
+                      </span>
+                    )}
                   </div>
                   <span
                     className={`font-mono font-extrabold text-xs tabular-nums ${
@@ -198,8 +207,19 @@ export const PriceAlertToastStack: React.FC<{
                   </p>
                 )}
 
-                <div className="text-[10px] font-mono text-[#6C6C70] dark:text-[#8E8E93] mt-1">
-                  {formatWibClock(toast.triggeredAt)} WIB · Tap to inspect chart
+                <div className="text-[10px] font-mono text-[#6C6C70] dark:text-[#8E8E93] mt-1 flex items-center gap-1.5 flex-wrap">
+                  <span>{formatWibClock(toast.triggeredAt)} WIB</span>
+                  {isIct && toast.fillStatus && (
+                    <span className="font-sans font-semibold text-[#4A4D57] dark:text-[#C7CBD6]">
+                      ·{' '}
+                      {toast.fillStatus === 'filled'
+                        ? 'Zone Filled'
+                        : toast.fillStatus === 'expired_unfilled'
+                          ? 'Expired Unfilled'
+                          : 'Awaiting Limit Fill'}
+                    </span>
+                  )}
+                  <span>· Tap to inspect Radar</span>
                 </div>
               </div>
 
@@ -469,17 +489,45 @@ export const PriceAlertDrawer: React.FC<{
                           {formatShortPhase(alert.bandarFromPhase)} → {formatShortPhase(alert.bandarToPhase)}
                         </span>
                       ) : isIct ? (
-                        <span
-                          className={`text-[10px] font-extrabold uppercase px-1.5 py-0.5 rounded whitespace-nowrap ${
-                            isIctWait
-                              ? 'bg-[#D97706]/18 text-[#9A5A0A] dark:text-[#FBBF24]'
-                              : isSurge
-                                ? 'bg-[#16A34A]/18 text-[#0B5D2A] dark:text-[#4ADE80]'
-                                : 'bg-[#DC2626]/18 text-[#B91C1C] dark:text-[#FF6B63]'
-                          }`}
-                        >
-                          {alert.ictStrategy === 'sdcv' ? 'S&D' : 'ICT'} {alert.ictAction ?? 'WAIT'} · {alert.ictTimeframe ?? '15m'}
-                        </span>
+                        <>
+                          <span
+                            className={`text-[10px] font-extrabold uppercase px-1.5 py-0.5 rounded whitespace-nowrap ${
+                              isIctWait
+                                ? 'bg-[#D97706]/18 text-[#9A5A0A] dark:text-[#FBBF24]'
+                                : isSurge
+                                  ? 'bg-[#16A34A]/18 text-[#0B5D2A] dark:text-[#4ADE80]'
+                                  : 'bg-[#DC2626]/18 text-[#B91C1C] dark:text-[#FF6B63]'
+                            }`}
+                          >
+                            {alert.ictStrategy === 'sdcv' ? 'S&D' : 'ICT'} {alert.ictAction ?? 'WAIT'} · {alert.ictTimeframe ?? '15m'}
+                          </span>
+                          {alert.ictStage && (
+                            <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded bg-black/5 dark:bg-white/10 text-[#4A4D57] dark:text-[#C7CBD6] whitespace-nowrap">
+                              {alert.ictStage === 'triggered'
+                                ? 'In Zone'
+                                : alert.ictStage === 'pullback_limit'
+                                  ? 'Pullback Limit'
+                                  : 'Armed Limit'}
+                            </span>
+                          )}
+                          {alert.fillStatus && (
+                            <span
+                              className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded whitespace-nowrap ${
+                                alert.fillStatus === 'filled'
+                                  ? 'bg-[#16A34A]/14 text-[#0B5D2A] dark:text-[#4ADE80]'
+                                  : alert.fillStatus === 'expired_unfilled'
+                                    ? 'bg-black/8 dark:bg-white/12 text-[#6C6C70] dark:text-[#9CA3AF]'
+                                    : 'bg-[#D97706]/14 text-[#9A5A0A] dark:text-[#FBBF24]'
+                              }`}
+                            >
+                              {alert.fillStatus === 'filled'
+                                ? 'Filled'
+                                : alert.fillStatus === 'expired_unfilled'
+                                  ? 'Expired Unfilled'
+                                  : 'Awaiting Fill'}
+                            </span>
+                          )}
+                        </>
                       ) : (
                         <span className="text-[11px] text-[#6C6C70] dark:text-[#B4B8C4] truncate">
                           {alert.name}

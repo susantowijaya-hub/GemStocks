@@ -160,13 +160,14 @@ function computeMedian(values: number[]): number {
 
 async function fetchJsonWithLatency<T>(
   url: string,
-  timeoutMs: number
+  timeoutMs: number,
+  headers?: Record<string, string>
 ): Promise<{ data: T | null; rttMs: number | null }> {
   const controller = new AbortController();
   const timerId = window.setTimeout(() => controller.abort(), timeoutMs);
   const start = performance.now();
   try {
-    const res = await fetch(url, { signal: controller.signal });
+    const res = await fetch(url, { signal: controller.signal, headers });
     const rttMs = Math.max(1, Math.round(performance.now() - start));
     if (!res.ok) return { data: null, rttMs };
     return { data: (await res.json()) as T, rttMs };
@@ -251,6 +252,7 @@ export function useLiveMarket() {
   const intelInFlightRef = useRef(false);
   const anySessionOpenRef = useRef(true);
   const lastClosedPollAtRef = useRef(0);
+  const lastFullQuotesAtRef = useRef(0);
   const lastWsTickAtRef = useRef<Record<string, number>>({});
 
   // Jitter-buffer, adaptive EMA filter, spike guard, and per-endpoint exponential backoff
@@ -350,16 +352,23 @@ export function useLiveMarket() {
     }, 650);
   }, []);
 
-  // Fetch all live market quotes from backend aggregator (1s during open session, last settle when closed)
+  // Fetch all live market quotes from backend aggregator (1s compact ticks after initial full series hydration)
   const refreshQuotes = useCallback(
     async (force = false) => {
       if (quotesInFlightRef.current || shouldSkipForBackoff('quotes', force)) return;
       quotesInFlightRef.current = true;
       try {
+        const now = Date.now();
+        const needFullSeries =
+          lastFullQuotesAtRef.current === 0 || now - lastFullQuotesAtRef.current >= 30_000;
         const { data: payload, rttMs } = await fetchJsonWithLatency<{
           quotes?: QuotePatch[];
           diagnostics?: ServerFeedDiagnosticsResponse;
-        }>('/api/market/quotes', 4500);
+        }>(
+          '/api/market/quotes',
+          needFullSeries ? 10_000 : 4500,
+          needFullSeries ? undefined : { 'X-Quotes-Mode': 'compact' }
+        );
         if (rttMs !== null) {
           setQuotesRttMs(rttMs);
         }
@@ -369,6 +378,9 @@ export function useLiveMarket() {
           return;
         }
 
+        if (needFullSeries || patches.some((p) => Array.isArray(p.chart1D) && p.chart1D.length > 1)) {
+          lastFullQuotesAtRef.current = Date.now();
+        }
         recordFetchOutcome('quotes', true);
         setLastQuotesAt(Date.now());
         if (payload?.diagnostics) {
@@ -398,13 +410,22 @@ export function useLiveMarket() {
               (((nextPrice - safePrev) / Math.max(1e-6, safePrev)) * 100).toFixed(2)
             );
 
-            if (!wsFresh && Math.abs(nextPrice - asset.price) > Math.pow(10, -(asset.decimals + 1))) {
+            const priceChanged =
+              !wsFresh && Math.abs(nextPrice - asset.price) > Math.pow(10, -(asset.decimals + 1));
+            if (priceChanged) {
               triggerFlash(asset.id, nextPrice >= asset.price ? 'gain' : 'loss');
             }
-            const patchedSeries =
-              patch.chart1D.length > 1
-                ? [...patch.chart1D.slice(0, -1), nextPrice]
-                : asset.chartSeries['1D'];
+            const hasFullPatch1D = Array.isArray(patch.chart1D) && patch.chart1D.length > 1;
+            const existing1D = asset.chartSeries['1D'];
+            const patchedSeries = hasFullPatch1D
+              ? [...patch.chart1D.slice(0, -1), nextPrice]
+              : existing1D.length > 1 && priceChanged
+                ? [...existing1D.slice(0, -1), nextPrice]
+                : existing1D;
+            const patchedTimestamps =
+              Array.isArray(patch.timestamps1D) && patch.timestamps1D.length > 1
+                ? patch.timestamps1D
+                : asset.chartTimestamps?.['1D'];
 
             return {
               ...asset,
@@ -455,7 +476,7 @@ export function useLiveMarket() {
               },
               chartTimestamps: {
                 ...asset.chartTimestamps,
-                '1D': patch.timestamps1D,
+                '1D': patchedTimestamps,
               },
             };
           })
@@ -687,50 +708,67 @@ export function useLiveMarket() {
     [recordFetchOutcome, shouldSkipForBackoff]
   );
 
-  // Throttled localStorage persistence so re-opening the terminal hydrates immediately at 0ms
+  // Idle-scheduled localStorage persistence so re-opening the terminal hydrates immediately without dropping live frames
   const lastBootSaveAtRef = useRef(0);
   useEffect(() => {
     if (!feedsLive) return;
     const now = Date.now();
-    if (now - lastBootSaveAtRef.current < 12_000) return;
+    if (now - lastBootSaveAtRef.current < 25_000) return;
     lastBootSaveAtRef.current = now;
-    try {
-      const compactAssets: BootstrapCachePayload['assets'] = assets.map((a) => ({
-        id: a.id,
-        price: a.price,
-        prevClose: a.prevClose,
-        changeValue: a.changeValue,
-        changePercent: a.changePercent,
-        open: a.open,
-        dayHigh: a.dayHigh,
-        dayLow: a.dayLow,
-        volume: a.volume,
-        sentiment: a.sentiment,
-        support: a.support,
-        resistance: a.resistance,
-        commentary: a.commentary,
-        updatedAtEpoch: a.updatedAtEpoch,
-        marketSessionOpen: a.marketSessionOpen,
-        sessionStateLabel: a.sessionStateLabel,
-        fearGreed7d: a.fearGreed7d,
-        move5mPct: a.move5mPct,
-        vol5mRangePct: a.vol5mRangePct,
-        move5mSource: a.move5mSource,
-      }));
-      const payload: BootstrapCachePayload = {
-        savedAt: now,
-        assets: compactAssets,
-        fxRates,
-        fxPairTiles,
-        newsStories: newsStories.slice(0, 20),
-        economicEvents: economicEvents.slice(0, 20),
-        usMoversBucket,
-        idxMoversBucket,
-      };
-      localStorage.setItem(BOOTSTRAP_CACHE_KEY, JSON.stringify(payload));
-    } catch {
-      // ignore storage quota errors
+
+    const persistSnapshot = () => {
+      try {
+        const compactAssets: BootstrapCachePayload['assets'] = assets.map((a) => ({
+          id: a.id,
+          price: a.price,
+          prevClose: a.prevClose,
+          changeValue: a.changeValue,
+          changePercent: a.changePercent,
+          open: a.open,
+          dayHigh: a.dayHigh,
+          dayLow: a.dayLow,
+          volume: a.volume,
+          sentiment: a.sentiment,
+          support: a.support,
+          resistance: a.resistance,
+          commentary: a.commentary,
+          updatedAtEpoch: a.updatedAtEpoch,
+          marketSessionOpen: a.marketSessionOpen,
+          sessionStateLabel: a.sessionStateLabel,
+          fearGreed7d: a.fearGreed7d,
+          move5mPct: a.move5mPct,
+          vol5mRangePct: a.vol5mRangePct,
+          move5mSource: a.move5mSource,
+        }));
+        const payload: BootstrapCachePayload = {
+          savedAt: now,
+          assets: compactAssets,
+          fxRates,
+          fxPairTiles,
+          newsStories: newsStories.slice(0, 20),
+          economicEvents: economicEvents.slice(0, 20),
+          usMoversBucket,
+          idxMoversBucket,
+        };
+        localStorage.setItem(BOOTSTRAP_CACHE_KEY, JSON.stringify(payload));
+      } catch {
+        // ignore storage quota errors
+      }
+    };
+
+    const winWithIdle =
+      typeof window !== 'undefined'
+        ? (window as Window & {
+            requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
+            cancelIdleCallback?: (id: number) => void;
+          })
+        : null;
+    if (winWithIdle && typeof winWithIdle.requestIdleCallback === 'function') {
+      const id = winWithIdle.requestIdleCallback(persistSnapshot, { timeout: 1500 });
+      return () => winWithIdle.cancelIdleCallback?.(id);
     }
+    const timer = window.setTimeout(persistSnapshot, 250);
+    return () => window.clearTimeout(timer);
   }, [feedsLive, assets, fxRates, fxPairTiles, newsStories, economicEvents, usMoversBucket, idxMoversBucket]);
 
   // Prioritized staggered initial fetch + 1-second live polling + background refresh strategy
@@ -739,22 +777,26 @@ export function useLiveMarket() {
       typeof document !== 'undefined' ? document.visibilityState === 'hidden' : false;
     let lastBackgroundPollAt = 0;
 
-    // T=0: Critical first-paint quotes & FX rates
+    // T=0: Critical first-paint quotes & FX rates only (zero secondary contention)
     void refreshQuotes(true);
     void refreshFxRates(true);
 
-    // T=120ms: Stocks movers & live news/calendar
+    // T=320ms: Stocks movers & live news/calendar after initial paint and quote packet
     const t1 = window.setTimeout(() => {
       void refreshStocks(true);
       void refreshSecondaryFeeds(true);
-    }, 120);
+    }, 320);
 
-    // T=340ms: Heavy analytics (heatmap, 24h summary, multi-source intelligence)
+    // T=750ms: Dashboard market intelligence panel
     const t2 = window.setTimeout(() => {
+      void fetchMarketIntelligence(true);
+    }, 750);
+
+    // T=1500ms: Secondary analytics (heatmap, 24h summary) deferred past initial interactive budget
+    const t3 = window.setTimeout(() => {
       void refreshHeatmap(true);
       void fetchDailySummary(true);
-      void fetchMarketIntelligence(true);
-    }, 340);
+    }, 1500);
 
     const handleVisibilityChange = () => {
       if (typeof document === 'undefined') return;
@@ -822,6 +864,7 @@ export function useLiveMarket() {
       }
       window.clearTimeout(t1);
       window.clearTimeout(t2);
+      window.clearTimeout(t3);
       window.clearInterval(quoteTimer);
       window.clearInterval(stocksTimer);
       window.clearInterval(heatmapTimer);
@@ -836,6 +879,52 @@ export function useLiveMarket() {
     fetchDailySummary,
     fetchMarketIntelligence,
   ]);
+
+  // Politely pre-warm 15m and 5m real OHLC candles for ICT Radar assets after boot so
+  // background alerts & volatility bands are ready even before opening #ict
+  useEffect(() => {
+    const ICT_WARM_IDS = [
+      'BTCUSD',
+      'XAUUSD',
+      'EURUSD',
+      'GBPUSD',
+      'USDJPY',
+      'AUDUSD',
+      'USDCHF',
+      'USDCAD',
+      'NZDUSD',
+    ];
+    let cancelled = false;
+
+    const warmBatches = async () => {
+      const tfs: Timeframe[] = ['15m', '5m'];
+      for (const tf of tfs) {
+        for (let i = 0; i < ICT_WARM_IDS.length; i += 3) {
+          if (cancelled) return;
+          const batch = ICT_WARM_IDS.slice(i, i + 3);
+          await Promise.allSettled(batch.map((id) => loadChartTimeframe(id, tf)));
+          if (cancelled) return;
+          await new Promise((r) => window.setTimeout(r, 180));
+        }
+      }
+    };
+
+    const bootWarmTimer = window.setTimeout(() => {
+      void warmBatches();
+    }, 3500);
+
+    const periodicWarmTimer = window.setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      if (!isPulseRef.current) return;
+      void warmBatches();
+    }, 180_000);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(bootWarmTimer);
+      window.clearInterval(periodicWarmTimer);
+    };
+  }, [loadChartTimeframe]);
 
   // Unified Coinbase Exchange USD WebSocket with jitter-buffer EMA smoothing for BTC/USD & ETH/USD
   useEffect(() => {

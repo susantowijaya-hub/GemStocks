@@ -1,6 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import type { User } from 'firebase/auth';
-import { getFirebaseServices } from '../lib/firebase';
+import { getFirebaseAuthServices, getFirebaseServices } from '../lib/firebase';
 import { OperationType, handleFirestoreError } from '../lib/firestoreErrors';
 import { CurrencyCode } from '../types/market';
 
@@ -132,7 +132,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const attachAuth = async () => {
       try {
         const [{ auth }, { onAuthStateChanged }] = await Promise.all([
-          getFirebaseServices(),
+          getFirebaseAuthServices(),
           import('firebase/auth'),
         ]);
         if (disposed) return;
@@ -170,9 +170,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (isPortfolioRoute) {
       void attachAuth();
     } else if (winWithIdle && typeof winWithIdle.requestIdleCallback === 'function') {
-      idleId = winWithIdle.requestIdleCallback(() => void attachAuth(), { timeout: 600 });
+      idleId = winWithIdle.requestIdleCallback(() => void attachAuth(), { timeout: 1400 });
     } else {
-      timerId = globalThis.setTimeout(() => void attachAuth(), 250);
+      timerId = globalThis.setTimeout(() => void attachAuth(), 550);
     }
 
     return () => {
@@ -285,7 +285,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setAuthLoading(true);
     try {
       const [{ auth, googleProvider }, { signInWithPopup }] = await Promise.all([
-        getFirebaseServices(),
+        getFirebaseAuthServices(),
         import('firebase/auth'),
       ]);
       const cred = await signInWithPopup(auth, googleProvider);
@@ -308,7 +308,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setAuthError(null);
     try {
       const [{ auth }, { signOut }] = await Promise.all([
-        getFirebaseServices(),
+        getFirebaseAuthServices(),
         import('firebase/auth'),
       ]);
       await signOut(auth);

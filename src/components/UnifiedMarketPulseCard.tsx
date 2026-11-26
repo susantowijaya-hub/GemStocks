@@ -1,5 +1,4 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { arc as d3Arc, scaleLinear } from 'd3';
 import {
   Activity,
   ArrowDown,
@@ -232,20 +231,33 @@ export const UnifiedMarketPulseCard: React.FC<UnifiedMarketPulseCardProps> = Rea
 
     const clampedComposite = Math.max(0, Math.min(100, pulse.compositeScore));
 
-    // D3 Semicircular Composite Gauge Geometry
+    // Semicircular Composite Gauge Geometry (pure SVG annular arc, zero d3 bundle weight)
     const { backgroundPath, segmentPaths, needleCoords } = useMemo(() => {
       const innerR = 58;
       const outerR = 70;
-      const angleScale = scaleLinear()
-        .domain([0, 100])
-        .range([-Math.PI / 2, Math.PI / 2]);
+      const angleForScore = (score: number) =>
+        -Math.PI / 2 + (Math.max(0, Math.min(100, score)) / 100) * Math.PI;
 
-      const arcGen = d3Arc<void>()
-        .innerRadius(innerR)
-        .outerRadius(outerR)
-        .cornerRadius(4);
+      const buildSectorArc = (rIn: number, rOut: number, startAngle: number, endAngle: number): string => {
+        const x1 = rOut * Math.sin(startAngle);
+        const y1 = -rOut * Math.cos(startAngle);
+        const x2 = rOut * Math.sin(endAngle);
+        const y2 = -rOut * Math.cos(endAngle);
+        const x3 = rIn * Math.sin(endAngle);
+        const y3 = -rIn * Math.cos(endAngle);
+        const x4 = rIn * Math.sin(startAngle);
+        const y4 = -rIn * Math.cos(startAngle);
+        const largeArc = Math.abs(endAngle - startAngle) > Math.PI ? 1 : 0;
+        return [
+          `M ${x1.toFixed(2)} ${y1.toFixed(2)}`,
+          `A ${rOut} ${rOut} 0 ${largeArc} 1 ${x2.toFixed(2)} ${y2.toFixed(2)}`,
+          `L ${x3.toFixed(2)} ${y3.toFixed(2)}`,
+          `A ${rIn} ${rIn} 0 ${largeArc} 0 ${x4.toFixed(2)} ${y4.toFixed(2)}`,
+          'Z',
+        ].join(' ');
+      };
 
-      const bg = arcGen.startAngle(-Math.PI / 2).endAngle(Math.PI / 2)() ?? '';
+      const bg = buildSectorArc(innerR, outerR, -Math.PI / 2, Math.PI / 2);
 
       const zones = [
         { from: 0, to: 34, color: isDarkSurface ? '#FF6B63' : '#DC2626' },
@@ -256,17 +268,11 @@ export const UnifiedMarketPulseCard: React.FC<UnifiedMarketPulseCardProps> = Rea
       ];
 
       const paths = zones.map((z) => ({
-        d:
-          d3Arc<void>()
-            .innerRadius(innerR + 1)
-            .outerRadius(outerR - 1)
-            .cornerRadius(3)
-            .startAngle(angleScale(z.from))
-            .endAngle(angleScale(z.to))() ?? '',
+        d: buildSectorArc(innerR + 1, outerR - 1, angleForScore(z.from), angleForScore(z.to)),
         color: z.color,
       }));
 
-      const theta = angleScale(clampedComposite);
+      const theta = angleForScore(clampedComposite);
       const cx = 110;
       const cy = 92;
       const tipLen = innerR - 6;

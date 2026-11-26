@@ -5,7 +5,6 @@
 
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
-import { motion } from 'motion/react';
 import { BottomDock } from './components/BottomDock';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { Header } from './components/Header';
@@ -23,6 +22,7 @@ import {
   ChartTradeOverlays,
   NewsStory,
   PriceAlertItem,
+  SyncedRadarConfig,
   Timeframe,
 } from './types/market';
 import { lazyWithRetry } from './utils/lazyWithRetry';
@@ -104,6 +104,37 @@ function getInitialRoute(): AppRoute {
   return VALID_ROUTES.includes(hash) ? hash : 'dashboard';
 }
 
+function getInitialSyncedRadarConfig(): SyncedRadarConfig {
+  try {
+    if (typeof window !== 'undefined') {
+      const raw = window.localStorage.getItem('stocks-ict-radar-prefs-v1');
+      if (raw) {
+        const parsed = JSON.parse(raw) as Partial<SyncedRadarConfig>;
+        return {
+          strategyMode: parsed.strategyMode === 'sdcv' ? 'sdcv' : 'ict',
+          timeframe: parsed.timeframe ?? '15m',
+          enforceVolatilityFilter:
+            typeof parsed.enforceVolatilityFilter === 'boolean'
+              ? parsed.enforceVolatilityFilter
+              : true,
+          enforceNewsBlackout:
+            typeof parsed.enforceNewsBlackout === 'boolean'
+              ? parsed.enforceNewsBlackout
+              : true,
+        };
+      }
+    }
+  } catch {
+    // ignore storage access issues
+  }
+  return {
+    strategyMode: 'ict',
+    timeframe: '15m',
+    enforceVolatilityFilter: true,
+    enforceNewsBlackout: true,
+  };
+}
+
 function StocksTerminalShell() {
   useRenderPerformance('StocksTerminalShell');
   const { themeMode, setThemeMode, toggleTheme } = useTheme();
@@ -151,6 +182,15 @@ function StocksTerminalShell() {
     progress: number;
   } | null>(null);
   const [selectedAssetId, setSelectedAssetId] = useState<string>('SPX');
+  const [syncedRadarConfig, setSyncedRadarConfig] = useState<SyncedRadarConfig>(
+    getInitialSyncedRadarConfig
+  );
+  const [radarJumpTarget, setRadarJumpTarget] = useState<{
+    assetId: string;
+    strategy?: 'ict' | 'sdcv';
+    timeframe?: Timeframe;
+    nonce: number;
+  } | null>(null);
   const [inspectedSymbol, setInspectedSymbol] = useState<string | null>(null);
   const [inspectedOverlays, setInspectedOverlays] = useState<ChartTradeOverlays | null>(null);
   const [inspectedInitialTf, setInspectedInitialTf] = useState<Timeframe | undefined>(undefined);
@@ -212,7 +252,7 @@ function StocksTerminalShell() {
     pushIctSignalAlert,
     scanIctAlerts,
     scanBandarmologyAlerts,
-  } = usePriceAlerts(assets, idxMoversBucket, economicEvents);
+  } = usePriceAlerts(assets, idxMoversBucket, economicEvents, syncedRadarConfig);
 
   // Sync browser hash navigation (Back/Forward on Desktop, Android, and iOS Safari)
   useEffect(() => {
@@ -461,16 +501,9 @@ function StocksTerminalShell() {
           </div>
         )}
 
-        <motion.div
+        <div
           key={activeRoute}
-          initial={
-            swipeSlideDir !== 0
-              ? { opacity: 0.72, x: swipeSlideDir * 16 }
-              : false
-          }
-          animate={{ opacity: 1, x: 0 }}
-          transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
-          className="flex-1 flex flex-col"
+          className={`flex-1 flex flex-col ${swipeSlideDir !== 0 ? 'animate-route-enter' : ''}`}
         >
         <Suspense fallback={<MarketSkeleton variant="route" label="Loading terminal view..." />}>
         {activeRoute === 'dashboard' && (
@@ -569,6 +602,8 @@ function StocksTerminalShell() {
             }
             onMarkAlertRead={markRead}
             onUpdateAlertOutcome={updateAlertOutcome}
+            onSyncRadarConfig={setSyncedRadarConfig}
+            jumpTarget={radarJumpTarget}
             flashMap={flashMap}
             volatility5mMap={volatility5mMap}
             searchQuery={searchQuery}
@@ -615,7 +650,7 @@ function StocksTerminalShell() {
           />
         )}
         </Suspense>
-        </motion.div>
+        </div>
       </main>
 
       <BottomDock
@@ -640,6 +675,12 @@ function StocksTerminalShell() {
                 return;
               }
               if (alert.alertKind === 'ict') {
+                setRadarJumpTarget({
+                  assetId: alert.assetId,
+                  strategy: alert.ictStrategy,
+                  timeframe: alert.ictTimeframe,
+                  nonce: Date.now(),
+                });
                 handleNavigate('ict');
                 return;
               }

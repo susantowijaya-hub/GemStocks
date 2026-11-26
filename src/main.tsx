@@ -18,4 +18,8 @@ if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
   }
 }
 
+if (typeof window !== 'undefined') {
+  (window as unknown as { __STOCKS_MOUNTED__?: boolean }).__STOCKS_MOUNTED__ = true;
+}
+
 createRoot(document.getElementById('root')!).render(<App />);

@@ -1,5 +1,4 @@
 import React, { useId } from 'react';
-import { motion } from 'motion/react';
 import {
   Activity,
   ArrowDown,
@@ -458,13 +457,10 @@ export const SignalBadge: React.FC<{
       : 'bg-[#E5E5EA]/90 dark:bg-[#2C2C2E] text-[#45474F] dark:text-[#C5C8D2] border-[#C7C7CC] dark:border-[#48484E]';
 
   return (
-    <motion.span
+    <span
       key={signal.tier}
-      initial={{ opacity: 0.78, scale: 0.96 }}
-      animate={{ opacity: 1, scale: 1 }}
-      transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
       title={signal.reason}
-      className={`inline-flex items-center gap-1 rounded-full border font-bold whitespace-nowrap shrink-0 backdrop-blur-sm ${
+      className={`inline-flex items-center gap-1 rounded-full border font-bold whitespace-nowrap shrink-0 backdrop-blur-sm transition-all duration-200 ${
         compact ? 'px-2 py-0.5 text-[10px]' : 'px-2.5 py-1 text-[11px]'
       } ${toneClasses} ${className}`}
     >
@@ -488,7 +484,7 @@ export const SignalBadge: React.FC<{
           ({signal.score > 0 ? `+${signal.score}` : signal.score})
         </span>
       )}
-    </motion.span>
+    </span>
   );
 });
 

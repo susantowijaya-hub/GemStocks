@@ -2,19 +2,24 @@ import type { FirebaseApp } from 'firebase/app';
 import type { Auth, GoogleAuthProvider, User } from 'firebase/auth';
 import type { Firestore } from 'firebase/firestore';
 
-export interface FirebaseRuntimeServices {
+export interface FirebaseAuthServices {
   app: FirebaseApp;
-  db: Firestore;
   auth: Auth;
   googleProvider: GoogleAuthProvider;
 }
 
+export interface FirebaseRuntimeServices extends FirebaseAuthServices {
+  db: Firestore;
+}
+
+let authPromise: Promise<FirebaseAuthServices> | null = null;
+let cachedAuthServices: FirebaseAuthServices | null = null;
 let servicesPromise: Promise<FirebaseRuntimeServices> | null = null;
 let cachedServices: FirebaseRuntimeServices | null = null;
 let connectionTested = false;
 
 export function getCachedAuthUser(): User | null {
-  return cachedServices?.auth.currentUser ?? null;
+  return cachedAuthServices?.auth.currentUser ?? cachedServices?.auth.currentUser ?? null;
 }
 
 async function runConnectionCheck(db: Firestore): Promise<void> {
@@ -46,45 +51,61 @@ async function runConnectionCheck(db: Firestore): Promise<void> {
   }
 }
 
+export function getFirebaseAuthServices(): Promise<FirebaseAuthServices> {
+  if (cachedAuthServices) {
+    return Promise.resolve(cachedAuthServices);
+  }
+  if (!authPromise) {
+    authPromise = (async () => {
+      const [{ initializeApp, getApps }, { getAuth, GoogleAuthProvider }, configMod] =
+        await Promise.all([
+          import('firebase/app'),
+          import('firebase/auth'),
+          import('../../firebase-applet-config.json'),
+        ]);
+
+      const firebaseConfig = configMod.default;
+      const existing = getApps();
+      const app = existing.length > 0 ? existing[0] : initializeApp(firebaseConfig);
+      const auth = getAuth(app);
+      const googleProvider = new GoogleAuthProvider();
+      googleProvider.setCustomParameters({ prompt: 'select_account' });
+
+      const authServices: FirebaseAuthServices = { app, auth, googleProvider };
+      cachedAuthServices = authServices;
+      return authServices;
+    })();
+  }
+  return authPromise;
+}
+
 export function getFirebaseServices(): Promise<FirebaseRuntimeServices> {
   if (cachedServices) {
     return Promise.resolve(cachedServices);
   }
   if (!servicesPromise) {
     servicesPromise = (async () => {
-      const [
-        { initializeApp },
-        { getAuth, GoogleAuthProvider },
-        { getFirestore, initializeFirestore },
-        configMod,
-      ] = await Promise.all([
-        import('firebase/app'),
-        import('firebase/auth'),
+      const [authServices, { getFirestore, initializeFirestore }, configMod] = await Promise.all([
+        getFirebaseAuthServices(),
         import('firebase/firestore'),
         import('../../firebase-applet-config.json'),
       ]);
 
       const firebaseConfig = configMod.default;
-      const app = initializeApp(firebaseConfig);
-
       let db: Firestore;
       try {
         // Force long polling in iframe/proxied environments so WebChannel stream blocks
         // do not trigger transient "code=unavailable / client is offline" failures.
         db = initializeFirestore(
-          app,
+          authServices.app,
           { experimentalForceLongPolling: true },
           firebaseConfig.firestoreDatabaseId
         );
       } catch {
-        db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+        db = getFirestore(authServices.app, firebaseConfig.firestoreDatabaseId);
       }
 
-      const auth = getAuth(app);
-      const googleProvider = new GoogleAuthProvider();
-      googleProvider.setCustomParameters({ prompt: 'select_account' });
-
-      const services: FirebaseRuntimeServices = { app, db, auth, googleProvider };
+      const services: FirebaseRuntimeServices = { ...authServices, db };
       cachedServices = services;
       void runConnectionCheck(db);
       return services;

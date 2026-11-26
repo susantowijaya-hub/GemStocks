@@ -3,11 +3,13 @@ import {
   Asset5mVolatility,
   BandarmologyPhase,
   EconomicEvent,
+  IctExecutionPosture,
   IctSignalAnalysis,
   MarketAsset,
   PriceAlertItem,
   SdCandleVolumeSignal,
   StocksMoversBucket,
+  SyncedRadarConfig,
   Timeframe,
 } from '../types/market';
 import {
@@ -20,8 +22,41 @@ import {
   loadPersistedBandarPhases,
   savePersistedBandarPhases,
 } from '../utils/bandarmologyAlerts';
-import { scanAllIctSignals } from '../utils/ictSignals';
-import { scanAllSdCandleVolumeSignals } from '../utils/sdCandleVolumeSignals';
+
+const TF_DURATION_MS: Partial<Record<Timeframe, number>> = {
+  '1m': 60_000,
+  '5m': 300_000,
+  '15m': 900_000,
+  '30m': 1_800_000,
+  '1h': 3_600_000,
+  '4h': 14_400_000,
+  '1D': 86_400_000,
+};
+
+type RadarEngines = {
+  scanAllIctSignals: typeof import('../utils/ictSignals').scanAllIctSignals;
+  scanAllSdCandleVolumeSignals: typeof import('../utils/sdCandleVolumeSignals').scanAllSdCandleVolumeSignals;
+};
+
+let cachedEngines: RadarEngines | null = null;
+let enginesPromise: Promise<RadarEngines> | null = null;
+
+function loadRadarSignalEngines(): Promise<RadarEngines> {
+  if (cachedEngines) return Promise.resolve(cachedEngines);
+  if (!enginesPromise) {
+    enginesPromise = Promise.all([
+      import('../utils/ictSignals'),
+      import('../utils/sdCandleVolumeSignals'),
+    ]).then(([ictMod, sdcvMod]) => {
+      cachedEngines = {
+        scanAllIctSignals: ictMod.scanAllIctSignals,
+        scanAllSdCandleVolumeSignals: sdcvMod.scanAllSdCandleVolumeSignals,
+      };
+      return cachedEngines;
+    });
+  }
+  return enginesPromise;
+}
 
 const WINDOW_MS = 5 * 60 * 1000; // 5-minute rolling window
 const LIVE_CONFIRM_MIN_SPAN_MS = 4 * 60 * 1000; // Require >= 4 minutes of browser samples before switching from verified server 5m telemetry
@@ -49,6 +84,7 @@ interface IctCooldownState {
   direction: 'BUY' | 'SELL' | 'WAIT';
   confidence: number;
   setupName: string;
+  stage?: 'armed' | 'triggered' | 'pullback_limit';
 }
 
 interface PendingSpikeState {
@@ -235,11 +271,59 @@ function loadIctPopupPreference(): boolean {
   return true;
 }
 
+const ICT_RADAR_PREFS_STORAGE_KEY = 'stocks-ict-radar-prefs-v1';
+
+function loadSyncedRadarConfigFallback(): SyncedRadarConfig {
+  try {
+    if (typeof window !== 'undefined') {
+      const raw = window.localStorage.getItem(ICT_RADAR_PREFS_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as Partial<SyncedRadarConfig>;
+        return {
+          strategyMode: parsed.strategyMode === 'sdcv' ? 'sdcv' : 'ict',
+          timeframe: parsed.timeframe ?? '15m',
+          enforceVolatilityFilter:
+            typeof parsed.enforceVolatilityFilter === 'boolean'
+              ? parsed.enforceVolatilityFilter
+              : true,
+          enforceNewsBlackout:
+            typeof parsed.enforceNewsBlackout === 'boolean'
+              ? parsed.enforceNewsBlackout
+              : true,
+        };
+      }
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return {
+    strategyMode: 'ict',
+    timeframe: '15m',
+    enforceVolatilityFilter: true,
+    enforceNewsBlackout: true,
+  };
+}
+
+function resolveAlertExecutionStage(posture?: IctExecutionPosture): {
+  ictStage: 'armed' | 'triggered' | 'pullback_limit';
+  fillStatus: 'filled' | 'awaiting_fill';
+} {
+  if (posture === 'enter_now') {
+    return { ictStage: 'triggered', fillStatus: 'filled' };
+  }
+  if (posture === 'limit_pullback_only') {
+    return { ictStage: 'pullback_limit', fillStatus: 'awaiting_fill' };
+  }
+  return { ictStage: 'armed', fillStatus: 'awaiting_fill' };
+}
+
 export function usePriceAlerts(
   assets: MarketAsset[],
   idxBucket?: StocksMoversBucket | null,
-  economicEvents?: EconomicEvent[]
+  economicEvents?: EconomicEvent[],
+  syncedRadarConfig?: SyncedRadarConfig
 ) {
+  const effectiveRadarConfig = syncedRadarConfig ?? loadSyncedRadarConfigFallback();
   const [alerts, setAlerts] = useState<PriceAlertItem[]>(loadPersistedAlerts);
   const [toasts, setToasts] = useState<PriceAlertItem[]>([]);
   const [ictPopupsEnabled, setIctPopupsEnabledState] = useState<boolean>(loadIctPopupPreference);
@@ -262,6 +346,11 @@ export function usePriceAlerts(
   const ictCooldownRef = useRef<Record<string, IctCooldownState>>({});
   const entryZoneCooldownRef = useRef<Record<string, number>>({});
   const lastSignalScanAtRef = useRef<number>(0);
+  const lastVolCommitAtRef = useRef<number>(0);
+  const lastVolAssetCountRef = useRef<number>(0);
+  const lastGradeAtRef = useRef<number>(0);
+  const alertsRef = useRef<PriceAlertItem[]>(alerts);
+  alertsRef.current = alerts;
   const lastCandleSigRef = useRef<string>('');
   const initialIctScannedRef = useRef<boolean>(false);
   const bandarPhaseMapRef = useRef<Record<string, BandarmologyPhase>>(loadPersistedBandarPhases());
@@ -298,7 +387,19 @@ export function usePriceAlerts(
   }, []);
 
   useEffect(() => {
-    savePersistedAlerts(alerts);
+    const winWithIdle =
+      typeof window !== 'undefined'
+        ? (window as Window & {
+            requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
+            cancelIdleCallback?: (id: number) => void;
+          })
+        : null;
+    if (winWithIdle && typeof winWithIdle.requestIdleCallback === 'function') {
+      const id = winWithIdle.requestIdleCallback(() => savePersistedAlerts(alerts), { timeout: 600 });
+      return () => winWithIdle.cancelIdleCallback?.(id);
+    }
+    const timer = window.setTimeout(() => savePersistedAlerts(alerts), 120);
+    return () => window.clearTimeout(timer);
   }, [alerts]);
 
   const pushAlert = useCallback(
@@ -324,6 +425,10 @@ export function usePriceAlerts(
         forcedDirection ??
         (sig.direction === 'BUY' ? 'BUY' : sig.direction === 'SELL' ? 'SELL' : 'WAIT');
       const now = Date.now();
+      const stageMeta =
+        action === 'BUY' || action === 'SELL'
+          ? resolveAlertExecutionStage(sig.executionPosture)
+          : undefined;
       return {
         id: `${strategy}-${sig.assetId}-${action}-${now}-${Math.random().toString(36).slice(2, 6)}`,
         assetId: sig.assetId,
@@ -355,6 +460,11 @@ export function usePriceAlerts(
         stopLossNum: sig.stopLossNum,
         tp1Num: sig.tp1Num,
         tp2Num: sig.tp2Num,
+        ictStage: stageMeta?.ictStage,
+        fillStatus: stageMeta?.fillStatus,
+        filledAt: stageMeta?.fillStatus === 'filled' ? now : undefined,
+        recommendedOrderType: sig.recommendedOrderType,
+        limitEntryPriceNum: sig.limitEntryPriceNum,
       };
     },
     []
@@ -366,6 +476,10 @@ export function usePriceAlerts(
         forcedDirection ??
         (sdcv.direction === 'BUY' ? 'BUY' : sdcv.direction === 'SELL' ? 'SELL' : 'WAIT');
       const now = Date.now();
+      const stageMeta =
+        action === 'BUY' || action === 'SELL'
+          ? resolveAlertExecutionStage(sdcv.executionPosture)
+          : undefined;
       return {
         id: `sdcv-${sdcv.assetId}-${action}-${now}-${Math.random().toString(36).slice(2, 6)}`,
         assetId: sdcv.assetId,
@@ -397,6 +511,11 @@ export function usePriceAlerts(
         stopLossNum: sdcv.stopLossNum,
         tp1Num: sdcv.tp1Num,
         tp2Num: sdcv.tp2Num,
+        ictStage: stageMeta?.ictStage,
+        fillStatus: stageMeta?.fillStatus,
+        filledAt: stageMeta?.fillStatus === 'filled' ? now : undefined,
+        recommendedOrderType: sdcv.recommendedOrderType,
+        limitEntryPriceNum: sdcv.limitEntryPriceNum,
       };
     },
     []
@@ -546,6 +665,17 @@ export function usePriceAlerts(
       pushAlert(alertItem);
     }
 
+    // Throttle React state commits for 5m volatility map so high-frequency WS ticks don't force 200ms re-render loops
+    if (
+      lastVolAssetCountRef.current === assets.length &&
+      lastVolCommitAtRef.current > 0 &&
+      now - lastVolCommitAtRef.current < 2000
+    ) {
+      return;
+    }
+    lastVolCommitAtRef.current = now;
+    lastVolAssetCountRef.current = assets.length;
+
     // Compute 5-minute deviation strictly across OPEN trading sessions so closed sessions do not crush variance
     const activeMetrics = allMetrics.filter((m) => m.isSessionOpen);
     const activeCount = activeMetrics.length;
@@ -621,19 +751,33 @@ export function usePriceAlerts(
     };
   }, []);
 
-  // Automated Dual-Engine Monitor (Throttled to >=5s or structural candle changes) + Entry-Zone proximity trigger
+  // Automated Dual-Engine Monitor (Synced with Radar filters) + Entry-Zone fill trigger
+  // Lazily loads signal engines only once real intraday OHLC candles are available
   useEffect(() => {
     if (assets.length === 0) return;
+    const prefTf = effectiveRadarConfig.timeframe;
+    const hasAnyOhlc = assets.some(
+      (a) =>
+        (a.chartCandles?.[prefTf]?.length ?? 0) >= 6 ||
+        (a.chartCandles?.['15m']?.length ?? 0) >= 6 ||
+        (a.chartCandles?.['5m']?.length ?? 0) >= 6
+    );
+    if (!hasAnyOhlc) return;
+
     const now = Date.now();
-    const candleSig = assets
-      .map((a) => {
-        const c15 = a.chartCandles?.['15m'];
-        const c5 = a.chartCandles?.['5m'];
-        const t15 = c15?.[c15.length - 1]?.t ?? 0;
-        const t5 = c5?.[c5.length - 1]?.t ?? 0;
-        return `${a.id}:${c15?.length ?? 0}:${t15}:${c5?.length ?? 0}:${t5}`;
-      })
-      .join('|');
+    const candleSig =
+      `${effectiveRadarConfig.strategyMode}:${prefTf}:${effectiveRadarConfig.enforceVolatilityFilter}:${effectiveRadarConfig.enforceNewsBlackout}|` +
+      assets
+        .map((a) => {
+          const cPref = a.chartCandles?.[prefTf];
+          const c15 = a.chartCandles?.['15m'];
+          const c5 = a.chartCandles?.['5m'];
+          const tP = cPref?.[cPref.length - 1]?.t ?? 0;
+          const t15 = c15?.[c15.length - 1]?.t ?? 0;
+          const t5 = c5?.[c5.length - 1]?.t ?? 0;
+          return `${a.id}:${cPref?.length ?? 0}:${tP}:${c15?.length ?? 0}:${t15}:${c5?.length ?? 0}:${t5}`;
+        })
+        .join('|');
 
     const candleChanged = candleSig !== lastCandleSigRef.current;
     if (
@@ -646,113 +790,196 @@ export function usePriceAlerts(
     lastCandleSigRef.current = candleSig;
     lastSignalScanAtRef.current = now;
 
-    const ictSignals = scanAllIctSignals(assets, undefined, true, economicEvents, true);
-    const activeIct = ictSignals.filter((s) => s.direction !== 'NEUTRAL' && s.confidence >= 58);
+    let cancelled = false;
+    void loadRadarSignalEngines().then(({ scanAllIctSignals, scanAllSdCandleVolumeSignals }) => {
+      if (cancelled) return;
+      const scanNow = Date.now();
+      const prefMap = Object.fromEntries(assets.map((a) => [a.id, prefTf])) as Record<string, Timeframe>;
+      const ictSignals = scanAllIctSignals(
+        assets,
+        prefMap,
+        effectiveRadarConfig.enforceVolatilityFilter,
+        economicEvents,
+        effectiveRadarConfig.enforceNewsBlackout
+      );
+      const sdcvSignals = scanAllSdCandleVolumeSignals(
+        assets,
+        prefMap,
+        effectiveRadarConfig.enforceVolatilityFilter,
+        economicEvents,
+        effectiveRadarConfig.enforceNewsBlackout
+      );
 
-    const sdcvSignals = scanAllSdCandleVolumeSignals(assets, undefined, true, economicEvents, true);
-    const activeSdcv = sdcvSignals.filter((s) => s.direction !== 'NEUTRAL' && s.confidence >= 66);
-
-    if (!initialIctScannedRef.current) {
-      initialIctScannedRef.current = true;
-      for (const sig of activeIct.slice(0, 2).reverse()) {
-        const dir = sig.direction === 'SELL' ? 'SELL' : 'BUY';
-        const key = `ict:${sig.assetId}`;
-        ictCooldownRef.current[key] = {
-          triggeredAt: now,
-          direction: dir,
-          confidence: sig.confidence,
-          setupName: sig.setupName,
-        };
-        pushAlert(buildIctAlertItem(sig, dir, 'ict'), false);
+      const hasRealOhlc =
+        ictSignals.some((s) => s.isRealOhlc) || sdcvSignals.some((s) => s.isRealOhlc);
+      if (!hasRealOhlc) {
+        return;
       }
-      for (const sig of activeSdcv.slice(0, 1)) {
-        const dir = sig.direction === 'SELL' ? 'SELL' : 'BUY';
-        const key = `sdcv:${sig.assetId}`;
-        ictCooldownRef.current[key] = {
-          triggeredAt: now,
-          direction: dir,
-          confidence: sig.confidence,
-          setupName: sig.candlePattern,
-        };
-        pushAlert(buildSdcvAlertItem(sig, dir), false);
+
+      const activeIct = ictSignals.filter((s) => s.direction !== 'NEUTRAL' && s.confidence >= 56);
+      const activeSdcv = sdcvSignals.filter((s) => s.direction !== 'NEUTRAL' && s.confidence >= 60);
+
+      if (!initialIctScannedRef.current) {
+        initialIctScannedRef.current = true;
+        for (const sig of activeIct.slice().reverse()) {
+          const dir = sig.direction === 'SELL' ? 'SELL' : 'BUY';
+          const stage = resolveAlertExecutionStage(sig.executionPosture).ictStage;
+          const key = `ict:${sig.assetId}:${sig.timeframe}`;
+          ictCooldownRef.current[key] = {
+            triggeredAt: scanNow,
+            direction: dir,
+            confidence: sig.confidence,
+            setupName: sig.setupName,
+            stage,
+          };
+          pushAlert(buildIctAlertItem(sig, dir, 'ict'), false);
+        }
+        for (const sig of activeSdcv.slice().reverse()) {
+          const dir = sig.direction === 'SELL' ? 'SELL' : 'BUY';
+          const stage = resolveAlertExecutionStage(sig.executionPosture).ictStage;
+          const key = `sdcv:${sig.assetId}:${sig.timeframe}`;
+          ictCooldownRef.current[key] = {
+            triggeredAt: scanNow,
+            direction: dir,
+            confidence: sig.confidence,
+            setupName: sig.candlePattern,
+            stage,
+          };
+          pushAlert(buildSdcvAlertItem(sig, dir), false);
+        }
+        return;
       }
-      return;
-    }
 
-    const assetPriceMap = new Map(assets.map((a) => [a.id, a.price]));
+      const assetPriceMap = new Map(assets.map((a) => [a.id, a.price]));
 
-    for (const sig of activeIct) {
-      const dir = sig.direction === 'SELL' ? 'SELL' : 'BUY';
-      const key = `ict:${sig.assetId}`;
-      const prev = ictCooldownRef.current[key];
-      const withinCooldown = prev && now - prev.triggeredAt < ICT_COOLDOWN_MS;
-      const changedDirection = !prev || prev.direction !== dir;
-      const upgraded = prev && sig.confidence - prev.confidence >= 12;
+      for (const sig of activeIct) {
+        const dir = sig.direction === 'SELL' ? 'SELL' : 'BUY';
+        const stage = resolveAlertExecutionStage(sig.executionPosture).ictStage;
+        const key = `ict:${sig.assetId}:${sig.timeframe}`;
+        const prev = ictCooldownRef.current[key];
+        const withinCooldown = prev && scanNow - prev.triggeredAt < ICT_COOLDOWN_MS;
+        const changedDirection = !prev || prev.direction !== dir;
+        const upgraded = prev && sig.confidence - prev.confidence >= 12;
+        const stageEscalated = prev && prev.stage !== 'triggered' && stage === 'triggered';
 
-      if (!prev || !withinCooldown || changedDirection || upgraded) {
-        ictCooldownRef.current[key] = {
-          triggeredAt: now,
-          direction: dir,
-          confidence: sig.confidence,
-          setupName: sig.setupName,
-        };
-        pushAlert(buildIctAlertItem(sig, dir, 'ict'), true);
-      } else {
-        const livePx = assetPriceMap.get(sig.assetId) ?? sig.currentPrice;
-        if (
-          typeof sig.entryLowNum === 'number' &&
-          typeof sig.entryHighNum === 'number' &&
-          livePx >= Math.min(sig.entryLowNum, sig.entryHighNum) &&
-          livePx <= Math.max(sig.entryLowNum, sig.entryHighNum)
-        ) {
-          const zKey = `${key}:zone:${dir}`;
-          const lastZoneAt = entryZoneCooldownRef.current[zKey] ?? 0;
-          if (now - lastZoneAt >= 15 * 60_000) {
-            entryZoneCooldownRef.current[zKey] = now;
-            pushAlert(
-              {
-                ...buildIctAlertItem(sig, dir, 'ict'),
-                ictSetup: `Spot Entered Zone · ${sig.setupName}`,
-              },
-              true
-            );
+        if (!prev || !withinCooldown || changedDirection || upgraded || stageEscalated) {
+          ictCooldownRef.current[key] = {
+            triggeredAt: scanNow,
+            direction: dir,
+            confidence: sig.confidence,
+            setupName: sig.setupName,
+            stage,
+          };
+          pushAlert(
+            stageEscalated
+              ? {
+                  ...buildIctAlertItem(sig, dir, 'ict'),
+                  ictSetup: `Zone Fill Triggered · ${sig.setupName}`,
+                }
+              : buildIctAlertItem(sig, dir, 'ict'),
+            true
+          );
+        } else {
+          const livePx = assetPriceMap.get(sig.assetId) ?? sig.currentPrice;
+          if (
+            typeof sig.entryLowNum === 'number' &&
+            typeof sig.entryHighNum === 'number' &&
+            livePx >= Math.min(sig.entryLowNum, sig.entryHighNum) &&
+            livePx <= Math.max(sig.entryLowNum, sig.entryHighNum)
+          ) {
+            const zKey = `${key}:zone:${dir}`;
+            const lastZoneAt = entryZoneCooldownRef.current[zKey] ?? 0;
+            if (scanNow - lastZoneAt >= 15 * 60_000) {
+              entryZoneCooldownRef.current[zKey] = scanNow;
+              pushAlert(
+                {
+                  ...buildIctAlertItem(sig, dir, 'ict'),
+                  ictStage: 'triggered',
+                  fillStatus: 'filled',
+                  filledAt: scanNow,
+                  ictSetup: `Spot Entered Zone · ${sig.setupName}`,
+                },
+                true
+              );
+            }
           }
         }
       }
-    }
 
-    for (const sig of activeSdcv) {
-      const dir = sig.direction === 'SELL' ? 'SELL' : 'BUY';
-      const key = `sdcv:${sig.assetId}`;
-      const prev = ictCooldownRef.current[key];
-      const withinCooldown = prev && now - prev.triggeredAt < ICT_COOLDOWN_MS;
-      const changedDirection = !prev || prev.direction !== dir;
-      const upgraded = prev && sig.confidence - prev.confidence >= 12;
+      for (const sig of activeSdcv) {
+        const dir = sig.direction === 'SELL' ? 'SELL' : 'BUY';
+        const stage = resolveAlertExecutionStage(sig.executionPosture).ictStage;
+        const key = `sdcv:${sig.assetId}:${sig.timeframe}`;
+        const prev = ictCooldownRef.current[key];
+        const withinCooldown = prev && scanNow - prev.triggeredAt < ICT_COOLDOWN_MS;
+        const changedDirection = !prev || prev.direction !== dir;
+        const upgraded = prev && sig.confidence - prev.confidence >= 12;
+        const stageEscalated = prev && prev.stage !== 'triggered' && stage === 'triggered';
 
-      if (!prev || !withinCooldown || changedDirection || upgraded) {
-        ictCooldownRef.current[key] = {
-          triggeredAt: now,
-          direction: dir,
-          confidence: sig.confidence,
-          setupName: sig.candlePattern,
-        };
-        pushAlert(buildSdcvAlertItem(sig, dir), true);
+        if (!prev || !withinCooldown || changedDirection || upgraded || stageEscalated) {
+          ictCooldownRef.current[key] = {
+            triggeredAt: scanNow,
+            direction: dir,
+            confidence: sig.confidence,
+            setupName: sig.candlePattern,
+            stage,
+          };
+          pushAlert(
+            stageEscalated
+              ? {
+                  ...buildSdcvAlertItem(sig, dir),
+                  ictSetup: `Zone Fill · ${sig.zoneStatus} ${sig.zoneBias} · ${sig.candlePattern}`,
+                }
+              : buildSdcvAlertItem(sig, dir),
+            true
+          );
+        }
       }
-    }
-  }, [assets, economicEvents, buildIctAlertItem, buildSdcvAlertItem, pushAlert]);
+    });
 
-  // Automated Outcome Grader: evaluates pending BUY/SELL alerts against live price & subsequent OHLC bars
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    assets,
+    economicEvents,
+    effectiveRadarConfig.timeframe,
+    effectiveRadarConfig.strategyMode,
+    effectiveRadarConfig.enforceVolatilityFilter,
+    effectiveRadarConfig.enforceNewsBlackout,
+    buildIctAlertItem,
+    buildSdcvAlertItem,
+    pushAlert,
+  ]);
+
+  // Fill-Verified Automated Outcome Grader:
+  // 1) Verifies Entry Zone fill first for Armed Limit / Pullback alerts (or marks expired_unfilled if TP1/SL hit first)
+  // 2) Grades win/loss strictly AFTER fill is confirmed
   useEffect(() => {
     if (assets.length === 0) return;
-    const assetById = new Map(assets.map((a) => [a.id, a]));
+    const hasPendingIct = alertsRef.current.some(
+      (item) =>
+        item.alertKind === 'ict' &&
+        item.outcomeStatus === 'pending' &&
+        item.fillStatus !== 'expired_unfilled' &&
+        (item.ictAction === 'BUY' || item.ictAction === 'SELL') &&
+        typeof item.stopLossNum === 'number'
+    );
+    if (!hasPendingIct) return;
+
     const now = Date.now();
+    if (now - lastGradeAtRef.current < 3000) return;
+    lastGradeAtRef.current = now;
+
+    const assetById = new Map(assets.map((a) => [a.id, a]));
 
     setAlerts((prev) => {
       let changed = false;
-      const next = prev.map((item) => {
+      const next: PriceAlertItem[] = prev.map((item): PriceAlertItem => {
         if (
           item.alertKind !== 'ict' ||
           item.outcomeStatus !== 'pending' ||
+          item.fillStatus === 'expired_unfilled' ||
           (item.ictAction !== 'BUY' && item.ictAction !== 'SELL') ||
           typeof item.stopLossNum !== 'number'
         ) {
@@ -764,16 +991,98 @@ export function usePriceAlerts(
         const asset = assetById.get(item.assetId);
         if (!asset || !Number.isFinite(asset.price) || asset.price <= 0) return item;
 
-        const bars15 = asset.chartCandles?.['15m'] ?? [];
-        const bars5 = asset.chartCandles?.['5m'] ?? [];
-        const relevantBars = [...bars15, ...bars5]
-          .filter((b) => b.t >= item.triggeredAt)
+        const sl = item.stopLossNum;
+        const tf = item.ictTimeframe ?? '15m';
+        const tfBars = asset.chartCandles?.[tf] ?? [];
+        const fallbackBars = asset.chartCandles?.['5m'] ?? asset.chartCandles?.['15m'] ?? [];
+        const sourceBars = tfBars.length > 0 ? tfBars : fallbackBars;
+        const barMs = TF_DURATION_MS[tf] ?? 900_000;
+
+        let nextFillStatus: NonNullable<PriceAlertItem['fillStatus']> = item.fillStatus ?? 'filled';
+        let nextFilledAt = item.filledAt ?? (nextFillStatus === 'filled' ? item.triggeredAt : undefined);
+
+        if (nextFillStatus === 'awaiting_fill') {
+          if (
+            typeof item.entryLowNum !== 'number' ||
+            typeof item.entryHighNum !== 'number' ||
+            !Number.isFinite(item.entryLowNum) ||
+            !Number.isFinite(item.entryHighNum)
+          ) {
+            nextFillStatus = 'filled';
+            nextFilledAt = item.triggeredAt;
+          } else {
+            const lo = Math.min(item.entryLowNum, item.entryHighNum);
+            const hi = Math.max(item.entryLowNum, item.entryHighNum);
+            const postTriggerBars = sourceBars
+              .filter((b) => b.t > item.triggeredAt)
+              .sort((a, b) => a.t - b.t);
+
+            for (const bar of postTriggerBars) {
+              const touchedZone = bar.l <= hi && bar.h >= lo;
+              const crossedThroughBuy =
+                item.ictAction === 'BUY' && bar.l <= lo && bar.h >= sl;
+              const crossedThroughSell =
+                item.ictAction === 'SELL' && bar.h >= hi && bar.l <= sl;
+              if (touchedZone || crossedThroughBuy || crossedThroughSell) {
+                nextFillStatus = 'filled';
+                nextFilledAt = bar.t;
+                break;
+              }
+              if (item.ictAction === 'BUY') {
+                if (bar.h >= target || bar.l <= sl) {
+                  nextFillStatus = 'expired_unfilled';
+                  break;
+                }
+              } else {
+                if (bar.l <= target || bar.h >= sl) {
+                  nextFillStatus = 'expired_unfilled';
+                  break;
+                }
+              }
+            }
+
+            if (nextFillStatus === 'awaiting_fill') {
+              const inZoneLive =
+                (asset.price >= lo && asset.price <= hi) ||
+                (item.ictAction === 'BUY' && asset.price < lo && asset.price > sl) ||
+                (item.ictAction === 'SELL' && asset.price > hi && asset.price < sl);
+              if (inZoneLive) {
+                nextFillStatus = 'filled';
+                nextFilledAt = now;
+              } else if (
+                (item.ictAction === 'BUY' && (asset.price >= target || asset.price <= sl)) ||
+                (item.ictAction === 'SELL' && (asset.price <= target || asset.price >= sl))
+              ) {
+                nextFillStatus = 'expired_unfilled';
+              }
+            }
+          }
+        }
+
+        if (nextFillStatus === 'expired_unfilled') {
+          changed = true;
+          return {
+            ...item,
+            fillStatus: 'expired_unfilled',
+            autoGraded: true,
+            outcomeGradedAt: now,
+          };
+        }
+
+        if (nextFillStatus !== 'filled') {
+          return item;
+        }
+
+        const fillAnchor = nextFilledAt ?? item.triggeredAt;
+        // Evaluate closed bars strictly starting after fill anchor + active candle via live spot
+        const postFillBars = sourceBars
+          .filter((b) => b.t > fillAnchor || (b.t >= fillAnchor - barMs && item.fillStatus === 'filled' && b.t > item.triggeredAt))
           .sort((a, b) => a.t - b.t);
 
         let result: 'win' | 'loss' | null = null;
-        for (const bar of relevantBars) {
+        for (const bar of postFillBars) {
           if (item.ictAction === 'BUY') {
-            if (bar.l <= item.stopLossNum) {
+            if (bar.l <= sl) {
               result = 'loss';
               break;
             }
@@ -782,7 +1091,7 @@ export function usePriceAlerts(
               break;
             }
           } else {
-            if (bar.h >= item.stopLossNum) {
+            if (bar.h >= sl) {
               result = 'loss';
               break;
             }
@@ -795,21 +1104,30 @@ export function usePriceAlerts(
 
         if (!result) {
           if (item.ictAction === 'BUY') {
-            if (asset.price <= item.stopLossNum) result = 'loss';
+            if (asset.price <= sl) result = 'loss';
             else if (asset.price >= target) result = 'win';
           } else {
-            if (asset.price >= item.stopLossNum) result = 'loss';
+            if (asset.price >= sl) result = 'loss';
             else if (asset.price <= target) result = 'win';
           }
         }
 
-        if (!result) return item;
+        const fillChanged =
+          nextFillStatus !== item.fillStatus || nextFilledAt !== item.filledAt;
+        if (!result && !fillChanged) return item;
+
         changed = true;
         return {
           ...item,
-          outcomeStatus: result,
-          autoGraded: true,
-          outcomeGradedAt: now,
+          fillStatus: 'filled',
+          filledAt: fillAnchor,
+          ...(result
+            ? {
+                outcomeStatus: result,
+                autoGraded: true,
+                outcomeGradedAt: now,
+              }
+            : {}),
         };
       });
       return changed ? next : prev;
@@ -866,11 +1184,13 @@ export function usePriceAlerts(
       const resolvedDir: 'BUY' | 'SELL' | 'WAIT' =
         sig.direction === 'BUY' ? 'BUY' : sig.direction === 'SELL' ? 'SELL' : 'WAIT';
       const now = Date.now();
-      ictCooldownRef.current[`${strategy}:${sig.assetId}`] = {
+      const stage = resolveAlertExecutionStage(sig.executionPosture).ictStage;
+      ictCooldownRef.current[`${strategy}:${sig.assetId}:${sig.timeframe}`] = {
         triggeredAt: now,
         direction: resolvedDir,
         confidence: sig.confidence,
         setupName: sig.setupName,
+        stage,
       };
       pushAlert(buildIctAlertItem(sig, resolvedDir, strategy), true);
     },
@@ -878,16 +1198,17 @@ export function usePriceAlerts(
   );
 
   const scanIctAlerts = useCallback(
-    (
+    async (
       preferredAssetId?: string,
-      strategy: 'ict' | 'sdcv' = 'ict',
-      timeframe?: Timeframe,
-      enforceVolatilityFilter = true,
-      enforceNewsBlackout = true
-    ): number => {
-      const prefMap: Record<string, Timeframe> | undefined = timeframe
-        ? Object.fromEntries(assets.map((a) => [a.id, timeframe]))
-        : undefined;
+      strategy: 'ict' | 'sdcv' = effectiveRadarConfig.strategyMode,
+      timeframe: Timeframe = effectiveRadarConfig.timeframe,
+      enforceVolatilityFilter = effectiveRadarConfig.enforceVolatilityFilter,
+      enforceNewsBlackout = effectiveRadarConfig.enforceNewsBlackout
+    ): Promise<number> => {
+      const { scanAllIctSignals, scanAllSdCandleVolumeSignals } = await loadRadarSignalEngines();
+      const prefMap: Record<string, Timeframe> = Object.fromEntries(
+        assets.map((a) => [a.id, timeframe])
+      ) as Record<string, Timeframe>;
       const now = Date.now();
 
       if (strategy === 'sdcv') {
@@ -903,7 +1224,7 @@ export function usePriceAlerts(
         );
         const selected =
           actionable.length > 0
-            ? actionable.slice(0, 3)
+            ? actionable.slice(0, 4)
             : [
                 signals.find((s) => s.assetId === preferredAssetId) ?? signals[0],
               ].filter((x): x is SdCandleVolumeSignal => Boolean(x));
@@ -914,11 +1235,13 @@ export function usePriceAlerts(
           .forEach((sig, idx) => {
             const resolvedDir: 'BUY' | 'SELL' | 'WAIT' =
               sig.direction === 'BUY' ? 'BUY' : sig.direction === 'SELL' ? 'SELL' : 'WAIT';
-            ictCooldownRef.current[`sdcv:${sig.assetId}`] = {
+            const stage = resolveAlertExecutionStage(sig.executionPosture).ictStage;
+            ictCooldownRef.current[`sdcv:${sig.assetId}:${sig.timeframe}`] = {
               triggeredAt: now,
               direction: resolvedDir,
               confidence: sig.confidence,
               setupName: sig.candlePattern,
+              stage,
             };
             pushAlert(buildSdcvAlertItem(sig, resolvedDir), idx === selected.length - 1);
           });
@@ -937,7 +1260,7 @@ export function usePriceAlerts(
       );
       const selected =
         actionable.length > 0
-          ? actionable.slice(0, 3)
+          ? actionable.slice(0, 4)
           : [
               signals.find((s) => s.assetId === preferredAssetId) ?? signals[0],
             ].filter((x): x is IctSignalAnalysis => Boolean(x));
@@ -948,17 +1271,29 @@ export function usePriceAlerts(
         .forEach((sig, idx) => {
           const resolvedDir: 'BUY' | 'SELL' | 'WAIT' =
             sig.direction === 'BUY' ? 'BUY' : sig.direction === 'SELL' ? 'SELL' : 'WAIT';
-          ictCooldownRef.current[`ict:${sig.assetId}`] = {
+          const stage = resolveAlertExecutionStage(sig.executionPosture).ictStage;
+          ictCooldownRef.current[`ict:${sig.assetId}:${sig.timeframe}`] = {
             triggeredAt: now,
             direction: resolvedDir,
             confidence: sig.confidence,
             setupName: sig.setupName,
+            stage,
           };
           pushAlert(buildIctAlertItem(sig, resolvedDir, 'ict'), idx === selected.length - 1);
         });
       return selected.length;
     },
-    [assets, economicEvents, buildIctAlertItem, buildSdcvAlertItem, pushAlert]
+    [
+      assets,
+      economicEvents,
+      effectiveRadarConfig.strategyMode,
+      effectiveRadarConfig.timeframe,
+      effectiveRadarConfig.enforceVolatilityFilter,
+      effectiveRadarConfig.enforceNewsBlackout,
+      buildIctAlertItem,
+      buildSdcvAlertItem,
+      pushAlert,
+    ]
   );
 
   const dismissToast = useCallback((id: string) => {

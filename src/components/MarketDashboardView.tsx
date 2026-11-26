@@ -1,5 +1,4 @@
 import React, { Suspense, useEffect, useMemo, useState } from 'react';
-import { motion } from 'motion/react';
 import {
   ArrowDown,
   ArrowRight,
@@ -53,9 +52,11 @@ import {
   getFearGreedTextTone,
   SignalBadge,
 } from './MarketUiPrimitives';
-import { PriceAlertDrawer } from './PriceAlertOverlay';
 import { WidgetErrorBoundary } from './WidgetErrorBoundary';
 
+const PriceAlertDrawer = lazyWithRetry(() =>
+  import('./PriceAlertOverlay').then((m) => ({ default: m.PriceAlertDrawer }))
+);
 const InteractiveChart = lazyWithRetry(() =>
   import('./InteractiveChart').then((m) => ({ default: m.InteractiveChart }))
 );
@@ -667,37 +668,38 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
 
       {/* Nerve-Inspired Asymmetric 2-Column Workspace (Primary Focal Stage + Right Insights Rail) */}
       <div className="max-w-[1440px] w-full mx-auto px-4 lg:px-6 py-5 pb-28 flex flex-col gap-5">
-        <PriceAlertDrawer
-          open={isAlertDrawerOpen}
-          alerts={alerts}
-          unreadCount={unreadAlertCount}
-          activeAssetId={activeAsset?.id}
-          onClose={() => setIsAlertDrawerOpen(false)}
-          onSelectAlert={(alert) => {
-            onMarkAlertRead?.(alert.id);
-            if (alert.alertKind === 'bandarmology') {
-              onInspectSymbol?.(alert.assetId);
-            } else {
-              onSelectAsset(alert.assetId);
-            }
-          }}
-          onMarkAllRead={() => onMarkAllAlertsRead?.()}
-          onClearAlerts={() => onClearAlerts?.()}
-          onTriggerTestAlert={(assetId) => onTriggerTestAlert?.(assetId)}
-          onScanIct={(assetId) => onScanIct?.(assetId)}
-          onScanBandar={onScanBandar}
-        />
+        {isAlertDrawerOpen && (
+          <Suspense fallback={null}>
+            <PriceAlertDrawer
+              open={isAlertDrawerOpen}
+              alerts={alerts}
+              unreadCount={unreadAlertCount}
+              activeAssetId={activeAsset?.id}
+              onClose={() => setIsAlertDrawerOpen(false)}
+              onSelectAlert={(alert) => {
+                onMarkAlertRead?.(alert.id);
+                if (alert.alertKind === 'bandarmology') {
+                  onInspectSymbol?.(alert.assetId);
+                } else {
+                  onSelectAsset(alert.assetId);
+                }
+              }}
+              onMarkAllRead={() => onMarkAllAlertsRead?.()}
+              onClearAlerts={() => onClearAlerts?.()}
+              onTriggerTestAlert={(assetId) => onTriggerTestAlert?.(assetId)}
+              onScanIct={(assetId) => onScanIct?.(assetId)}
+              onScanBandar={onScanBandar}
+            />
+          </Suspense>
+        )}
 
         <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_360px] gap-5 items-start">
           {/* CHILD 1 (Order 1 on mobile, Col 1 Row 1 on desktop): Focal Asset Header + Chart + Key Stats + Market Depth */}
           <div className="order-1 xl:col-start-1 flex flex-col gap-5 min-w-0">
             {/* Asset Header */}
-            <motion.div
+            <div
               key={activeAsset.id}
-              initial={{ opacity: 0.7, y: 4 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-              className="flex flex-col sm:flex-row sm:items-end justify-between gap-3 pb-4 border-b border-[#E5E5EA] dark:border-[#1E3142]"
+              className="flex flex-col sm:flex-row sm:items-end justify-between gap-3 pb-4 border-b border-[#E5E5EA] dark:border-[#1E3142] animate-route-enter"
             >
               <div>
                 <div className="flex flex-wrap items-center gap-2.5">
@@ -785,7 +787,7 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
                   )}
                 </div>
               </div>
-            </motion.div>
+            </div>
 
             {/* Focal Interactive Chart (With Integrated Key Statistics & Dynamic Timeframe Range) */}
             <WidgetErrorBoundary widgetName="Interactive Market Chart">

@@ -184,7 +184,7 @@
             <span class="boot-dot"></span>
             <span>Stocks</span>
           </div>
-          <span class="boot-pill">Initializing live feeds...</span>
+          <span id="boot-status" class="boot-pill">Initializing live feeds...</span>
         </div>
         <div class="boot-body">
           <div class="boot-strip">
@@ -199,6 +199,96 @@
         </div>
       </div>
     </div>
+    <script>
+      (function () {
+        var isDev = !!document.querySelector('script[src*="/@vite/client"]');
+        if (isDev && 'serviceWorker' in navigator) {
+          try {
+            navigator.serviceWorker.getRegistrations().then(function (regs) {
+              if (!regs || regs.length === 0) return;
+              Promise.all(regs.map(function (r) { return r.unregister(); })).then(function () {
+                if ('caches' in window) {
+                  caches.keys().then(function (ks) {
+                    return Promise.all(ks.map(function (k) { return caches.delete(k); }));
+                  }).catch(function () {});
+                }
+              }).catch(function () {});
+            }).catch(function () {});
+          } catch (e) {}
+        }
+
+        function showRetry(msg) {
+          if (window.__STOCKS_MOUNTED__) return;
+          var shell = document.getElementById('boot-shell');
+          var pill = document.getElementById('boot-status');
+          if (!shell || !pill) return;
+          pill.textContent = msg + ' ';
+          if (!document.getElementById('boot-retry-btn')) {
+            var btn = document.createElement('button');
+            btn.id = 'boot-retry-btn';
+            btn.type = 'button';
+            btn.textContent = 'Tap to Reload';
+            btn.style.cssText = 'margin-left:8px;padding:4px 10px;border-radius:999px;border:1px solid rgba(56,189,248,0.5);background:rgba(56,189,248,0.16);color:inherit;font-weight:700;font-size:11px;cursor:pointer;';
+            btn.onclick = function () {
+              try {
+                if ('caches' in window) {
+                  caches.keys().then(function (ks) {
+                    return Promise.all(ks.map(function (k) { return caches.delete(k); }));
+                  }).finally(function () { window.location.reload(); });
+                  return;
+                }
+              } catch (e) {}
+              window.location.reload();
+            };
+            pill.appendChild(btn);
+          }
+        }
+
+        function autoRecoverOnce(reason) {
+          if (window.__STOCKS_MOUNTED__) return;
+          try {
+            var k = 'stocks-boot-recover-ts';
+            var prev = Number(sessionStorage.getItem(k) || '0');
+            if (!prev || Date.now() - prev > 30000) {
+              sessionStorage.setItem(k, String(Date.now()));
+              if ('serviceWorker' in navigator) {
+                navigator.serviceWorker.getRegistrations().then(function (regs) {
+                  return Promise.all((regs || []).map(function (r) { return r.unregister(); }));
+                }).finally(function () { window.location.reload(); });
+                return;
+              }
+              window.location.reload();
+              return;
+            }
+          } catch (e) {}
+          showRetry(reason || 'Boot interrupted');
+        }
+
+        window.addEventListener('error', function (ev) {
+          if (window.__STOCKS_MOUNTED__) return;
+          var target = ev && ev.target;
+          if (target && target.tagName === 'SCRIPT') {
+            autoRecoverOnce('Module load failed');
+          } else if (ev && ev.message) {
+            showRetry('Startup error');
+          }
+        }, true);
+
+        window.addEventListener('unhandledrejection', function (ev) {
+          if (window.__STOCKS_MOUNTED__) return;
+          var msg = (ev && ev.reason && ev.reason.message) ? ev.reason.message : '';
+          if (/dynamically imported|module|script/i.test(msg)) {
+            autoRecoverOnce('Module load failed');
+          }
+        });
+
+        window.setTimeout(function () {
+          if (!window.__STOCKS_MOUNTED__ && document.getElementById('boot-shell')) {
+            showRetry('Slow connection — still loading');
+          }
+        }, 12000);
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

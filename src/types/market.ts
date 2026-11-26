@@ -44,6 +44,27 @@ export interface BandarmologyAnalysis {
 
 export type IctDirection = 'BUY' | 'SELL' | 'NEUTRAL';
 
+export type IctExecutionPosture =
+  | 'enter_now'
+  | 'armed_limit'
+  | 'limit_pullback_only'
+  | 'standby'
+  | 'invalidated'
+  | 'missed';
+
+export type IctRecommendedOrderType =
+  | 'MARKET / ZONE FILL'
+  | 'BUY LIMIT'
+  | 'SELL LIMIT'
+  | 'WAIT';
+
+export interface SyncedRadarConfig {
+  strategyMode: 'ict' | 'sdcv';
+  timeframe: Timeframe;
+  enforceVolatilityFilter: boolean;
+  enforceNewsBlackout: boolean;
+}
+
 export interface IctSignalAnalysis {
   assetId: string;
   symbol: string;
@@ -116,6 +137,13 @@ export interface IctSignalAnalysis {
   setupGrade?: 'A+' | 'A' | 'B' | 'WAIT';
   isAPlusSetup?: boolean;
   usdExposure?: 'LONG_USD' | 'SHORT_USD';
+  executionPosture?: IctExecutionPosture;
+  recommendedOrderType?: IctRecommendedOrderType;
+  limitEntryPriceNum?: number;
+  limitRr?: number;
+  spotRr?: number;
+  chaseProgressPct?: number;
+  hasRunAway?: boolean;
 }
 
 export interface SdCandleVolumeSignal {
@@ -170,6 +198,13 @@ export interface SdCandleVolumeSignal {
   setupGrade?: 'A+' | 'A' | 'B' | 'WAIT';
   isAPlusSetup?: boolean;
   usdExposure?: 'LONG_USD' | 'SHORT_USD';
+  executionPosture?: IctExecutionPosture;
+  recommendedOrderType?: IctRecommendedOrderType;
+  limitEntryPriceNum?: number;
+  limitRr?: number;
+  spotRr?: number;
+  chaseProgressPct?: number;
+  hasRunAway?: boolean;
 }
 
 export type WatchlistCategory =
@@ -639,6 +674,11 @@ export interface PriceAlertItem {
   stopLossNum?: number;
   tp1Num?: number;
   tp2Num?: number;
+  ictStage?: 'armed' | 'triggered' | 'pullback_limit';
+  fillStatus?: 'filled' | 'awaiting_fill' | 'expired_unfilled';
+  filledAt?: number;
+  recommendedOrderType?: IctRecommendedOrderType;
+  limitEntryPriceNum?: number;
   bandarFromPhase?: BandarmologyPhase;
   bandarToPhase?: BandarmologyPhase;
   bandarScore?: number;

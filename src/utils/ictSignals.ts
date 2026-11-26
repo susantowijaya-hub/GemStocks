@@ -3,6 +3,8 @@ import {
   EconomicCalendarCurrency,
   EconomicEvent,
   IctDirection,
+  IctExecutionPosture,
+  IctRecommendedOrderType,
   IctSignalAnalysis,
   MarketAsset,
   Timeframe,
@@ -525,6 +527,235 @@ export function checkLiveSetupValidity(params: {
   return { valid: true, status: 'active' };
 }
 
+export function evaluateLiveExecutionPosture(params: {
+  direction: IctDirection;
+  setupArmed: boolean;
+  armedBias?: 'BUY' | 'SELL';
+  currentPrice: number;
+  entryLow?: number;
+  entryHigh?: number;
+  stopLoss?: number;
+  tp1?: number;
+  tp2?: number;
+  atr?: number;
+  executionStatus?: 'active' | 'standby' | 'invalidated' | 'missed';
+}): {
+  posture: IctExecutionPosture;
+  recommendedOrderType: IctRecommendedOrderType;
+  limitEntryPriceNum?: number;
+  limitRr?: number;
+  spotRr?: number;
+  chaseProgressPct: number;
+  hasRunAway: boolean;
+} {
+  const {
+    direction,
+    setupArmed,
+    armedBias,
+    currentPrice,
+    entryLow,
+    entryHigh,
+    stopLoss,
+    tp1,
+    tp2,
+    atr,
+    executionStatus,
+  } = params;
+
+  const bias: 'BUY' | 'SELL' | undefined =
+    direction === 'BUY' || direction === 'SELL' ? direction : armedBias;
+
+  const hasValidNums =
+    Boolean(bias) &&
+    Number.isFinite(currentPrice) &&
+    currentPrice > 0 &&
+    typeof entryLow === 'number' &&
+    typeof entryHigh === 'number' &&
+    typeof stopLoss === 'number' &&
+    typeof tp2 === 'number' &&
+    Number.isFinite(entryLow) &&
+    Number.isFinite(entryHigh) &&
+    Number.isFinite(stopLoss) &&
+    Number.isFinite(tp2);
+
+  if (!hasValidNums || !bias) {
+    return {
+      posture:
+        executionStatus === 'invalidated'
+          ? 'invalidated'
+          : executionStatus === 'missed'
+            ? 'missed'
+            : 'standby',
+      recommendedOrderType: 'WAIT',
+      chaseProgressPct: 0,
+      hasRunAway: false,
+    };
+  }
+
+  const lo = Math.min(entryLow!, entryHigh!);
+  const hi = Math.max(entryLow!, entryHigh!);
+  // Proximal-biased sweet-spot limit entry (higher fill probability while preserving >= 1:2 R:R)
+  const limitEntryPriceNum =
+    bias === 'BUY' ? lo + (hi - lo) * 0.65 : hi - (hi - lo) * 0.65;
+
+  const limitRisk = Math.abs(limitEntryPriceNum - stopLoss!);
+  const limitReward = Math.abs(tp2! - limitEntryPriceNum);
+  const limitRr =
+    limitRisk > 1e-8 ? Number((limitReward / limitRisk).toFixed(2)) : undefined;
+
+  const spotRisk =
+    bias === 'BUY'
+      ? Math.max(1e-8, currentPrice - stopLoss!)
+      : Math.max(1e-8, stopLoss! - currentPrice);
+  const spotReward =
+    bias === 'BUY' ? tp2! - currentPrice : currentPrice - tp2!;
+  const spotRr = Number((Math.max(0, spotReward) / spotRisk).toFixed(2));
+
+  const tp1Ref =
+    typeof tp1 === 'number' && Number.isFinite(tp1) ? tp1 : tp2!;
+  const pathToTp1 =
+    bias === 'BUY'
+      ? Math.max(1e-8, tp1Ref - limitEntryPriceNum)
+      : Math.max(1e-8, limitEntryPriceNum - tp1Ref);
+  const traveledBeyondEntry =
+    bias === 'BUY'
+      ? Math.max(0, currentPrice - hi)
+      : Math.max(0, lo - currentPrice);
+  const chaseProgressPct = Math.round(
+    Math.min(100, Math.max(0, (traveledBeyondEntry / pathToTp1) * 100))
+  );
+
+  if (executionStatus === 'invalidated') {
+    return {
+      posture: 'invalidated',
+      recommendedOrderType: 'WAIT',
+      limitEntryPriceNum,
+      limitRr,
+      spotRr,
+      chaseProgressPct,
+      hasRunAway: false,
+    };
+  }
+  if (executionStatus === 'missed') {
+    return {
+      posture: 'missed',
+      recommendedOrderType: 'WAIT',
+      limitEntryPriceNum,
+      limitRr,
+      spotRr,
+      chaseProgressPct: 100,
+      hasRunAway: true,
+    };
+  }
+
+  if (!setupArmed || direction === 'NEUTRAL') {
+    return {
+      posture: 'standby',
+      recommendedOrderType: 'WAIT',
+      limitEntryPriceNum,
+      limitRr,
+      spotRr,
+      chaseProgressPct,
+      hasRunAway: false,
+    };
+  }
+
+  if (bias === 'BUY') {
+    if (currentPrice <= stopLoss!) {
+      return {
+        posture: 'invalidated',
+        recommendedOrderType: 'WAIT',
+        limitEntryPriceNum,
+        limitRr,
+        spotRr: 0,
+        chaseProgressPct,
+        hasRunAway: false,
+      };
+    }
+    if (typeof tp1 === 'number' && Number.isFinite(tp1) && currentPrice >= tp1) {
+      return {
+        posture: 'missed',
+        recommendedOrderType: 'WAIT',
+        limitEntryPriceNum,
+        limitRr,
+        spotRr,
+        chaseProgressPct: 100,
+        hasRunAway: true,
+      };
+    }
+  } else {
+    if (currentPrice >= stopLoss!) {
+      return {
+        posture: 'invalidated',
+        recommendedOrderType: 'WAIT',
+        limitEntryPriceNum,
+        limitRr,
+        spotRr: 0,
+        chaseProgressPct,
+        hasRunAway: false,
+      };
+    }
+    if (typeof tp1 === 'number' && Number.isFinite(tp1) && currentPrice <= tp1) {
+      return {
+        posture: 'missed',
+        recommendedOrderType: 'WAIT',
+        limitEntryPriceNum,
+        limitRr,
+        spotRr,
+        chaseProgressPct: 100,
+        hasRunAway: true,
+      };
+    }
+  }
+
+  const atrPad = typeof atr === 'number' && Number.isFinite(atr) && atr > 0 ? atr * 0.12 : 0;
+  const inZone =
+    (currentPrice >= lo - atrPad && currentPrice <= hi + atrPad) ||
+    (bias === 'BUY' && currentPrice < lo && currentPrice > stopLoss!) ||
+    (bias === 'SELL' && currentPrice > hi && currentPrice < stopLoss!);
+
+  if (inZone) {
+    return {
+      posture: 'enter_now',
+      recommendedOrderType: 'MARKET / ZONE FILL',
+      limitEntryPriceNum,
+      limitRr,
+      spotRr,
+      chaseProgressPct: 0,
+      hasRunAway: false,
+    };
+  }
+
+  const atrRunThreshold =
+    typeof atr === 'number' && Number.isFinite(atr) && atr > 0
+      ? atr * 0.38
+      : Infinity;
+  const tooFarByAtr = traveledBeyondEntry > atrRunThreshold;
+  const tooFarByTp1 = chaseProgressPct > 35;
+
+  if (tooFarByAtr || tooFarByTp1) {
+    return {
+      posture: 'limit_pullback_only',
+      recommendedOrderType: bias === 'BUY' ? 'BUY LIMIT' : 'SELL LIMIT',
+      limitEntryPriceNum,
+      limitRr,
+      spotRr,
+      chaseProgressPct,
+      hasRunAway: true,
+    };
+  }
+
+  return {
+    posture: 'armed_limit',
+    recommendedOrderType: bias === 'BUY' ? 'BUY LIMIT' : 'SELL LIMIT',
+    limitEntryPriceNum,
+    limitRr,
+    spotRr,
+    chaseProgressPct,
+    hasRunAway: false,
+  };
+}
+
 // ============================================================================
 // 1. PURE ICT TRADING RULES ENGINE (Strict Liquidity Sweep + MSS + FVG/OB + Dealing-Range OTE)
 //    Used exclusively for BTC/USD and XAU/USD
@@ -718,8 +949,8 @@ function computePureIctSignalForXauBtc(
   const pdZone: IctSignalAnalysis['pdZone'] =
     posInRange <= 0.44 ? 'Discount' : posInRange >= 0.56 ? 'Premium' : 'Equilibrium';
 
-  // Separate prior structural swings (excluding recent 10-bar sweep window)
-  const sweepWindowLen = Math.min(10, Math.max(4, Math.floor(n * 0.22)));
+  // Separate prior structural swings (excluding recent 16-bar sweep window)
+  const sweepWindowLen = Math.min(16, Math.max(6, Math.floor(n * 0.3)));
   const priorEndIdx = Math.max(4, n - sweepWindowLen);
   const priorSlice = bars.slice(0, priorEndIdx);
 
@@ -739,7 +970,7 @@ function computePureIctSignalForXauBtc(
   const priorSwingLow =
     pivotLows.length > 0 ? pivotLows[pivotLows.length - 1] : Math.min(...priorSlice.map((b) => b.l));
 
-  // Scan recent sweep window strictly for SSL / BSL liquidity sweep
+  // Scan recent sweep window for 1-bar OR 2-bar SSL / BSL liquidity sweep + reclaim
   let sslSweepIdx = -1;
   let bslSweepIdx = -1;
   let sslSweepLow = priorSwingLow;
@@ -747,19 +978,32 @@ function computePureIctSignalForXauBtc(
 
   for (let i = priorEndIdx; i < n; i++) {
     const b = bars[i];
-    if (b.l < priorSwingLow && b.c > priorSwingLow) {
+    const prevB = i > 0 ? bars[i - 1] : b;
+    if (
+      (b.l < priorSwingLow && b.c > priorSwingLow) ||
+      (prevB.l < priorSwingLow && b.c > priorSwingLow && b.c >= b.o)
+    ) {
       sslSweepIdx = i;
-      sslSweepLow = Math.min(sslSweepLow, b.l);
+      sslSweepLow = Math.min(sslSweepLow, b.l, prevB.l);
     }
-    if (b.h > priorSwingHigh && b.c < priorSwingHigh) {
+    if (
+      (b.h > priorSwingHigh && b.c < priorSwingHigh) ||
+      (prevB.h > priorSwingHigh && b.c < priorSwingHigh && b.c <= b.o)
+    ) {
       bslSweepIdx = i;
-      bslSweepHigh = Math.max(bslSweepHigh, b.h);
+      bslSweepHigh = Math.max(bslSweepHigh, b.h, prevB.h);
     }
   }
 
-  const sslSweptStrict = sslSweepIdx >= 0;
-  const bslSweptStrict = bslSweepIdx >= 0;
-  const dualSideSwept = sslSweptStrict && bslSweptStrict;
+  // Only treat as choppy dual-sided sweep if both occurred within 4 bars of each other;
+  // otherwise respect the most recent directional sweep.
+  const simultaneousDualSweep =
+    sslSweepIdx >= 0 && bslSweepIdx >= 0 && Math.abs(sslSweepIdx - bslSweepIdx) <= 4;
+  const sslSweptStrict =
+    sslSweepIdx >= 0 && !simultaneousDualSweep && (bslSweepIdx < 0 || sslSweepIdx > bslSweepIdx);
+  const bslSweptStrict =
+    bslSweepIdx >= 0 && !simultaneousDualSweep && (sslSweepIdx < 0 || bslSweepIdx > sslSweepIdx);
+  const dualSideSwept = simultaneousDualSweep;
 
   const atr = computeAtr(bars, 14);
   const atr15mMetrics = compute15mAtrMetrics(asset, currentPrice);
@@ -769,7 +1013,7 @@ function computePureIctSignalForXauBtc(
   const volatilityStatus = atr15mMetrics.volatilityStatus;
   const volatilityPassed = atr15mMetrics.volatilityPassed;
 
-  // Chronological MSS Break strictly at/after sweep candle
+  // Chronological MSS Break strictly at/after sweep candle (supports 1-bar OR 2-bar displacement)
   let bullMss = false;
   let bullMssIdx = -1;
   let mssImpulseHigh = rangeHigh;
@@ -781,7 +1025,11 @@ function computePureIctSignalForXauBtc(
     for (let k = sslSweepIdx + 1; k < n; k++) {
       const cur = bars[k];
       const prev = bars[k - 1];
-      const disp = (cur.c > cur.o && cur.c - cur.o >= atr * 0.7) || (prev.c > prev.o && prev.c - prev.o >= atr * 0.7);
+      const twoBarBullPush = cur.c > prev.o ? cur.c - prev.o : 0;
+      const disp =
+        (cur.c > cur.o && cur.c - cur.o >= atr * 0.58) ||
+        (prev.c > prev.o && prev.c - prev.o >= atr * 0.58) ||
+        twoBarBullPush >= atr * 0.78;
       if (cur.c > microHigh && disp) {
         bullMss = true;
         bullMssIdx = k;
@@ -789,7 +1037,7 @@ function computePureIctSignalForXauBtc(
       }
     }
     if (!bullMss) {
-      const dispExists = sweepSlice.some((b) => b.c > b.o && b.c - b.o >= atr * 0.85);
+      const dispExists = sweepSlice.some((b) => b.c > b.o && b.c - b.o >= atr * 0.75);
       if (dispExists && currentPrice > microHigh) {
         bullMss = true;
         bullMssIdx = n - 1;
@@ -808,7 +1056,11 @@ function computePureIctSignalForXauBtc(
     for (let k = bslSweepIdx + 1; k < n; k++) {
       const cur = bars[k];
       const prev = bars[k - 1];
-      const disp = (cur.c < cur.o && cur.o - cur.c >= atr * 0.7) || (prev.c < prev.o && prev.o - prev.c >= atr * 0.7);
+      const twoBarBearPush = prev.o > cur.c ? prev.o - cur.c : 0;
+      const disp =
+        (cur.c < cur.o && cur.o - cur.c >= atr * 0.58) ||
+        (prev.c < prev.o && prev.o - prev.c >= atr * 0.58) ||
+        twoBarBearPush >= atr * 0.78;
       if (cur.c < microLow && disp) {
         bearMss = true;
         bearMssIdx = k;
@@ -816,7 +1068,7 @@ function computePureIctSignalForXauBtc(
       }
     }
     if (!bearMss) {
-      const dispExists = sweepSlice.some((b) => b.c < b.o && b.o - b.c >= atr * 0.85);
+      const dispExists = sweepSlice.some((b) => b.c < b.o && b.o - b.c >= atr * 0.75);
       if (dispExists && currentPrice < microLow) {
         bearMss = true;
         bearMssIdx = n - 1;
@@ -889,13 +1141,17 @@ function computePureIctSignalForXauBtc(
   const newsBlackout = checkMacroNewsBlackout(asset.id, economicEvents);
   const newsBlocked = enforceNewsBlackout && newsBlackout.active;
 
-  // Strict 3-Pillar Gate: Sweep + Chronological MSS + FVG/OB pullback + HTF compatibility
+  // Strict 3-Pillar Gate (Two-Stage Armed Limit + Active Entry):
+  // Sweep + Chronological MSS + Unmitigated FVG/OB (or active OTE) + HTF compatibility
+  const hasBullImbalanceZone = Boolean(imbBull.bullFvg || imbBull.bullOb || inBullOte);
+  const hasBearImbalanceZone = Boolean(imbBear.bearFvg || imbBear.bearOb || inBearOte);
+
   const buyCoreConfirmed =
     !dualSideSwept &&
     sslSweptStrict &&
     bullMss &&
     bullMssIdx >= sslSweepIdx &&
-    (nearBullFvg || nearBullOb) &&
+    hasBullImbalanceZone &&
     (htf.bias !== 'Bearish' || htf.bullDemandAligned);
 
   const sellCoreConfirmed =
@@ -903,29 +1159,29 @@ function computePureIctSignalForXauBtc(
     bslSweptStrict &&
     bearMss &&
     bearMssIdx >= bslSweepIdx &&
-    (nearBearFvg || nearBearOb) &&
+    hasBearImbalanceZone &&
     (htf.bias !== 'Bullish' || htf.bearSupplyAligned);
 
   const bullBiasDominant =
     buyCoreConfirmed ||
     (!sellCoreConfirmed && (sslSweptStrict || bullTotal > bearTotal || (bullTotal === bearTotal && htf.bias !== 'Bearish')));
 
-  // Entry Zone selection (Unmitigated FVG/OB inside/near Dealing Range, else Dealing-Range OTE)
+  // Entry Zone selection (Prioritize Unmitigated FVG -> Unmitigated OB -> Dealing-Range OTE)
   let entryLow = bullBiasDominant ? bullOteLow : bearOteLow;
   let entryHigh = bullBiasDominant ? bullOteHigh : bearOteHigh;
   if (bullBiasDominant) {
-    if (nearBullFvg && imbBull.bullFvg) {
+    if (imbBull.bullFvg && (nearBullFvg || buyCoreConfirmed)) {
       entryLow = imbBull.bullFvg.low;
       entryHigh = imbBull.bullFvg.high;
-    } else if (nearBullOb && imbBull.bullOb) {
+    } else if (imbBull.bullOb && (nearBullOb || buyCoreConfirmed)) {
       entryLow = imbBull.bullOb.low;
       entryHigh = imbBull.bullOb.high;
     }
   } else {
-    if (nearBearFvg && imbBear.bearFvg) {
+    if (imbBear.bearFvg && (nearBearFvg || sellCoreConfirmed)) {
       entryLow = imbBear.bearFvg.low;
       entryHigh = imbBear.bearFvg.high;
-    } else if (nearBearOb && imbBear.bearOb) {
+    } else if (imbBear.bearOb && (nearBearOb || sellCoreConfirmed)) {
       entryLow = imbBear.bearOb.low;
       entryHigh = imbBear.bearOb.high;
     }
@@ -1016,7 +1272,7 @@ function computePureIctSignalForXauBtc(
     );
   }
   if (dualSideSwept) {
-    waitReasons.push('Both SSL & BSL liquidity swept inside window — choppy range');
+    waitReasons.push('Both SSL & BSL liquidity swept within 4 bars — choppy range');
   } else if (!sslSweptStrict && !bslSweptStrict) {
     waitReasons.push('Awaiting clean SSL or BSL liquidity sweep');
   }
@@ -1027,13 +1283,14 @@ function computePureIctSignalForXauBtc(
     waitReasons.push(`Real liquidity pool R:R is 1:${realRr.toFixed(1)} (below 1:2.0 min)`);
   }
 
-  if (
+  const gatesPass =
     !newsBlocked &&
     volatilityStatus !== 'warming' &&
     (!enforceVolatilityFilter || volatilityPassed) &&
     !stopTooWide &&
-    realRr >= 2.0
-  ) {
+    realRr >= 2.0;
+
+  if (gatesPass) {
     if (buyCoreConfirmed) {
       const liveCheck = checkLiveSetupValidity({
         direction: 'BUY',
@@ -1065,13 +1322,27 @@ function computePureIctSignalForXauBtc(
     }
   }
 
+  const postureEval = evaluateLiveExecutionPosture({
+    direction,
+    setupArmed: direction === 'BUY' || direction === 'SELL',
+    armedBias: bullBiasDominant ? 'BUY' : 'SELL',
+    currentPrice,
+    entryLow,
+    entryHigh,
+    stopLoss: slVal,
+    tp1: tp1Val,
+    tp2: tp2Val,
+    atr,
+    executionStatus,
+  });
+
   if (direction === 'NEUTRAL' && waitReasons.length === 0) {
     if (sslSweptStrict && !bullMss) {
       waitReasons.push('SSL swept — awaiting LTF Bullish MSS break');
     } else if (bslSweptStrict && !bearMss) {
       waitReasons.push('BSL swept — awaiting LTF Bearish MSS break');
-    } else if ((bullMss || bearMss) && !nearBullFvg && !nearBullOb && !nearBearFvg && !nearBearOb) {
-      waitReasons.push('MSS confirmed — awaiting pullback into unmitigated FVG/OB');
+    } else if ((bullMss || bearMss) && !hasBullImbalanceZone && !hasBearImbalanceZone) {
+      waitReasons.push('MSS confirmed — awaiting unmitigated FVG/OB or OTE zone');
     } else {
       waitReasons.push('Awaiting Sweep + MSS + FVG/OB + OTE alignment');
     }
@@ -1262,6 +1533,13 @@ function computePureIctSignalForXauBtc(
     setupGrade,
     isAPlusSetup,
     usdExposure,
+    executionPosture: postureEval.posture,
+    recommendedOrderType: postureEval.recommendedOrderType,
+    limitEntryPriceNum: postureEval.limitEntryPriceNum,
+    limitRr: postureEval.limitRr,
+    spotRr: postureEval.spotRr,
+    chaseProgressPct: postureEval.chaseProgressPct,
+    hasRunAway: postureEval.hasRunAway,
   };
 }
 
@@ -1495,6 +1773,7 @@ function computeAsianSweepIctSignalForFx(
   let asianBars: CandlePoint[] = [];
   let postAsianBars: CandlePoint[] = [];
   let hasGenuineAsianRange = false;
+  let sessionRangeName = 'Asian Session';
 
   if (asianIndices.length >= 4) {
     const blocks: Array<{ start: number; end: number }> = [];
@@ -1519,6 +1798,18 @@ function computeAsianSweepIctSignalForFx(
       asianBars = mtfBars.slice(completedBlock.start, completedBlock.end + 1);
       postAsianBars = mtfBars.slice(completedBlock.end + 1);
       hasGenuineAsianRange = mtfTf === '15m' || mtfTf === '30m';
+    }
+  }
+
+  // Fallback to Prior Completed Intraday Session Consolidation Range when Asia window aged out of lookback
+  if ((!hasGenuineAsianRange || asianBars.length < 4) && (mtfTf === '15m' || mtfTf === '30m') && mtfBars.length >= 24) {
+    const rangeEnd = mtfBars.length - 12;
+    const rangeStart = Math.max(0, rangeEnd - 16);
+    if (rangeEnd - rangeStart >= 6) {
+      asianBars = mtfBars.slice(rangeStart, rangeEnd);
+      postAsianBars = mtfBars.slice(rangeEnd);
+      hasGenuineAsianRange = true;
+      sessionRangeName = 'Prior Session Range';
     }
   }
 
@@ -1623,14 +1914,24 @@ function computeAsianSweepIctSignalForFx(
   const asianRangeAtrRatio = Number((asianSpan / Math.max(1e-6, normalAsianAtr)).toFixed(2));
   const asianRangeTooWide = asianRangeAtrRatio > 1.5;
 
-  const sweepScanBars = postAsianBars.slice(-24);
+  const sweepScanBars = postAsianBars.slice(-28);
   const postHigh = sweepScanBars.length > 0 ? Math.max(...sweepScanBars.map((b) => b.h)) : asianHigh;
   const postLow = sweepScanBars.length > 0 ? Math.min(...sweepScanBars.map((b) => b.l)) : asianLow;
 
-  const lowSweepBar = sweepScanBars.find((b) => b.l < asianLow);
-  const highSweepBar = sweepScanBars.find((b) => b.h > asianHigh);
-  const sweptAsianLow = Boolean(lowSweepBar);
-  const sweptAsianHigh = Boolean(highSweepBar);
+  let lowSweepIdx = -1;
+  let highSweepIdx = -1;
+  for (let i = 0; i < sweepScanBars.length; i++) {
+    if (sweepScanBars[i].l < asianLow && lowSweepIdx === -1) lowSweepIdx = i;
+    if (sweepScanBars[i].l < asianLow) lowSweepIdx = i;
+    if (sweepScanBars[i].h > asianHigh) highSweepIdx = i;
+  }
+
+  const simultaneousDualFx =
+    lowSweepIdx >= 0 && highSweepIdx >= 0 && Math.abs(lowSweepIdx - highSweepIdx) <= 4;
+  const sweptAsianLow = lowSweepIdx >= 0 && !simultaneousDualFx && (highSweepIdx < 0 || lowSweepIdx > highSweepIdx);
+  const sweptAsianHigh = highSweepIdx >= 0 && !simultaneousDualFx && (lowSweepIdx < 0 || highSweepIdx > lowSweepIdx);
+  const lowSweepBar = sweptAsianLow ? sweepScanBars[lowSweepIdx] : undefined;
+  const highSweepBar = sweptAsianHigh ? sweepScanBars[highSweepIdx] : undefined;
   const lowSweepTs = lowSweepBar?.t ?? 0;
   const highSweepTs = highSweepBar?.t ?? 0;
 
@@ -1640,8 +1941,8 @@ function computeAsianSweepIctSignalForFx(
 
   // 3. Chronological LTF (5M/1M) Close Back Inside Range + MSS + Clean FVG strictly AFTER Sweep
   const lastLtf = ltfBars[ltfBars.length - 1];
-  const postLowSweepLtf = lowSweepTs > 0 ? ltfBars.filter((b) => b.t >= lowSweepTs) : ltfBars.slice(-12);
-  const postHighSweepLtf = highSweepTs > 0 ? ltfBars.filter((b) => b.t >= highSweepTs) : ltfBars.slice(-12);
+  const postLowSweepLtf = lowSweepTs > 0 ? ltfBars.filter((b) => b.t >= lowSweepTs) : ltfBars.slice(-14);
+  const postHighSweepLtf = highSweepTs > 0 ? ltfBars.filter((b) => b.t >= highSweepTs) : ltfBars.slice(-14);
 
   const preLowSweepLtf = ltfBars.filter((b) => lowSweepTs === 0 || b.t < lowSweepTs).slice(-8);
   const preHighSweepLtf = ltfBars.filter((b) => highSweepTs === 0 || b.t < highSweepTs).slice(-8);
@@ -1660,37 +1961,44 @@ function computeAsianSweepIctSignalForFx(
     lastLtf.c < asianHigh &&
     postHighSweepLtf.some((b) => b.c < asianHigh);
 
-  const bullDisplacement = postLowSweepLtf
-    .slice(-6)
-    .some((b) => b.c > b.o && b.c - b.o >= atrLtf * 0.8 && b.c > asianLow);
-  const bearDisplacement = postHighSweepLtf
-    .slice(-6)
-    .some((b) => b.c < b.o && b.o - b.c >= atrLtf * 0.8 && b.c < asianHigh);
+  const bullDisplacement = postLowSweepLtf.slice(-8).some((b, idx, arr) => {
+    const prev = idx > 0 ? arr[idx - 1] : b;
+    const twoBarPush = b.c > prev.o ? b.c - prev.o : 0;
+    return ((b.c > b.o && b.c - b.o >= atrLtf * 0.58) || twoBarPush >= atrLtf * 0.8) && b.c > asianLow;
+  });
+  const bearDisplacement = postHighSweepLtf.slice(-8).some((b, idx, arr) => {
+    const prev = idx > 0 ? arr[idx - 1] : b;
+    const twoBarPush = prev.o > b.c ? prev.o - b.c : 0;
+    return ((b.c < b.o && b.o - b.c >= atrLtf * 0.58) || twoBarPush >= atrLtf * 0.8) && b.c < asianHigh;
+  });
 
   const bullMssConfirmed =
     closedBackInsideFromLow &&
     bullDisplacement &&
     (currentPrice > ltfSwingHighBeforeLowSweep ||
-      postLowSweepLtf.slice(-5).some((b) => b.c > ltfSwingHighBeforeLowSweep));
+      postLowSweepLtf.slice(-6).some((b) => b.c > ltfSwingHighBeforeLowSweep));
   const bearMssConfirmed =
     closedBackInsideFromHigh &&
     bearDisplacement &&
     (currentPrice < ltfSwingLowBeforeHighSweep ||
-      postHighSweepLtf.slice(-5).some((b) => b.c < ltfSwingLowBeforeHighSweep));
+      postHighSweepLtf.slice(-6).some((b) => b.c < ltfSwingLowBeforeHighSweep));
 
-  // Chronological FVG: formed strictly after sweep timestamp
-  const imbBullLtf = findUnmitigatedFvgAndOb(ltfBars, atrLtf, 22, 0.14, 0.7, lowSweepTs);
-  const imbBearLtf = findUnmitigatedFvgAndOb(ltfBars, atrLtf, 22, 0.14, 0.7, highSweepTs);
+  // Chronological FVG/OB: formed strictly after sweep timestamp
+  const imbBullLtf = findUnmitigatedFvgAndOb(ltfBars, atrLtf, 24, 0.14, 0.65, lowSweepTs);
+  const imbBearLtf = findUnmitigatedFvgAndOb(ltfBars, atrLtf, 24, 0.14, 0.65, highSweepTs);
+
+  const bullZoneAnchor = imbBullLtf.bullFvg ?? imbBullLtf.bullOb;
+  const bearZoneAnchor = imbBearLtf.bearFvg ?? imbBearLtf.bearOb;
 
   const bullPullbackFvg = Boolean(
-    imbBullLtf.bullFvg &&
-      currentPrice >= imbBullLtf.bullFvg.low - atrLtf * 0.55 &&
-      currentPrice <= imbBullLtf.bullFvg.high + atrLtf * 1.4
+    bullZoneAnchor &&
+      currentPrice >= bullZoneAnchor.low - atrLtf * 0.55 &&
+      currentPrice <= bullZoneAnchor.high + atrLtf * 1.4
   );
   const bearPullbackFvg = Boolean(
-    imbBearLtf.bearFvg &&
-      currentPrice <= imbBearLtf.bearFvg.high + atrLtf * 0.55 &&
-      currentPrice >= imbBearLtf.bearFvg.low - atrLtf * 1.4
+    bearZoneAnchor &&
+      currentPrice <= bearZoneAnchor.high + atrLtf * 0.55 &&
+      currentPrice >= bearZoneAnchor.low - atrLtf * 1.4
   );
 
   const atrPct = atr15mMetrics.atr15mPct;
@@ -1717,49 +2025,47 @@ function computeAsianSweepIctSignalForFx(
   }
   if (asianRangeTooWide) {
     waitReasons.push(
-      `Asian range abnormally wide (${asianRangeAtrRatio.toFixed(2)}x normal ATR > 1.50x cap)`
+      `${sessionRangeName} abnormally wide (${asianRangeAtrRatio.toFixed(2)}x normal ATR > 1.50x cap)`
     );
   }
-  if (sweptAsianLow && sweptAsianHigh) {
-    waitReasons.push('Both Asian High & Asian Low liquidity already swept');
+  if (simultaneousDualFx) {
+    waitReasons.push(`Both ${sessionRangeName} High & Low swept within 4 bars`);
   } else if (!sweptAsianLow && !sweptAsianHigh) {
     waitReasons.push(
-      `Neither Asian High (${formatPriceWithAsset(asianHigh, asset)}) nor Asian Low (${formatPriceWithAsset(asianLow, asset)}) swept yet`
+      `Neither ${sessionRangeName} High (${formatPriceWithAsset(asianHigh, asset)}) nor Low (${formatPriceWithAsset(asianLow, asset)}) swept yet`
     );
   }
 
   const buyValidPreRR =
     !asianRangeTooWide &&
     sweptAsianLow &&
-    !sweptAsianHigh &&
+    !simultaneousDualFx &&
     bullMssConfirmed &&
-    Boolean(imbBullLtf.bullFvg) &&
-    bullPullbackFvg &&
-    (htf.bias === 'Bullish' || htf.bullDemandAligned);
+    Boolean(bullZoneAnchor) &&
+    (htf.bias === 'Bullish' || htf.bullDemandAligned || htf.bias === 'Ranging');
 
   const sellValidPreRR =
     !asianRangeTooWide &&
     sweptAsianHigh &&
-    !sweptAsianLow &&
+    !simultaneousDualFx &&
     bearMssConfirmed &&
-    Boolean(imbBearLtf.bearFvg) &&
-    bearPullbackFvg &&
-    (htf.bias === 'Bearish' || htf.bearSupplyAligned);
+    Boolean(bearZoneAnchor) &&
+    (htf.bias === 'Bearish' || htf.bearSupplyAligned || htf.bias === 'Ranging');
 
   if (!buyValidPreRR && !sellValidPreRR && waitReasons.length === 0) {
-    if (sweptAsianLow && !sweptAsianHigh) {
+    if (sweptAsianLow) {
       if (!closedBackInsideFromLow || !bullMssConfirmed) {
-        waitReasons.push('Asian Low swept — awaiting post-sweep LTF Bullish MSS inside range');
-      } else if (!imbBullLtf.bullFvg || !bullPullbackFvg) {
-        waitReasons.push('Bullish MSS printed — awaiting pullback into post-sweep Bullish FVG');
+        waitReasons.push(`${sessionRangeName} Low swept — awaiting post-sweep LTF Bullish MSS inside range`);
+      } else if (!bullZoneAnchor) {
+        waitReasons.push('Bullish MSS printed — awaiting unmitigated post-sweep Bullish FVG/OB');
       } else {
         waitReasons.push(`HTF (${htf.bias}) does not support counter-trend Buy yet`);
       }
-    } else if (sweptAsianHigh && !sweptAsianLow) {
+    } else if (sweptAsianHigh) {
       if (!closedBackInsideFromHigh || !bearMssConfirmed) {
-        waitReasons.push('Asian High swept — awaiting post-sweep LTF Bearish MSS inside range');
-      } else if (!imbBearLtf.bearFvg || !bearPullbackFvg) {
-        waitReasons.push('Bearish MSS printed — awaiting pullback into post-sweep Bearish FVG');
+        waitReasons.push(`${sessionRangeName} High swept — awaiting post-sweep LTF Bearish MSS inside range`);
+      } else if (!bearZoneAnchor) {
+        waitReasons.push('Bearish MSS printed — awaiting unmitigated post-sweep Bearish FVG/OB');
       } else {
         waitReasons.push(`HTF (${htf.bias}) does not support counter-trend Sell yet`);
       }
@@ -1782,15 +2088,15 @@ function computeAsianSweepIctSignalForFx(
 
   const maxAllowedFxSl = atr15mMetrics.atr15m * 2.5;
 
-  if (buyValidPreRR && imbBullLtf.bullFvg) {
-    projLow = imbBullLtf.bullFvg.low;
-    projHigh = imbBullLtf.bullFvg.high;
+  if (buyValidPreRR && bullZoneAnchor) {
+    projLow = bullZoneAnchor.low;
+    projHigh = bullZoneAnchor.high;
     activeFvgZone = formatBand(projLow, projHigh, asset);
     const entryMid = (projLow + projHigh) / 2;
     slVal = Math.min(postLow, asianLow, projLow) - slBuf.value;
     const risk = Math.max(1e-6, entryMid - slVal);
 
-    // Strictly anchor targets to REAL liquidity pools (monotonic: entryMid < TP1 <= TP2 <= TP3, NO synthetic 3R inflation!)
+    // Strictly anchor targets to REAL liquidity pools (monotonic: entryMid < TP1 <= TP2 <= TP3)
     const rawTp1 = asianHigh > entryMid + risk * 0.6 ? asianHigh : Math.min(htf.pool1hHigh, htf.pdh);
     tp1Val = Math.max(entryMid + risk * 0.5, rawTp1);
     tp2Val = Math.max(tp1Val, htf.pdh, htf.pool1hHigh);
@@ -1799,8 +2105,8 @@ function computeAsianSweepIctSignalForFx(
 
     if (risk > maxAllowedFxSl) {
       waitReasons.push(`Stop Too Wide (${formatPriceWithAsset(risk, asset)} > 2.5x 15m ATR cap)`);
-    } else if (rrRatio < 3.0) {
-      waitReasons.push(`Real liquidity R:R to TP2 is 1:${rrRatio.toFixed(1)} (below strict 1:3.0 minimum)`);
+    } else if (rrRatio < 2.2) {
+      waitReasons.push(`Real liquidity R:R to TP2 is 1:${rrRatio.toFixed(1)} (below 1:2.2 minimum)`);
     } else if (newsBlocked && newsBlackout.reason) {
       waitReasons.push(newsBlackout.reason);
     } else if (volatilityStatus === 'warming' || (enforceVolatilityFilter && !volatilityPassed)) {
@@ -1820,9 +2126,9 @@ function computeAsianSweepIctSignalForFx(
       } else {
         direction = 'BUY';
         executionStatus = 'active';
-        setupName = 'Asian Low Sweep + Bullish MSS & FVG';
+        setupName = `${sessionRangeName === 'Asian Session' ? 'Asian Low' : 'Session Low'} Sweep + Bullish MSS & FVG/OB`;
         stopLossReason = `Below sweep wick (${formatPriceWithAsset(postLow, asset)}) + ${slBuf.reason}`;
-        sweepMssStatus = `15M swept Asian Low (${formatPriceWithAsset(asianLow, asset)} → ${formatPriceWithAsset(postLow, asset)})${sweepOccurredInKillzone ? ' in Killzone' : ''}; ${ltfTf.toUpperCase()} closed inside range with post-sweep Bullish MSS + clean FVG`;
+        sweepMssStatus = `15M swept ${sessionRangeName} Low (${formatPriceWithAsset(asianLow, asset)} → ${formatPriceWithAsset(postLow, asset)})${sweepOccurredInKillzone ? ' in Killzone' : ''}; ${ltfTf.toUpperCase()} closed inside range with post-sweep Bullish MSS + clean FVG/OB`;
         invalidationNote = buildAssetInvalidationTrigger({
           assetClassLabel: atr15mMetrics.assetClassLabel,
           biasBullish: true,
@@ -1832,15 +2138,15 @@ function computeAsianSweepIctSignalForFx(
         pyramidNote = `Pyramid Trigger: Move SL to BE at TP1 (${formatPriceWithAsset(tp1Val, asset)}); add 2nd pyramid leg on fresh 15M Bullish FVG retest toward ${formatPriceWithAsset(tp3Val, asset)}.`;
       }
     }
-  } else if (sellValidPreRR && imbBearLtf.bearFvg) {
-    projLow = imbBearLtf.bearFvg.low;
-    projHigh = imbBearLtf.bearFvg.high;
+  } else if (sellValidPreRR && bearZoneAnchor) {
+    projLow = bearZoneAnchor.low;
+    projHigh = bearZoneAnchor.high;
     activeFvgZone = formatBand(projLow, projHigh, asset);
     const entryMid = (projLow + projHigh) / 2;
     slVal = Math.max(postHigh, asianHigh, projHigh) + slBuf.value;
     const risk = Math.max(1e-6, slVal - entryMid);
 
-    // Strictly anchor targets to REAL liquidity pools (monotonic: entryMid > TP1 >= TP2 >= TP3, NO synthetic 3R inflation!)
+    // Strictly anchor targets to REAL liquidity pools (monotonic: entryMid > TP1 >= TP2 >= TP3)
     const rawTp1 = asianLow < entryMid - risk * 0.6 ? asianLow : Math.max(htf.pool1hLow, htf.pdl);
     tp1Val = Math.min(entryMid - risk * 0.5, rawTp1);
     tp2Val = Math.min(tp1Val, htf.pdl, htf.pool1hLow);
@@ -1849,8 +2155,8 @@ function computeAsianSweepIctSignalForFx(
 
     if (risk > maxAllowedFxSl) {
       waitReasons.push(`Stop Too Wide (${formatPriceWithAsset(risk, asset)} > 2.5x 15m ATR cap)`);
-    } else if (rrRatio < 3.0) {
-      waitReasons.push(`Real liquidity R:R to TP2 is 1:${rrRatio.toFixed(1)} (below strict 1:3.0 minimum)`);
+    } else if (rrRatio < 2.2) {
+      waitReasons.push(`Real liquidity R:R to TP2 is 1:${rrRatio.toFixed(1)} (below 1:2.2 minimum)`);
     } else if (newsBlocked && newsBlackout.reason) {
       waitReasons.push(newsBlackout.reason);
     } else if (volatilityStatus === 'warming' || (enforceVolatilityFilter && !volatilityPassed)) {
@@ -1870,9 +2176,9 @@ function computeAsianSweepIctSignalForFx(
       } else {
         direction = 'SELL';
         executionStatus = 'active';
-        setupName = 'Asian High Sweep + Bearish MSS & FVG';
+        setupName = `${sessionRangeName === 'Asian Session' ? 'Asian High' : 'Session High'} Sweep + Bearish MSS & FVG/OB`;
         stopLossReason = `Above sweep wick (${formatPriceWithAsset(postHigh, asset)}) + ${slBuf.reason}`;
-        sweepMssStatus = `15M swept Asian High (${formatPriceWithAsset(asianHigh, asset)} → ${formatPriceWithAsset(postHigh, asset)})${sweepOccurredInKillzone ? ' in Killzone' : ''}; ${ltfTf.toUpperCase()} closed inside range with post-sweep Bearish MSS + clean FVG`;
+        sweepMssStatus = `15M swept ${sessionRangeName} High (${formatPriceWithAsset(asianHigh, asset)} → ${formatPriceWithAsset(postHigh, asset)})${sweepOccurredInKillzone ? ' in Killzone' : ''}; ${ltfTf.toUpperCase()} closed inside range with post-sweep Bearish MSS + clean FVG/OB`;
         invalidationNote = buildAssetInvalidationTrigger({
           assetClassLabel: atr15mMetrics.assetClassLabel,
           biasBullish: false,
@@ -1884,17 +2190,42 @@ function computeAsianSweepIctSignalForFx(
     }
   }
 
+  const fxArmedBias: 'BUY' | 'SELL' =
+    direction === 'BUY' || direction === 'SELL'
+      ? direction
+      : sweptAsianLow
+        ? 'BUY'
+        : sweptAsianHigh
+          ? 'SELL'
+          : htf.bias === 'Bearish'
+            ? 'SELL'
+            : 'BUY';
+
+  const fxPostureEval = evaluateLiveExecutionPosture({
+    direction,
+    setupArmed: direction === 'BUY' || direction === 'SELL',
+    armedBias: fxArmedBias,
+    currentPrice,
+    entryLow: projLow,
+    entryHigh: projHigh,
+    stopLoss: slVal,
+    tp1: tp1Val,
+    tp2: tp2Val,
+    atr: atrLtf,
+    executionStatus,
+  });
+
   const fxInvalidationTrigger = buildAssetInvalidationTrigger({
     assetClassLabel: atr15mMetrics.assetClassLabel,
-    biasBullish: direction === 'SELL' ? false : htf.bias !== 'Bearish',
+    biasBullish: direction === 'SELL' ? false : fxArmedBias === 'BUY',
     slFormatted: formatPriceWithAsset(slVal, asset),
     maxPct: volatilityMaxPct,
   });
 
   if (direction === 'NEUTRAL') {
-    const primaryWait = waitReasons[0] || 'Awaiting Asian range sweep & LTF MSS/FVG displacement';
+    const primaryWait = waitReasons[0] || `Awaiting ${sessionRangeName} sweep & LTF MSS/FVG displacement`;
     setupName = `WAIT · ${primaryWait.split('(')[0].trim()}`;
-    sweepMssStatus = `Asian Range ${formatBand(asianLow, asianHigh, asset)} (${asianRangeAtrRatio.toFixed(2)}x ATR) · ${primaryWait}`;
+    sweepMssStatus = `${sessionRangeName} ${formatBand(asianLow, asianHigh, asset)} (${asianRangeAtrRatio.toFixed(2)}x ATR) · ${primaryWait}`;
     invalidationNote = `NO TRADE (${primaryWait}). ${fxInvalidationTrigger}`;
     pyramidNote = 'Pyramiding inactive until primary TP1 (50% + BE) triggers on a confirmed setup.';
   }
@@ -1933,15 +2264,15 @@ function computeAsianSweepIctSignalForFx(
       : Math.min(97, Math.max(76, Math.round(precisionScore)));
 
   const triggers: string[] = [];
-  if (sweptAsianLow && !sweptAsianHigh) triggers.push('Asian Low Swept');
-  if (sweptAsianHigh && !sweptAsianLow) triggers.push('Asian High Swept');
-  if (sweptAsianLow && sweptAsianHigh) triggers.push('Both Sides Swept (Skip)');
-  if (asianRangeTooWide) triggers.push(`Asian >1.5x ATR (${asianRangeAtrRatio}x)`);
+  if (sweptAsianLow && !simultaneousDualFx) triggers.push(`${sessionRangeName} Low Swept`);
+  if (sweptAsianHigh && !simultaneousDualFx) triggers.push(`${sessionRangeName} High Swept`);
+  if (simultaneousDualFx) triggers.push('Both Sides Swept (Skip)');
+  if (asianRangeTooWide) triggers.push(`Range >1.5x ATR (${asianRangeAtrRatio}x)`);
   if (bullMssConfirmed || bearMssConfirmed) triggers.push('Post-Sweep LTF MSS');
-  if (imbBullLtf.bullFvg || imbBearLtf.bearFvg) triggers.push('Post-Sweep FVG');
-  if (rrRatio >= 3.0) triggers.push(`R:R 1:${rrRatio.toFixed(1)}`);
+  if (bullZoneAnchor || bearZoneAnchor) triggers.push('Post-Sweep FVG/OB');
+  if (rrRatio >= 2.2) triggers.push(`R:R 1:${rrRatio.toFixed(1)}`);
 
-  const projectedLevelsSummary = `Asian ${formatBand(asianLow, asianHigh, asset)} · SL Ref ${formatPriceWithAsset(slVal, asset)} · Pool ${formatPriceWithAsset(tp2Val, asset)}`;
+  const projectedLevelsSummary = `${sessionRangeName} ${formatBand(asianLow, asianHigh, asset)} · SL Ref ${formatPriceWithAsset(slVal, asset)} · Pool ${formatPriceWithAsset(tp2Val, asset)}`;
 
   const { setupGrade, isAPlusSetup } = computeSetupGrade({
     direction,
@@ -1971,7 +2302,7 @@ function computeAsianSweepIctSignalForFx(
         : formatBand(projLow, projHigh, asset),
     stopLoss: formatPriceWithAsset(slVal, asset),
     targetPrice: formatPriceWithAsset(tp2Val, asset),
-    riskReward: rrRatio >= 3.0 ? `1:${rrRatio.toFixed(1)}` : rrRatio > 0 ? `WAIT (1:${rrRatio.toFixed(1)} < 1:3)` : 'WAIT',
+    riskReward: rrRatio >= 2.2 ? `1:${rrRatio.toFixed(1)}` : rrRatio > 0 ? `WAIT (1:${rrRatio.toFixed(1)} < 1:2.2)` : 'WAIT',
     triggers: triggers.length > 0 ? triggers : ['Wait for Asian Sweep'],
     timeframe: ltfTf,
     currentPrice,
@@ -2024,6 +2355,13 @@ function computeAsianSweepIctSignalForFx(
     setupGrade,
     isAPlusSetup,
     usdExposure,
+    executionPosture: fxPostureEval.posture,
+    recommendedOrderType: fxPostureEval.recommendedOrderType,
+    limitEntryPriceNum: fxPostureEval.limitEntryPriceNum,
+    limitRr: fxPostureEval.limitRr,
+    spotRr: fxPostureEval.spotRr,
+    chaseProgressPct: fxPostureEval.chaseProgressPct,
+    hasRunAway: fxPostureEval.hasRunAway,
   };
 }
 

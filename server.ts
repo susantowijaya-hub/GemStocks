@@ -1,7 +1,4 @@
 import 'dotenv/config';
-if (!process.env.DISABLE_HMR) {
-  process.env.DISABLE_HMR = 'true';
-}
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import express from 'express';
 import type { Request, Response } from 'express';
@@ -83,13 +80,24 @@ async function startServer() {
   });
 
   // Live Market Quotes (all 18 tracked global tickers + provider diagnostics)
-  app.get('/api/market/quotes', async (_req: Request, res: Response) => {
+  app.get('/api/market/quotes', async (req: Request, res: Response) => {
     try {
       const payload = await fetchLiveQuotes();
-      res.json(payload);
+      const isCompact = req.headers['x-quotes-mode'] === 'compact';
+      if (isCompact && Array.isArray(payload.quotes)) {
+        return res.json({
+          ...payload,
+          quotes: payload.quotes.map((q) => ({
+            ...q,
+            chart1D: [],
+            timestamps1D: [],
+          })),
+        });
+      }
+      return res.json(payload);
     } catch (err) {
       console.error('Failed to fetch live quotes:', err);
-      res.status(502).json({ error: 'Unable to fetch live market quotes.' });
+      return res.status(502).json({ error: 'Unable to fetch live market quotes.' });
     }
   });
 
@@ -715,29 +723,64 @@ async function startServer() {
       const fullPath = path.join(distDir, safePath);
       const brPath = `${fullPath}.br`;
       if (fullPath.startsWith(distDir) && fs.existsSync(brPath) && fs.statSync(brPath).isFile()) {
+        const ext = path.extname(fullPath).toLowerCase();
         res.setHeader('Content-Encoding', 'br');
         res.setHeader('Vary', 'Accept-Encoding');
-        res.type(fullPath);
-        return res.sendFile(brPath);
+        if (safePath.startsWith('/assets/')) {
+          res.setHeader('Cache-Control', 'public, max-age=2592000, immutable');
+        } else if (safePath === '/index.html') {
+          res.setHeader('Cache-Control', 'no-cache');
+        }
+        if (ext === '.webmanifest') {
+          res.setHeader('Content-Type', 'application/manifest+json; charset=utf-8');
+        } else {
+          res.type(ext || '.bin');
+        }
+        const resolvedMime = String(res.getHeader('Content-Type') || 'application/octet-stream');
+        return res.sendFile(brPath, { headers: { 'Content-Type': resolvedMime } });
       }
       return next();
     });
+    app.use(
+      '/assets',
+      express.static(path.join(distDir, 'assets'), {
+        maxAge: '30d',
+        immutable: true,
+      })
+    );
     app.use(express.static(distDir, { maxAge: '1h' }));
     app.get('*', (req: Request, res: Response) => {
-      if (req.path.startsWith('/api/')) {
-        return res.status(404).json({ error: 'API endpoint not found' });
+      if (req.path.startsWith('/api/') || req.path.startsWith('/assets/')) {
+        return res.status(404).json({ error: 'Not found' });
       }
+      res.setHeader('Cache-Control', 'no-cache');
       return res.sendFile(path.join(distDir, 'index.html'));
     });
   } else {
-    const { createServer: createViteServer } = await import('vite');
-    const vite = await createViteServer({
-      server: {
-        middlewareMode: true,
-        hmr: false,
-      },
-      appType: 'spa',
+    // Self-destructing /sw.js kill-switch in dev mode so any stale PWA service worker from prior sessions immediately unregisters and clears old caches
+    app.get('/sw.js', (_req: Request, res: Response) => {
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+      res.type('application/javascript; charset=utf-8').send(`
+self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', (event) => {
+  event.waitUntil((async () => {
+    try {
+      const keys = await caches.keys();
+      await Promise.all(keys.map((k) => caches.delete(k)));
+      await self.registration.unregister();
+      const clients = await self.clients.matchAll({ type: 'window' });
+      clients.forEach((c) => { try { c.navigate(c.url); } catch {} });
+    } catch {}
+  })());
+});
+`);
     });
+
+    // Guard missing hashed /assets/* in dev mode with 404 instead of SPA index.html (prevents MIME blocks if stale HTML lingers)
+    app.get('/assets/*', (_req: Request, res: Response) => {
+      res.status(404).type('text/plain').send('Not found');
+    });
+
     // HMR is disabled in AI Studio; serve a clean /@vite/client ESM shim so CSS style injection works with zero failed WebSocket connections
     app.get('/@vite/client', (_req: Request, res: Response) => {
       res.type('application/javascript').send(`
@@ -779,12 +822,131 @@ export function injectQuery(url) { return url; }
 export class ErrorOverlay {}
 `);
     });
-    app.use(vite.middlewares);
+
+    // Initialize Vite asynchronously after HTTP server binds so /api/health and /api/* are ready immediately
+    const vitePromise = import('vite')
+      .then(({ createServer: createViteServer }) =>
+        createViteServer({
+          server: {
+            middlewareMode: true,
+            hmr: false,
+            ws: false,
+          },
+          appType: 'spa',
+        })
+      )
+      .catch((err) => {
+        console.error('Failed to initialize Vite dev server:', err);
+        throw err;
+      });
+
+    // Strip multi-megabyte inline base64 source maps from Vite pre-bundled vendor deps in dev so mobile 4G loads ~5 MB less JS
+    app.use('/node_modules/.vite/deps', (req: Request, res: Response, next) => {
+      if (req.method !== 'GET' || !req.path.endsWith('.js')) return next();
+      const origWrite = res.write.bind(res);
+      const origEnd = res.end.bind(res);
+      const origSetHeader = res.setHeader.bind(res);
+      const origWriteHead = res.writeHead.bind(res);
+      const chunks: Buffer[] = [];
+      let deferredStatus: number | null = null;
+      let deferredHeaders: Record<string, unknown> | undefined;
+
+      res.setHeader = ((name: string, value: number | string | readonly string[]) => {
+        if (name.toLowerCase() === 'content-length') return res;
+        return origSetHeader(name, value);
+      }) as typeof res.setHeader;
+
+      res.writeHead = ((statusCode: number, reasonOrHeaders?: unknown, maybeHeaders?: unknown) => {
+        deferredStatus = statusCode;
+        const hdrs = typeof reasonOrHeaders === 'object' ? reasonOrHeaders : maybeHeaders;
+        if (hdrs && typeof hdrs === 'object') {
+          deferredHeaders = { ...(hdrs as Record<string, unknown>) };
+          delete deferredHeaders['content-length'];
+          delete deferredHeaders['Content-Length'];
+        }
+        return res;
+      }) as typeof res.writeHead;
+
+      res.write = ((chunk: unknown, encoding?: unknown, cb?: unknown) => {
+        const status = deferredStatus ?? res.statusCode;
+        if (status >= 300) {
+          if (deferredStatus !== null) {
+            origWriteHead(deferredStatus, deferredHeaders as never);
+            deferredStatus = null;
+          }
+          return origWrite(chunk as never, encoding as never, cb as never);
+        }
+        if (chunk) {
+          chunks.push(
+            Buffer.isBuffer(chunk)
+              ? chunk
+              : Buffer.from(String(chunk), typeof encoding === 'string' ? (encoding as BufferEncoding) : 'utf8')
+          );
+        }
+        if (typeof encoding === 'function') encoding();
+        else if (typeof cb === 'function') cb();
+        return true;
+      }) as typeof res.write;
+
+      res.end = ((chunk?: unknown, encoding?: unknown, cb?: unknown) => {
+        if (typeof chunk === 'function') {
+          cb = chunk;
+          chunk = undefined;
+        }
+        if (typeof encoding === 'function') {
+          cb = encoding;
+          encoding = undefined;
+        }
+        const status = deferredStatus ?? res.statusCode;
+        if (status >= 300) {
+          if (deferredStatus !== null) {
+            origWriteHead(deferredStatus, deferredHeaders as never);
+            deferredStatus = null;
+          }
+          return origEnd(chunk as never, encoding as never, cb as never);
+        }
+        if (chunk) {
+          chunks.push(
+            Buffer.isBuffer(chunk)
+              ? chunk
+              : Buffer.from(String(chunk), typeof encoding === 'string' ? (encoding as BufferEncoding) : 'utf8')
+          );
+        }
+        const full = Buffer.concat(chunks);
+        const text = full.toString('utf8');
+        const marker = '\n//# sourceMappingURL=data:application/json;base64,';
+        const idx = text.lastIndexOf(marker);
+        const outBuf = idx !== -1 ? Buffer.from(text.slice(0, idx), 'utf8') : full;
+        origSetHeader('Content-Length', outBuf.length);
+        if (deferredStatus !== null) {
+          origWriteHead(deferredStatus, deferredHeaders as never);
+          deferredStatus = null;
+        }
+        return origEnd(outBuf, cb as never);
+      }) as typeof res.end;
+
+      return next();
+    });
+
+    app.use(async (req: Request, res: Response, next) => {
+      if (req.path.startsWith('/api/')) return next();
+      try {
+        const vite = await vitePromise;
+        return vite.middlewares(req, res, next);
+      } catch (err) {
+        return next(err);
+      }
+    });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  const httpServer = app.listen(PORT, '0.0.0.0', () => {
     console.log(`Stocks Global Market Terminal running at http://0.0.0.0:${PORT}`);
     warmServerCaches();
+  });
+
+  httpServer.on('error', (err: NodeJS.ErrnoException) => {
+    console.error(`Server failed to bind port ${PORT}:`, err.message);
+    process.exit(1);
   });
 }
 

@@ -106,36 +106,45 @@ export function usePrefetch(activeRoute: AppRoute, priorityReady: boolean) {
     let timerId: number | null = null;
     let secondaryTimerId: number | null = null;
 
-    const runAdjacentPrefetch = () => {
-      adjacent.forEach((route) => {
-        prefetchRouteAndData(route);
-      });
+    const runStaggeredIdlePrefetch = () => {
+      const remaining = [
+        ...adjacent,
+        'watchlist',
+        'ict',
+        'stocks',
+        'portfolio',
+        'heatmap',
+        'news',
+        'calendar',
+        'extract',
+      ].filter((r, idx, arr): r is AppRoute => arr.indexOf(r) === idx && !prefetchedRoutes.has(r as AppRoute)) as AppRoute[];
 
-      // Warm remaining secondary views safely after adjacent ones settle
-      secondaryTimerId = globalThis.setTimeout(() => {
-        const allLazy: AppRoute[] = [
-          'watchlist',
-          'ict',
-          'stocks',
-          'portfolio',
-          'heatmap',
-          'news',
-          'calendar',
-          'extract',
-        ];
-        for (const r of allLazy) {
-          if (!prefetchedRoutes.has(r)) {
-            prefetchRouteComponent(r);
-          }
+      let stepIdx = 0;
+      const scheduleNext = () => {
+        if (stepIdx >= remaining.length) return;
+        const route = remaining[stepIdx++];
+        prefetchRouteComponent(route);
+        if (stepIdx < remaining.length) {
+          secondaryTimerId = globalThis.setTimeout(() => {
+            if (typeof winWithIdle.requestIdleCallback === 'function') {
+              idleId = winWithIdle.requestIdleCallback(scheduleNext, { timeout: 1500 });
+            } else {
+              scheduleNext();
+            }
+          }, 850) as unknown as number;
         }
-      }, 1800) as unknown as number;
+      };
+
+      scheduleNext();
     };
 
-    if (typeof winWithIdle.requestIdleCallback === 'function') {
-      idleId = winWithIdle.requestIdleCallback(runAdjacentPrefetch, { timeout: 1200 });
-    } else {
-      timerId = globalThis.setTimeout(runAdjacentPrefetch, 450) as unknown as number;
-    }
+    timerId = globalThis.setTimeout(() => {
+      if (typeof winWithIdle.requestIdleCallback === 'function') {
+        idleId = winWithIdle.requestIdleCallback(runStaggeredIdlePrefetch, { timeout: 2000 });
+      } else {
+        runStaggeredIdlePrefetch();
+      }
+    }, 2800) as unknown as number;
 
     return () => {
       if (idleId !== null && typeof winWithIdle.cancelIdleCallback === 'function') {

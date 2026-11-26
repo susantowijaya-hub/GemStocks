@@ -804,6 +804,15 @@ test.describe('Stocks Terminal E2E & Visual Contrast Regression', () => {
     await expect(focusedSpotPlaque).toBeVisible();
     await expect(focusedSpotPlaque).toHaveClass(/spot-plaque-surface/);
     await expect(focusedSpotPlaque.locator('.spot-price-3d-hero')).toBeVisible();
+    await expect(focusedSpotPlaque.getByTestId('ict-focused-spot-bias-badge')).toBeVisible();
+    await expect(focusedSpotPlaque.getByTestId('ict-focused-spot-bias-badge')).toHaveText(
+      /^(BUY|SELL|BUY LIMIT|SELL LIMIT|PULLBACK · BUY|PULLBACK · SELL|WAIT FOR BUY|WAIT FOR SELL|WAIT · RANGING)$/
+    );
+    await expect(ictGrid.locator('[data-testid="ict-card-spot-bias-badge"]').first()).toHaveText(
+      /^(BUY|SELL|BUY LIMIT|SELL LIMIT|PULLBACK · BUY|PULLBACK · SELL|WAIT FOR BUY|WAIT FOR SELL|WAIT · RANGING)$/
+    );
+    await expect(ictView.getByTestId('ict-execution-banner')).toBeVisible();
+    await expect(ictView.getByTestId('ict-rr-comparison')).toBeVisible();
     await expect(ictView.getByTestId('ict-spot-proximity')).toBeVisible();
     await expect(ictView.getByTestId('ict-invalidation-box')).toBeVisible();
     await expect(ictView.getByTestId('ict-invalidation-box')).toContainText('Allowed 15m ATR:');
@@ -854,6 +863,15 @@ test.describe('Stocks Terminal E2E & Visual Contrast Regression', () => {
     await expect(ictView.getByTestId('strategy-tab-sdcv')).toHaveAttribute('aria-selected', 'true');
     await expect(ictView.getByTestId('sdcv-pillar-strip')).toBeVisible();
     await expect(ictView.getByTestId('ict-focused-spot-price')).toBeVisible();
+    await expect(ictView.getByTestId('ict-focused-spot-bias-badge')).toBeVisible();
+    await expect(ictView.getByTestId('ict-focused-spot-bias-badge')).toHaveText(
+      /^(BUY|SELL|BUY LIMIT|SELL LIMIT|PULLBACK · BUY|PULLBACK · SELL|WAIT FOR BUY|WAIT FOR SELL|WAIT · RANGING)$/
+    );
+    await expect(ictGrid.locator('[data-testid="ict-card-spot-bias-badge"]').first()).toHaveText(
+      /^(BUY|SELL|BUY LIMIT|SELL LIMIT|PULLBACK · BUY|PULLBACK · SELL|WAIT FOR BUY|WAIT FOR SELL|WAIT · RANGING)$/
+    );
+    await expect(ictView.getByTestId('ict-execution-banner')).toBeVisible();
+    await expect(ictView.getByTestId('ict-rr-comparison')).toBeVisible();
     await expect(ictView.getByTestId('ict-invalidation-box')).toBeVisible();
     await expect(ictView).toContainText('Candle Reading:');
     await expect(ictView).toContainText(/Relative Volume|Tick-Range Effort|Bar Volume/);
@@ -938,6 +956,67 @@ test.describe('Stocks Terminal E2E & Visual Contrast Regression', () => {
     await expect
       .poll(() => new URL(page.url()).hash)
       .toBe('#stocks');
+
+    expect(pageErrors).toEqual([]);
+  });
+
+  test('renders mobile ICT Radar and S&D Matrix without label overlaps or horizontal overflow', async ({
+    page,
+  }) => {
+    const { pageErrors } = attachErrorCollectors(page);
+    await page.setViewportSize({ width: 375, height: 812 });
+    await page.goto('/#ict', { waitUntil: 'domcontentloaded' });
+
+    const ictView = page.getByTestId('ict-radar-view');
+    await expect(ictView).toBeVisible({ timeout: 15_000 });
+    await ictView.getByTestId('ict-scan-now-btn').click();
+
+    for (const mode of ['ict', 'sdcv'] as const) {
+      if (mode === 'sdcv') {
+        await ictView.getByTestId('strategy-tab-sdcv').click();
+        await expect(ictView.getByTestId('strategy-tab-sdcv')).toHaveAttribute('aria-selected', 'true');
+      }
+
+      const metrics = await page.evaluate(() => {
+        const root = document.querySelector('[data-testid="ict-radar-view"]');
+        if (!root) return { docOverflow: 999, overlapCount: 999 };
+        const vw = window.innerWidth;
+        const docOverflow = Math.max(0, document.documentElement.scrollWidth - vw);
+        let overlapCount = 0;
+        const containers = root.querySelectorAll(
+          '[data-testid="ict-signal-card"], [data-testid="ict-focused-setup"], [data-testid="ict-alert-log"], section'
+        );
+        for (const c of containers) {
+          const leaves = Array.from(c.querySelectorAll('span, p, h1, h2, button, strong')).filter(
+            (el) => {
+              if (el.querySelector('span, p, button, div')) return false;
+              const r = el.getBoundingClientRect();
+              return r.width > 1 && r.height > 1 && (el.textContent || '').trim().length > 0;
+            }
+          );
+          for (let i = 0; i < leaves.length; i++) {
+            const a = leaves[i].getBoundingClientRect();
+            for (let j = i + 1; j < leaves.length; j++) {
+              const b = leaves[j].getBoundingClientRect();
+              const ix = Math.max(0, Math.min(a.right, b.right) - Math.max(a.left, b.left));
+              const iy = Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top));
+              if (
+                ix > 2 &&
+                iy > 2 &&
+                !leaves[i].contains(leaves[j]) &&
+                !leaves[j].contains(leaves[i])
+              ) {
+                overlapCount += 1;
+              }
+            }
+          }
+        }
+        return { docOverflow, overlapCount };
+      });
+
+      expect(metrics.docOverflow).toBe(0);
+      expect(metrics.overlapCount).toBe(0);
+    }
 
     expect(pageErrors).toEqual([]);
   });

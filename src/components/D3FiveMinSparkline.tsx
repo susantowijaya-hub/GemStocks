@@ -1,5 +1,4 @@
 import React, { useId, useMemo } from 'react';
-import { area, curveMonotoneX, extent, line, scaleLinear } from 'd3';
 
 interface D3FiveMinSparklineProps {
   points: number[];
@@ -7,6 +6,64 @@ interface D3FiveMinSparklineProps {
   width?: number;
   height?: number;
   className?: string;
+}
+
+function buildMonotoneSplinePaths(
+  coords: Array<{ x: number; y: number }>,
+  baselineY: number
+): { lineD: string; areaD: string } {
+  const n = coords.length;
+  if (n === 0) return { lineD: '', areaD: '' };
+  if (n === 1) {
+    const pt = `${coords[0].x.toFixed(2)},${coords[0].y.toFixed(2)}`;
+    return {
+      lineD: `M${pt}`,
+      areaD: `M${pt}L${coords[0].x.toFixed(2)},${baselineY.toFixed(2)}Z`,
+    };
+  }
+  if (n === 2) {
+    const p0 = `${coords[0].x.toFixed(2)},${coords[0].y.toFixed(2)}`;
+    const p1 = `${coords[1].x.toFixed(2)},${coords[1].y.toFixed(2)}`;
+    return {
+      lineD: `M${p0}L${p1}`,
+      areaD: `M${p0}L${p1}L${coords[1].x.toFixed(2)},${baselineY.toFixed(2)}L${coords[0].x.toFixed(2)},${baselineY.toFixed(2)}Z`,
+    };
+  }
+
+  const dx: number[] = new Array(n - 1);
+  const dy: number[] = new Array(n - 1);
+  const m: number[] = new Array(n - 1);
+  for (let i = 0; i < n - 1; i++) {
+    dx[i] = Math.max(1e-6, coords[i + 1].x - coords[i].x);
+    dy[i] = coords[i + 1].y - coords[i].y;
+    m[i] = dy[i] / dx[i];
+  }
+
+  const tangents: number[] = new Array(n);
+  tangents[0] = m[0];
+  tangents[n - 1] = m[n - 2];
+  for (let i = 1; i < n - 1; i++) {
+    if (m[i - 1] * m[i] <= 0) {
+      tangents[i] = 0;
+    } else {
+      const w1 = 2 * dx[i] + dx[i - 1];
+      const w2 = dx[i] + 2 * dx[i - 1];
+      tangents[i] = (w1 + w2) / (w1 / m[i - 1] + w2 / m[i]);
+    }
+  }
+
+  let lineD = `M${coords[0].x.toFixed(2)},${coords[0].y.toFixed(2)}`;
+  for (let i = 0; i < n - 1; i++) {
+    const h = dx[i] / 3;
+    const c1x = coords[i].x + h;
+    const c1y = coords[i].y + tangents[i] * h;
+    const c2x = coords[i + 1].x - h;
+    const c2y = coords[i + 1].y - tangents[i + 1] * h;
+    lineD += `C${c1x.toFixed(2)},${c1y.toFixed(2)},${c2x.toFixed(2)},${c2y.toFixed(2)},${coords[i + 1].x.toFixed(2)},${coords[i + 1].y.toFixed(2)}`;
+  }
+
+  const areaD = `${lineD}L${coords[n - 1].x.toFixed(2)},${baselineY.toFixed(2)}L${coords[0].x.toFixed(2)},${baselineY.toFixed(2)}Z`;
+  return { lineD, areaD };
 }
 
 export const D3FiveMinSparkline: React.FC<D3FiveMinSparklineProps> = React.memo(
@@ -20,36 +77,31 @@ export const D3FiveMinSparkline: React.FC<D3FiveMinSparklineProps> = React.memo(
       const padX = 2.5;
       const padY = 2.5;
 
-      const xScale = scaleLinear()
-        .domain([0, Math.max(1, safePts.length - 1)])
-        .range([padX, width - padX]);
+      const maxIdx = Math.max(1, safePts.length - 1);
+      const xScale = (idx: number) => padX + (idx / maxIdx) * (width - padX * 2);
 
-      const [rawMin, rawMax] = extent(safePts);
-      const minVal = rawMin ?? safePts[0];
-      const maxVal = rawMax ?? safePts[0];
+      let minVal = safePts[0];
+      let maxVal = safePts[0];
+      for (let i = 1; i < safePts.length; i++) {
+        if (safePts[i] < minVal) minVal = safePts[i];
+        if (safePts[i] > maxVal) maxVal = safePts[i];
+      }
       const spread = maxVal - minVal;
       const domainPad = spread > 0 ? spread * 0.14 : Math.max(Math.abs(minVal) * 0.001, 1);
+      const domMin = minVal - domainPad;
+      const domSpan = Math.max(1e-9, maxVal + domainPad - domMin);
+      const yScale = (val: number) =>
+        height - padY - ((val - domMin) / domSpan) * (height - padY * 2);
 
-      const yScale = scaleLinear()
-        .domain([minVal - domainPad, maxVal + domainPad])
-        .range([height - padY, padY]);
-
-      const lineGen = line<number>()
-        .x((_, idx) => xScale(idx))
-        .y((d) => yScale(d))
-        .curve(curveMonotoneX);
+      const coords = safePts.map((val, idx) => ({
+        x: xScale(idx),
+        y: yScale(val),
+      }));
 
       const baselineY = yScale(safePts[0]);
-      const areaGen = area<number>()
-        .x((_, idx) => xScale(idx))
-        .y0(baselineY)
-        .y1((d) => yScale(d))
-        .curve(curveMonotoneX);
-
-      const lineD = lineGen(safePts) ?? '';
-      const areaD = areaGen(safePts) ?? '';
-      const endX = xScale(safePts.length - 1);
-      const endY = yScale(safePts[safePts.length - 1]);
+      const { lineD, areaD } = buildMonotoneSplinePaths(coords, baselineY);
+      const endX = coords[coords.length - 1].x;
+      const endY = coords[coords.length - 1].y;
 
       const first = safePts[0];
       const last = safePts[safePts.length - 1];

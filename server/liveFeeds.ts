@@ -1311,8 +1311,8 @@ export async function fetchLiveQuotes(): Promise<{
         diagnostics: getServerFeedDiagnostics(),
       };
     }
-    // Stale-while-revalidate: serve warm cache immediately (< 1ms) if <= 15s stale while refreshing quietly
-    if (now - quotesCache.entry.expiresAt < 15_000) {
+    // Stale-while-revalidate: serve warm cache immediately (< 1ms) up to 5m stale while refreshing quietly
+    if (now - quotesCache.entry.expiresAt < 300_000) {
       if (!inFlightQuotesPromise) {
         void refreshQuotesInternal().catch(() => null);
       }
@@ -1366,7 +1366,7 @@ async function refreshQuotesInternal(): Promise<{
           )}?range=1d&interval=${interval}`;
           const res = await fetch(url, {
             headers: UA_HEADERS,
-            signal: AbortSignal.timeout(6500),
+            signal: AbortSignal.timeout(4500),
           });
           if (!res.ok) {
             if (cached?.data) yahooCachedSymbolCount += 1;
@@ -9340,14 +9340,14 @@ export function warmServerCaches(): void {
       fetchLiveQuotes(),
       fetchLiveFxRates(),
     ]).then(() => {
-      // Stage 2: warm news, calendar & equity movers
+      // Stage 2: warm news, calendar & equity movers after initial quote response settles
       setTimeout(() => {
         void Promise.allSettled([
           fetchLiveNews(),
           fetchLiveCalendar(),
           fetchTopStockMovers(),
         ]).then(() => {
-          // Stage 3: warm heavy heatmap, daily summary, correlations & intelligence
+          // Stage 3: defer heavy heatmap, daily summary, correlations & intelligence so client boot traffic wins
           setTimeout(() => {
             void Promise.allSettled([
               fetchMarketHeatmap(),
@@ -9355,10 +9355,10 @@ export function warmServerCaches(): void {
               fetchCorrelationMatrix('1M'),
               fetchMarketIntelligence(),
             ]);
-          }, 400);
+          }, 1800);
         });
-      }, 200);
+      }, 750);
     });
-  }, 150);
+  }, 100);
 }
 
