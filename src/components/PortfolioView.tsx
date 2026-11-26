@@ -17,6 +17,7 @@ import {
   ExternalLink,
   FolderPlus,
   Loader2,
+  LogOut,
   MoreVertical,
   Newspaper,
   Pencil,
@@ -29,16 +30,8 @@ import {
   TrendingUp,
   X,
 } from 'lucide-react';
-import {
-  collection,
-  deleteDoc,
-  doc,
-  onSnapshot,
-  serverTimestamp,
-  setDoc,
-} from 'firebase/firestore';
 import { useAuth } from '../contexts/AuthContext';
-import { db } from '../lib/firebase';
+import { getFirebaseServices } from '../lib/firebase';
 import { OperationType, handleFirestoreError } from '../lib/firestoreErrors';
 import {
   CurrencyCode,
@@ -97,6 +90,19 @@ const DEFAULT_STATE: StoredPortfolioState = {
 function makeSafeId(prefix: string): string {
   const rand = Math.random().toString(36).slice(2, 8);
   return `${prefix}-${Date.now()}-${rand}`.replace(/[^a-zA-Z0-9_-]/g, '');
+}
+
+function makeCloudHoldingDocId(portfolioId: string, yahooSymbol: string): string {
+  const safePf = portfolioId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 32) || 'default-saham';
+  const safeSym =
+    yahooSymbol
+      .toUpperCase()
+      .replace(/\^/g, '_CARET_')
+      .replace(/=/g, '_EQ_')
+      .replace(/\./g, '_DOT_')
+      .replace(/[^A-Z0-9_-]/g, '_')
+      .slice(0, 48) || 'ASSET';
+  return `pos_${safePf}_${safeSym}`.slice(0, 120);
 }
 
 function migratePortfolioLots(
@@ -167,6 +173,48 @@ function migratePortfolioLots(
     lots.push(...recovered);
   }
   return lots;
+}
+
+function reconcileLotsWithCloudHolding(
+  lots: PortfolioPurchaseLot[],
+  holding: PortfolioHolding
+): PortfolioPurchaseLot[] {
+  const matching = lots.filter(
+    (l) =>
+      l.portfolioId === holding.portfolioId &&
+      l.yahooSymbol === holding.yahooSymbol &&
+      l.remainingUnits > 1e-6
+  );
+  const lotSum = matching.reduce((acc, l) => acc + l.remainingUnits, 0);
+  const lotAvg =
+    lotSum > 1e-6
+      ? matching.reduce((acc, l) => acc + l.remainingUnits * l.pricePerUnit, 0) / lotSum
+      : 0;
+  const unitsMatch = Math.abs(lotSum - holding.units) <= 1e-4;
+  const costMatch =
+    holding.avgCost <= 0 || Math.abs(lotAvg - holding.avgCost) / Math.max(holding.avgCost, 1) <= 0.015;
+  if (matching.length > 0 && unitsMatch && costMatch) {
+    return lots;
+  }
+  const untouched = lots.filter(
+    (l) => !(l.portfolioId === holding.portfolioId && l.yahooSymbol === holding.yahooSymbol)
+  );
+  return [
+    ...untouched,
+    {
+      id: makeSafeId('lot'),
+      portfolioId: holding.portfolioId,
+      symbol: holding.symbol,
+      yahooSymbol: holding.yahooSymbol,
+      name: holding.name,
+      category: holding.category,
+      currency: holding.currency,
+      units: holding.units,
+      remainingUnits: holding.units,
+      pricePerUnit: holding.avgCost,
+      purchaseDateIso: holding.createdAt || new Date().toISOString(),
+    },
+  ];
 }
 
 function recomputeHoldingsFromLots(
@@ -568,9 +616,33 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
   onInspectSymbol,
 }) => {
   const chartUid = useId().replace(/:/g, '');
-  const { user, profileReady, signInWithGoogle, logout, authLoading } = useAuth();
+  const {
+    user,
+    profileReady,
+    signInWithGoogle,
+    logout,
+    authLoading,
+    authError,
+    clearAuthError,
+    retryProfileSync,
+  } = useAuth();
 
   const [state, setState] = useState<StoredPortfolioState>(loadInitialPortfolioState);
+  const stateRef = useRef(state);
+  stateRef.current = state;
+  const [cloudSyncEnabled, setCloudSyncEnabled] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return true;
+    try {
+      return window.localStorage.getItem('stocks_portfolio_cloud_sync_v1') !== 'false';
+    } catch {
+      return true;
+    }
+  });
+  const [syncInProgress, setSyncInProgress] = useState(false);
+  const [syncError, setSyncError] = useState<string | null>(null);
+  const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null);
+  const [syncedCount, setSyncedCount] = useState<number>(0);
+  const syncedCloudIdsRef = useRef<Set<string>>(new Set());
   const [subTab, setSubTab] = useState<PortfolioSubTab>('holdings');
   const [chartRange, setChartRange] = useState<PortfolioChartRange>('1D');
   const [expandedHoldingId, setExpandedHoldingId] = useState<string | null>(null);
@@ -872,80 +944,416 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
     void fetchMoversBrief(holdingYahooSymbols);
   }, [subTab, symbolsKey, holdingYahooSymbols, fetchMoversBrief]);
 
-  // Optional Firestore cloud position sync when user chooses to sign in
+  const fxRatesRef = useRef(fxRates);
+  fxRatesRef.current = fxRates;
+
   useEffect(() => {
-    if (!user || !profileReady) return;
-    const path = `users/${user.uid}/positions`;
-    const unsubscribe = onSnapshot(
-      collection(db, 'users', user.uid, 'positions'),
-      (snap) => {
-        if (snap.empty) return;
-        const idrPerUsd = fxRates.IDR || 16000;
-        const cloudHoldings: PortfolioHolding[] = snap.docs.map((d) => {
+    try {
+      window.localStorage.setItem('stocks_portfolio_cloud_sync_v1', String(cloudSyncEnabled));
+    } catch {
+      // ignore storage errors
+    }
+  }, [cloudSyncEnabled]);
+
+  const formatSyncFailure = useCallback((err: unknown, fallback: string): string => {
+    const errObj = err as { code?: string; message?: string };
+    const msg = errObj?.message || '';
+    if (errObj?.code === 'permission-denied' || /Missing or insufficient permissions/i.test(msg)) {
+      return 'Cloud sync permission denied. Click "Sync Now" after refreshing your Google session.';
+    }
+    if (errObj?.code === 'unavailable' || /offline/i.test(msg)) {
+      return 'Firestore unreachable. Holdings are safely stored locally until connection returns.';
+    }
+    return msg || fallback;
+  }, []);
+
+  const syncHoldingToFirestore = useCallback(
+    async (holding: PortfolioHolding, currentPriceNative: number, portfolioNameOverride?: string) => {
+      if (!user || !profileReady || !cloudSyncEnabled) return;
+      const cleanRawId = holding.id.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 120);
+      const safeId =
+        cleanRawId || makeCloudHoldingDocId(holding.portfolioId, holding.yahooSymbol);
+      const posPath = `users/${user.uid}/positions/${safeId}`;
+      const avgCostUsd = Math.max(0, convertAmount(holding.avgCost, holding.currency, 'USD'));
+      const curUsd = Math.max(0, convertAmount(currentPriceNative, holding.currency, 'USD'));
+      const safeSym =
+        holding.yahooSymbol.toUpperCase().replace(/[^A-Z0-9._\-/^=]/g, '').slice(0, 20) ||
+        'ASSET';
+      const safeName = (holding.name || safeSym).trim().slice(0, 120) || safeSym;
+      const safeCategory: PortfolioAssetCategory =
+        holding.category === 'Equities' ||
+        holding.category === 'Crypto' ||
+        holding.category === 'Commodities' ||
+        holding.category === 'Cash & FX'
+          ? holding.category
+          : 'Equities';
+      const safeUnits = Number.isFinite(holding.units) ? Math.max(0, holding.units) : 0;
+      const safeLinkedId = (holding.linkedAssetId || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 32);
+      const safePortfolioId =
+        (holding.portfolioId || 'default-saham').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64) ||
+        'default-saham';
+      const portfolioMeta = stateRef.current.portfolios.find(
+        (p) => p.id === holding.portfolioId
+      );
+      const safePortfolioName =
+        (portfolioNameOverride || portfolioMeta?.name || 'Saham').trim().slice(0, 40) || 'Saham';
+      const nativeCurrency: 'USD' | 'IDR' = holding.currency === 'IDR' ? 'IDR' : 'USD';
+      const nativeAvgCost = Number(
+        (Number.isFinite(holding.avgCost) ? Math.max(0, holding.avgCost) : 0).toFixed(4)
+      );
+
+      try {
+        const [{ db }, { doc, getDoc, serverTimestamp, setDoc, updateDoc }] = await Promise.all([
+          getFirebaseServices(),
+          import('firebase/firestore'),
+        ]);
+        const posRef = doc(db, 'users', user.uid, 'positions', safeId);
+        const snap = await getDoc(posRef);
+        const sharedFields = {
+          symbol: safeSym,
+          name: safeName,
+          category: safeCategory,
+          units: safeUnits,
+          avgCost: Number(avgCostUsd.toFixed(4)),
+          currentPrice: Number(curUsd.toFixed(4)),
+          linkedAssetId: safeLinkedId,
+          portfolioId: safePortfolioId,
+          portfolioName: safePortfolioName,
+          nativeCurrency,
+          nativeAvgCost,
+        };
+        if (!snap.exists()) {
+          await setDoc(posRef, {
+            ownerId: user.uid,
+            ...sharedFields,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+        } else {
+          await updateDoc(posRef, {
+            ...sharedFields,
+            updatedAt: serverTimestamp(),
+          });
+        }
+        syncedCloudIdsRef.current.add(safeId);
+        setSyncError(null);
+        setLastSyncedAt(Date.now());
+      } catch (err) {
+        setSyncError(formatSyncFailure(err, 'Unable to save holding to Google Cloud.'));
+        try {
+          handleFirestoreError(err, OperationType.WRITE, posPath);
+        } catch {
+          // Structured error logged without crashing UI
+        }
+      }
+    },
+    [user, profileReady, cloudSyncEnabled, convertAmount, formatSyncFailure]
+  );
+
+  const deleteHoldingFromFirestore = useCallback(
+    async (holdingId: string) => {
+      if (!user || !profileReady || !cloudSyncEnabled) return;
+      const safeId = holdingId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 120);
+      if (!safeId) return;
+      const posPath = `users/${user.uid}/positions/${safeId}`;
+      syncedCloudIdsRef.current.delete(safeId);
+      try {
+        const [{ db }, { deleteDoc, doc }] = await Promise.all([
+          getFirebaseServices(),
+          import('firebase/firestore'),
+        ]);
+        await deleteDoc(doc(db, 'users', user.uid, 'positions', safeId));
+        setLastSyncedAt(Date.now());
+      } catch (err) {
+        setSyncError(formatSyncFailure(err, 'Failed to remove deleted holding from cloud.'));
+        try {
+          handleFirestoreError(err, OperationType.DELETE, posPath);
+        } catch {
+          // structured error logged
+        }
+      }
+    },
+    [user, profileReady, cloudSyncEnabled, formatSyncFailure]
+  );
+
+  type CloudParsedHolding = PortfolioHolding & { portfolioName?: string };
+
+  const applyCloudSnapshotDocs = useCallback(
+    (docs: Array<{ id: string; data: () => Record<string, unknown> }>, pushLocalMissing: boolean) => {
+      const idrPerUsd = Math.max(1, fxRatesRef.current.IDR || 16000);
+      const cloudHoldings: CloudParsedHolding[] = docs
+        .map((d) => {
           const data = d.data();
-          const sym = String(data.symbol || 'AAPL');
-          const isIdr = sym.endsWith('.JK');
+          const sym = String(data.symbol || 'AAPL').toUpperCase();
+          const nativeCurRaw =
+            data.nativeCurrency === 'IDR' || data.nativeCurrency === 'USD'
+              ? data.nativeCurrency
+              : null;
+          const isIdr = nativeCurRaw ? nativeCurRaw === 'IDR' : sym.endsWith('.JK');
+          const nativeCostRaw = Number(data.nativeAvgCost);
           const avgCostUsd = Number(data.avgCost || 0);
+          const resolvedAvgCost =
+            Number.isFinite(nativeCostRaw) && nativeCostRaw > 0
+              ? isIdr
+                ? Math.round(nativeCostRaw)
+                : Number(nativeCostRaw.toFixed(4))
+              : isIdr
+                ? Math.round(avgCostUsd * idrPerUsd)
+                : Number(avgCostUsd.toFixed(4));
+          const unitsVal = Number(data.units || 0);
+          const pfId =
+            typeof data.portfolioId === 'string' && data.portfolioId.trim()
+              ? data.portfolioId.trim()
+              : 'default-saham';
+          const pfName =
+            typeof data.portfolioName === 'string' && data.portfolioName.trim()
+              ? data.portfolioName.trim()
+              : pfId === 'default-saham'
+                ? 'Saham'
+                : 'Synced Portfolio';
+
           return {
             id: d.id,
-            portfolioId: 'default-saham',
+            portfolioId: pfId,
+            portfolioName: pfName,
             symbol: sym.replace(/\.JK$/, ''),
             yahooSymbol: sym,
             name: String(data.name || sym),
             category: (data.category as PortfolioAssetCategory) || 'Equities',
-            currency: isIdr ? 'IDR' : 'USD',
-            units: Number(data.units || 0),
-            avgCost: isIdr ? Math.round(avgCostUsd * idrPerUsd) : avgCostUsd,
-            linkedAssetId: typeof data.linkedAssetId === 'string' ? data.linkedAssetId : undefined,
+            currency: isIdr ? ('IDR' as const) : ('USD' as const),
+            units: Number.isFinite(unitsVal) ? unitsVal : 0,
+            avgCost: resolvedAvgCost,
+            linkedAssetId:
+              typeof data.linkedAssetId === 'string' && data.linkedAssetId
+                ? data.linkedAssetId
+                : undefined,
             createdAt: new Date().toISOString(),
           };
-        });
-        setState((prev) => {
-          const existingSymbols = new Set(prev.holdings.map((h) => `${h.portfolioId}:${h.yahooSymbol}`));
-          const mergedHoldings = [...prev.holdings];
-          for (const ch of cloudHoldings) {
-            if (!existingSymbols.has(`${ch.portfolioId}:${ch.yahooSymbol}`)) {
-              mergedHoldings.push(ch);
+        })
+        .filter((h) => h.units > 1e-6);
+
+      const cloudDocIds = new Set(cloudHoldings.map((c) => c.id));
+      const cloudByPfYahoo = new Map(
+        cloudHoldings.map((c) => [`${c.portfolioId}:${c.yahooSymbol.toUpperCase()}`, c])
+      );
+
+      if (pushLocalMissing) {
+        const localHoldings = stateRef.current.holdings;
+        for (const localH of localHoldings) {
+          const key = `${localH.portfolioId}:${localH.yahooSymbol.toUpperCase()}`;
+          if (!cloudDocIds.has(localH.id) && !cloudByPfYahoo.has(key) && localH.units > 1e-6) {
+            const liveP = liveQuotesRef.current[localH.yahooSymbol]?.price ?? localH.avgCost;
+            void syncHoldingToFirestore(localH, liveP);
+          }
+        }
+      }
+
+      setState((prev) => {
+        const previouslySynced = syncedCloudIdsRef.current;
+
+        // Auto-provision any portfolio lists referenced by incoming cloud docs
+        const nextPortfolios = [...prev.portfolios];
+        for (const ch of cloudHoldings) {
+          if (!nextPortfolios.some((p) => p.id === ch.portfolioId)) {
+            nextPortfolios.push({
+              id: ch.portfolioId,
+              name: ch.portfolioName || ch.portfolioId,
+              displayCurrency: ch.currency === 'IDR' ? 'IDR' : 'USD',
+              createdAt: new Date().toISOString(),
+            });
+          }
+        }
+
+        // Keep local holdings not remotely deleted from Firestore
+        const nextHoldings = prev.holdings.filter(
+          (h) => !(previouslySynced.has(h.id) && !cloudDocIds.has(h.id))
+        );
+        let nextLots = [...prev.lots];
+
+        const remainingKeys = new Set(
+          nextHoldings.map((h) => `${h.portfolioId}:${h.yahooSymbol.toUpperCase()}`)
+        );
+        nextLots = nextLots.filter((l) =>
+          remainingKeys.has(`${l.portfolioId}:${l.yahooSymbol.toUpperCase()}`)
+        );
+
+        // Merge incoming cloud holdings preserving their true portfolioId & native avgCost
+        for (const ch of cloudHoldings) {
+          const chYahoo = ch.yahooSymbol.toUpperCase();
+          const existingIdx = nextHoldings.findIndex(
+            (h) =>
+              h.id === ch.id ||
+              (h.portfolioId === ch.portfolioId && h.yahooSymbol.toUpperCase() === chYahoo)
+          );
+
+          const cleanHolding: PortfolioHolding = {
+            id: ch.id,
+            portfolioId: ch.portfolioId,
+            symbol: ch.symbol,
+            yahooSymbol: ch.yahooSymbol,
+            name: ch.name,
+            category: ch.category,
+            currency: ch.currency,
+            units: ch.units,
+            avgCost: ch.avgCost,
+            linkedAssetId: ch.linkedAssetId,
+            createdAt: ch.createdAt,
+          };
+
+          if (existingIdx >= 0) {
+            const existing = nextHoldings[existingIdx];
+            const changed =
+              existing.id !== ch.id ||
+              existing.portfolioId !== ch.portfolioId ||
+              Math.abs(existing.units - ch.units) > 1e-5 ||
+              Math.abs(existing.avgCost - ch.avgCost) / Math.max(ch.avgCost, 1) > 0.005;
+            if (changed) {
+              const updated: PortfolioHolding = {
+                ...existing,
+                ...cleanHolding,
+                linkedAssetId: ch.linkedAssetId ?? existing.linkedAssetId,
+              };
+              nextHoldings[existingIdx] = updated;
+              nextLots = reconcileLotsWithCloudHolding(nextLots, updated);
+            }
+          } else {
+            nextHoldings.push(cleanHolding);
+            nextLots = reconcileLotsWithCloudHolding(nextLots, cleanHolding);
+          }
+        }
+
+        // If user lands on an empty default portfolio while synced holdings exist in another list, focus that list
+        const activeHasHoldings = nextHoldings.some(
+          (h) => h.portfolioId === prev.activePortfolioId
+        );
+        let nextActivePortfolioId = prev.activePortfolioId;
+        if (!activeHasHoldings && cloudHoldings.length > 0) {
+          nextActivePortfolioId = cloudHoldings[0].portfolioId;
+        } else if (!nextPortfolios.some((p) => p.id === nextActivePortfolioId)) {
+          nextActivePortfolioId = nextPortfolios[0]?.id || 'default-saham';
+        }
+
+        syncedCloudIdsRef.current = cloudDocIds;
+        const migratedLots = migratePortfolioLots(nextHoldings, prev.transactions, nextLots);
+        return {
+          ...prev,
+          portfolios: nextPortfolios,
+          activePortfolioId: nextActivePortfolioId,
+          holdings: nextHoldings,
+          lots: migratedLots,
+        };
+      });
+
+      setSyncedCount(cloudHoldings.length);
+      setLastSyncedAt(Date.now());
+      setSyncError(null);
+    },
+    [syncHoldingToFirestore]
+  );
+
+  const handleManualSyncNow = useCallback(async () => {
+    if (!user) return;
+    setSyncInProgress(true);
+    setSyncError(null);
+    try {
+      if (!profileReady) {
+        const ok = await retryProfileSync();
+        if (!ok) {
+          setSyncInProgress(false);
+          return;
+        }
+      }
+      const [{ db }, { collection, getDocsFromServer, query, where }] = await Promise.all([
+        getFirebaseServices(),
+        import('firebase/firestore'),
+      ]);
+      const positionsQuery = query(
+        collection(db, 'users', user.uid, 'positions'),
+        where('ownerId', '==', user.uid)
+      );
+      const serverSnap = await getDocsFromServer(positionsQuery);
+      applyCloudSnapshotDocs(serverSnap.docs, true);
+
+      // Push any remaining local holdings so server is 100% up-to-date
+      for (const localH of stateRef.current.holdings) {
+        if (localH.units > 1e-6) {
+          const liveP = liveQuotesRef.current[localH.yahooSymbol]?.price ?? localH.avgCost;
+          await syncHoldingToFirestore(localH, liveP);
+        }
+      }
+      setLastSyncedAt(Date.now());
+    } catch (err) {
+      setSyncError(formatSyncFailure(err, 'Manual cloud sync failed. Please retry.'));
+      try {
+        handleFirestoreError(err, OperationType.LIST, `users/${user.uid}/positions`);
+      } catch {
+        // logged structured error safely
+      }
+    } finally {
+      setSyncInProgress(false);
+    }
+  }, [user, profileReady, retryProfileSync, applyCloudSnapshotDocs, syncHoldingToFirestore, formatSyncFailure]);
+
+  // Bidirectional Firestore cloud position sync across devices when user is signed in & Synced toggle is ON
+  useEffect(() => {
+    if (!user || !profileReady || !cloudSyncEnabled) {
+      setSyncInProgress(false);
+      return;
+    }
+    let disposed = false;
+    let unsubscribe: (() => void) | undefined;
+    let didInitialBackfill = false;
+    syncedCloudIdsRef.current = new Set();
+
+    const attachPositions = async () => {
+      setSyncInProgress(true);
+      setSyncError(null);
+      try {
+        const [{ db }, { collection, onSnapshot, query, where }] = await Promise.all([
+          getFirebaseServices(),
+          import('firebase/firestore'),
+        ]);
+        if (disposed) return;
+
+        const path = `users/${user.uid}/positions`;
+        const positionsQuery = query(
+          collection(db, 'users', user.uid, 'positions'),
+          where('ownerId', '==', user.uid)
+        );
+        unsubscribe = onSnapshot(
+          positionsQuery,
+          (snap) => {
+            if (disposed) return;
+            const shouldPushLocal = !didInitialBackfill;
+            didInitialBackfill = true;
+            applyCloudSnapshotDocs(snap.docs, shouldPushLocal);
+            setSyncInProgress(false);
+          },
+          (err) => {
+            if (disposed) return;
+            setSyncInProgress(false);
+            setSyncError(formatSyncFailure(err, 'Cloud sync listener encountered an error.'));
+            try {
+              handleFirestoreError(err, OperationType.LIST, path);
+            } catch {
+              // Structured JSON error logged cleanly without crashing app
             }
           }
-          const nextLots = migratePortfolioLots(mergedHoldings, prev.transactions, prev.lots);
-          return { ...prev, holdings: mergedHoldings, lots: nextLots };
-        });
-      },
-      (err) => {
-        handleFirestoreError(err, OperationType.GET, path);
-      }
-    );
-    return () => unsubscribe();
-  }, [user, profileReady, fxRates.IDR]);
-
-  const syncHoldingToFirestore = useCallback(
-    async (holding: PortfolioHolding, currentPriceNative: number) => {
-      if (!user || !profileReady) return;
-      const safeId = holding.id.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64) || makeSafeId('pos');
-      const posPath = `users/${user.uid}/positions/${safeId}`;
-      const avgCostUsd = convertAmount(holding.avgCost, holding.currency, 'USD');
-      const curUsd = convertAmount(currentPriceNative, holding.currency, 'USD');
-      const safeSym = holding.yahooSymbol.toUpperCase().replace(/[^A-Z0-9._\-/]/g, '').slice(0, 20);
-      try {
-        await setDoc(doc(db, 'users', user.uid, 'positions', safeId), {
-          ownerId: user.uid,
-          symbol: safeSym,
-          name: holding.name.slice(0, 120),
-          category: holding.category,
-          units: holding.units,
-          avgCost: Number(avgCostUsd.toFixed(4)),
-          currentPrice: Number(curUsd.toFixed(4)),
-          linkedAssetId: (holding.linkedAssetId || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 32),
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        });
+        );
       } catch (err) {
-        handleFirestoreError(err, OperationType.WRITE, posPath);
+        if (!disposed) {
+          setSyncInProgress(false);
+          setSyncError(formatSyncFailure(err, 'Unable to initialize cloud position listener.'));
+        }
       }
-    },
-    [user, profileReady, convertAmount]
-  );
+    };
+
+    void attachPositions();
+    return () => {
+      disposed = true;
+      unsubscribe?.();
+    };
+  }, [user, profileReady, cloudSyncEnabled, applyCloudSnapshotDocs, formatSyncFailure]);
 
   // Live Symbol Search Handler
   useEffect(() => {
@@ -1359,16 +1767,41 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
       dateIso,
     };
 
+    const prev = stateRef.current;
+    let nextHoldings = [...prev.holdings];
+    let nextLots = [...prev.lots];
     let updatedHolding: PortfolioHolding | null = null;
     let deletedHoldingId: string | null = null;
 
-    setState((prev) => {
-      let nextHoldings = [...prev.holdings];
-      let nextLots = [...prev.lots];
+    if (tradeMode === 'BUY') {
+      const newLot: PortfolioPurchaseLot = {
+        id: lotId!,
+        portfolioId: activePortfolio.id,
+        symbol: selectedSymbol.symbol,
+        yahooSymbol: selectedSymbol.yahooSymbol,
+        name: selectedSymbol.name,
+        category: selectedSymbol.category,
+        currency: selectedSymbol.currency,
+        units,
+        remainingUnits: units,
+        pricePerUnit: price,
+        purchaseDateIso: dateIso,
+      };
+      nextLots.push(newLot);
 
-      if (tradeMode === 'BUY') {
-        const newLot: PortfolioPurchaseLot = {
-          id: lotId!,
+      if (existing) {
+        const totalUnits = existing.units + units;
+        const nextAvg =
+          (existing.units * existing.avgCost + units * price) / Math.max(totalUnits, 1e-9);
+        updatedHolding = {
+          ...existing,
+          units: totalUnits,
+          avgCost: Number(nextAvg.toFixed(4)),
+        };
+        nextHoldings = nextHoldings.map((h) => (h.id === existing.id ? updatedHolding! : h));
+      } else {
+        updatedHolding = {
+          id: makeCloudHoldingDocId(activePortfolio.id, selectedSymbol.yahooSymbol),
           portfolioId: activePortfolio.id,
           symbol: selectedSymbol.symbol,
           yahooSymbol: selectedSymbol.yahooSymbol,
@@ -1376,83 +1809,56 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
           category: selectedSymbol.category,
           currency: selectedSymbol.currency,
           units,
-          remainingUnits: units,
-          pricePerUnit: price,
-          purchaseDateIso: dateIso,
+          avgCost: price,
+          createdAt: new Date().toISOString(),
         };
-        nextLots.push(newLot);
+        nextHoldings.push(updatedHolding);
+      }
+    } else if (existing) {
+      // FIFO deduction across lots
+      let toSell = units;
+      const holdingLotIds = nextLots
+        .filter(
+          (l) =>
+            l.portfolioId === activePortfolio.id &&
+            l.yahooSymbol === selectedSymbol.yahooSymbol &&
+            l.remainingUnits > 1e-6
+        )
+        .sort((a, b) => Date.parse(a.purchaseDateIso) - Date.parse(b.purchaseDateIso));
 
-        if (existing) {
-          const totalUnits = existing.units + units;
-          const nextAvg =
-            (existing.units * existing.avgCost + units * price) / Math.max(totalUnits, 1e-9);
-          updatedHolding = {
-            ...existing,
-            units: totalUnits,
-            avgCost: Number(nextAvg.toFixed(4)),
-          };
-          nextHoldings = nextHoldings.map((h) => (h.id === existing.id ? updatedHolding! : h));
-        } else {
-          updatedHolding = {
-            id: makeSafeId('pos'),
-            portfolioId: activePortfolio.id,
-            symbol: selectedSymbol.symbol,
-            yahooSymbol: selectedSymbol.yahooSymbol,
-            name: selectedSymbol.name,
-            category: selectedSymbol.category,
-            currency: selectedSymbol.currency,
-            units,
-            avgCost: price,
-            createdAt: new Date().toISOString(),
-          };
-          nextHoldings.push(updatedHolding);
-        }
-      } else if (existing) {
-        // FIFO deduction across lots
-        let toSell = units;
-        const holdingLotIds = nextLots
-          .filter(
-            (l) =>
-              l.portfolioId === activePortfolio.id &&
-              l.yahooSymbol === selectedSymbol.yahooSymbol &&
-              l.remainingUnits > 1e-6
-          )
-          .sort((a, b) => Date.parse(a.purchaseDateIso) - Date.parse(b.purchaseDateIso));
-
-        const dedMap = new Map<string, number>();
-        for (const lot of holdingLotIds) {
-          if (toSell <= 1e-6) break;
-          const deduct = Math.min(lot.remainingUnits, toSell);
-          dedMap.set(lot.id, Number((lot.remainingUnits - deduct).toFixed(6)));
-          toSell = Number((toSell - deduct).toFixed(6));
-        }
-
-        nextLots = nextLots.map((l) =>
-          dedMap.has(l.id) ? { ...l, remainingUnits: dedMap.get(l.id)! } : l
-        );
-
-        const recomputed = recomputeHoldingsFromLots(nextHoldings, nextLots);
-        nextHoldings = recomputed.holdings;
-        if (recomputed.removedIds.includes(existing.id)) {
-          deletedHoldingId = existing.id;
-        } else {
-          updatedHolding = nextHoldings.find((h) => h.id === existing.id) ?? null;
-        }
+      const dedMap = new Map<string, number>();
+      for (const lot of holdingLotIds) {
+        if (toSell <= 1e-6) break;
+        const deduct = Math.min(lot.remainingUnits, toSell);
+        dedMap.set(lot.id, Number((lot.remainingUnits - deduct).toFixed(6)));
+        toSell = Number((toSell - deduct).toFixed(6));
       }
 
-      return {
-        ...prev,
-        holdings: nextHoldings,
-        lots: nextLots,
-        transactions: [newTx, ...prev.transactions],
-      };
+      nextLots = nextLots.map((l) =>
+        dedMap.has(l.id) ? { ...l, remainingUnits: dedMap.get(l.id)! } : l
+      );
+
+      const recomputed = recomputeHoldingsFromLots(nextHoldings, nextLots);
+      nextHoldings = recomputed.holdings;
+      if (recomputed.removedIds.includes(existing.id)) {
+        deletedHoldingId = existing.id;
+      } else {
+        updatedHolding = nextHoldings.find((h) => h.id === existing.id) ?? null;
+      }
+    }
+
+    setState({
+      ...prev,
+      holdings: nextHoldings,
+      lots: nextLots,
+      transactions: [newTx, ...prev.transactions],
     });
 
-    if (updatedHolding && user && profileReady) {
+    if (updatedHolding && user && profileReady && cloudSyncEnabled) {
       const liveP = liveQuotes[selectedSymbol.yahooSymbol]?.price ?? price;
       void syncHoldingToFirestore(updatedHolding, liveP);
-    } else if (deletedHoldingId && user && profileReady) {
-      void deleteDoc(doc(db, 'users', user.uid, 'positions', deletedHoldingId)).catch(() => null);
+    } else if (deletedHoldingId && user && profileReady && cloudSyncEnabled) {
+      void deleteHoldingFromFirestore(deletedHoldingId);
     }
 
     setShowAddModal(false);
@@ -1472,7 +1878,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
     }));
     if (expandedHoldingId === holding.id) setExpandedHoldingId(null);
     if (user && profileReady) {
-      void deleteDoc(doc(db, 'users', user.uid, 'positions', holding.id)).catch(() => null);
+      void deleteHoldingFromFirestore(holding.id);
     }
   };
 
@@ -1544,27 +1950,26 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
       });
     }
 
-    let nextSyncedHolding: PortfolioHolding | null = null;
-    setState((prev) => {
-      const untouchedLots = prev.lots.filter(
-        (l) =>
-          !(
-            l.portfolioId === editingHoldingTarget.portfolioId &&
-            l.yahooSymbol === editingHoldingTarget.yahooSymbol
-          )
-      );
-      const nextLots = [...untouchedLots, ...parsedLots];
-      const { holdings: nextHoldings } = recomputeHoldingsFromLots(prev.holdings, nextLots);
-      nextSyncedHolding =
-        nextHoldings.find((h) => h.id === editingHoldingTarget.id) ?? null;
-      return {
-        ...prev,
-        lots: nextLots,
-        holdings: nextHoldings,
-      };
+    const prev = stateRef.current;
+    const untouchedLots = prev.lots.filter(
+      (l) =>
+        !(
+          l.portfolioId === editingHoldingTarget.portfolioId &&
+          l.yahooSymbol === editingHoldingTarget.yahooSymbol
+        )
+    );
+    const nextLots = [...untouchedLots, ...parsedLots];
+    const { holdings: nextHoldings } = recomputeHoldingsFromLots(prev.holdings, nextLots);
+    const nextSyncedHolding =
+      nextHoldings.find((h) => h.id === editingHoldingTarget.id) ?? null;
+
+    setState({
+      ...prev,
+      lots: nextLots,
+      holdings: nextHoldings,
     });
 
-    if (nextSyncedHolding && user && profileReady) {
+    if (nextSyncedHolding && user && profileReady && cloudSyncEnabled) {
       const liveP = liveQuotes[editingHoldingTarget.yahooSymbol]?.price ?? editingHoldingTarget.avgCost;
       void syncHoldingToFirestore(nextSyncedHolding, liveP);
     }
@@ -1592,39 +1997,37 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
     }
 
     const nextDateIso = new Date(`${editLotDate}T10:00:00+07:00`).toISOString();
-    let updatedHolding: PortfolioHolding | null = null;
+    const prev = stateRef.current;
+    const nextLots = prev.lots.map((l) =>
+      l.id === editingLot.id
+        ? {
+            ...l,
+            units,
+            remainingUnits: units,
+            pricePerUnit: price,
+            purchaseDateIso: nextDateIso,
+          }
+        : l
+    );
+    const { holdings: nextHoldings } = recomputeHoldingsFromLots(prev.holdings, nextLots);
+    const updatedHolding =
+      nextHoldings.find(
+        (h) => h.portfolioId === editingLot.portfolioId && h.yahooSymbol === editingLot.yahooSymbol
+      ) ?? null;
+    const nextTransactions = prev.transactions.map((t) =>
+      t.lotId === editingLot.id
+        ? { ...t, units, pricePerUnit: price, dateIso: nextDateIso }
+        : t
+    );
 
-    setState((prev) => {
-      const nextLots = prev.lots.map((l) =>
-        l.id === editingLot.id
-          ? {
-              ...l,
-              units,
-              remainingUnits: units,
-              pricePerUnit: price,
-              purchaseDateIso: nextDateIso,
-            }
-          : l
-      );
-      const { holdings: nextHoldings } = recomputeHoldingsFromLots(prev.holdings, nextLots);
-      updatedHolding =
-        nextHoldings.find(
-          (h) => h.portfolioId === editingLot.portfolioId && h.yahooSymbol === editingLot.yahooSymbol
-        ) ?? null;
-      const nextTransactions = prev.transactions.map((t) =>
-        t.lotId === editingLot.id
-          ? { ...t, units, pricePerUnit: price, dateIso: nextDateIso }
-          : t
-      );
-      return {
-        ...prev,
-        lots: nextLots,
-        holdings: nextHoldings,
-        transactions: nextTransactions,
-      };
+    setState({
+      ...prev,
+      lots: nextLots,
+      holdings: nextHoldings,
+      transactions: nextTransactions,
     });
 
-    if (updatedHolding && user && profileReady) {
+    if (updatedHolding && user && profileReady && cloudSyncEnabled) {
       const liveP = liveQuotes[editingLot.yahooSymbol]?.price ?? price;
       void syncHoldingToFirestore(updatedHolding, liveP);
     }
@@ -1634,30 +2037,27 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
   // Delete Single Purchase Lot
   const handleDeleteLot = (lot: PortfolioPurchaseLot, holdingId: string) => {
     setOpenLotMenuId(null);
-    let updatedHolding: PortfolioHolding | null = null;
-    let holdingRemoved = false;
+    const prev = stateRef.current;
+    const nextLots = prev.lots.filter((l) => l.id !== lot.id);
+    const { holdings: nextHoldings, removedIds } = recomputeHoldingsFromLots(
+      prev.holdings,
+      nextLots
+    );
+    const holdingRemoved = removedIds.includes(holdingId);
+    const updatedHolding = nextHoldings.find((h) => h.id === holdingId) ?? null;
 
-    setState((prev) => {
-      const nextLots = prev.lots.filter((l) => l.id !== lot.id);
-      const { holdings: nextHoldings, removedIds } = recomputeHoldingsFromLots(
-        prev.holdings,
-        nextLots
-      );
-      holdingRemoved = removedIds.includes(holdingId);
-      updatedHolding = nextHoldings.find((h) => h.id === holdingId) ?? null;
-      return {
-        ...prev,
-        lots: nextLots,
-        holdings: nextHoldings,
-      };
+    setState({
+      ...prev,
+      lots: nextLots,
+      holdings: nextHoldings,
     });
 
     if (holdingRemoved) {
       if (expandedHoldingId === holdingId) setExpandedHoldingId(null);
-      if (user && profileReady) {
-        void deleteDoc(doc(db, 'users', user.uid, 'positions', holdingId)).catch(() => null);
+      if (user && profileReady && cloudSyncEnabled) {
+        void deleteHoldingFromFirestore(holdingId);
       }
-    } else if (updatedHolding && user && profileReady) {
+    } else if (updatedHolding && user && profileReady && cloudSyncEnabled) {
       const liveP = liveQuotes[lot.yahooSymbol]?.price ?? lot.pricePerUnit;
       void syncHoldingToFirestore(updatedHolding, liveP);
     }
@@ -1709,40 +2109,40 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
       dateIso: new Date(`${saleDateInput}T10:00:00+07:00`).toISOString(),
     };
 
+    const prev = stateRef.current;
+    const targetHolding = prev.holdings.find(
+      (h) =>
+        h.portfolioId === saleLotTarget.portfolioId &&
+        h.yahooSymbol === saleLotTarget.yahooSymbol
+    );
+    const nextLots = prev.lots.map((l) => {
+      if (l.id !== saleLotTarget.id) return l;
+      const rem = Math.max(0, Number((l.remainingUnits - qtyToSell).toFixed(6)));
+      return { ...l, remainingUnits: rem };
+    });
+    const { holdings: nextHoldings, removedIds } = recomputeHoldingsFromLots(
+      prev.holdings,
+      nextLots
+    );
+
     let updatedHolding: PortfolioHolding | null = null;
     let deletedHoldingId: string | null = null;
+    if (targetHolding && removedIds.includes(targetHolding.id)) {
+      deletedHoldingId = targetHolding.id;
+    } else if (targetHolding) {
+      updatedHolding = nextHoldings.find((h) => h.id === targetHolding.id) ?? null;
+    }
 
-    setState((prev) => {
-      const targetHolding = prev.holdings.find(
-        (h) =>
-          h.portfolioId === saleLotTarget.portfolioId &&
-          h.yahooSymbol === saleLotTarget.yahooSymbol
-      );
-      const nextLots = prev.lots.map((l) => {
-        if (l.id !== saleLotTarget.id) return l;
-        const rem = Math.max(0, Number((l.remainingUnits - qtyToSell).toFixed(6)));
-        return { ...l, remainingUnits: rem };
-      });
-      const { holdings: nextHoldings, removedIds } = recomputeHoldingsFromLots(
-        prev.holdings,
-        nextLots
-      );
-      if (targetHolding && removedIds.includes(targetHolding.id)) {
-        deletedHoldingId = targetHolding.id;
-      } else if (targetHolding) {
-        updatedHolding = nextHoldings.find((h) => h.id === targetHolding.id) ?? null;
-      }
-      return {
-        ...prev,
-        lots: nextLots,
-        holdings: nextHoldings,
-        transactions: [saleTx, ...prev.transactions],
-      };
+    setState({
+      ...prev,
+      lots: nextLots,
+      holdings: nextHoldings,
+      transactions: [saleTx, ...prev.transactions],
     });
 
-    if (deletedHoldingId && user && profileReady) {
-      void deleteDoc(doc(db, 'users', user.uid, 'positions', deletedHoldingId)).catch(() => null);
-    } else if (updatedHolding && user && profileReady) {
+    if (deletedHoldingId && user && profileReady && cloudSyncEnabled) {
+      void deleteHoldingFromFirestore(deletedHoldingId);
+    } else if (updatedHolding && user && profileReady && cloudSyncEnabled) {
       void syncHoldingToFirestore(updatedHolding, salePrice);
     }
 
@@ -1822,7 +2222,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
 
     if (user && profileReady) {
       for (const hid of removedHoldingIds) {
-        void deleteDoc(doc(db, 'users', user.uid, 'positions', hid)).catch(() => null);
+        void deleteHoldingFromFirestore(hid);
       }
     }
     setConfirmDeletePortfolio(false);
@@ -1979,23 +2379,83 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
           </select>
 
           {user ? (
-            <button
-              type="button"
-              onClick={() => void logout()}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold bg-[#30D158]/15 text-[#16803C] dark:text-[#30D158] border border-[#30D158]/30 whitespace-nowrap"
-              title={`Synced as ${user.email || 'Google Account'} · Click to disconnect`}
-            >
-              <Cloud className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Synced ({user.displayName?.split(' ')[0] || 'Cloud'})</span>
-              <span className="sm:hidden">Synced</span>
-            </button>
+            <div className="inline-flex items-center gap-1">
+              <button
+                type="button"
+                role="switch"
+                aria-checked={cloudSyncEnabled}
+                data-testid="portfolio-sync-toggle"
+                onClick={() => {
+                  const nextVal = !cloudSyncEnabled;
+                  setCloudSyncEnabled(nextVal);
+                  if (nextVal) {
+                    setSyncError(null);
+                  }
+                }}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold border transition-colors whitespace-nowrap ${
+                  cloudSyncEnabled
+                    ? 'bg-[#30D158]/15 text-[#16803C] dark:text-[#30D158] border-[#30D158]/30'
+                    : 'bg-white dark:bg-[#1C1C1E] text-[#6C6C70] dark:text-[#AEAEB2] border-[#D1D1D6] dark:border-[#2C2C2E]'
+                }`}
+                title={
+                  cloudSyncEnabled
+                    ? `Cloud sync ON (${user.email || 'Google Account'} · ${syncedCount} synced) · Click to pause`
+                    : 'Cloud sync paused · Click to turn ON cross-device sync'
+                }
+              >
+                {syncInProgress ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : cloudSyncEnabled ? (
+                  <Cloud className="w-3.5 h-3.5" />
+                ) : (
+                  <CloudOff className="w-3.5 h-3.5" />
+                )}
+                <span className="hidden sm:inline">
+                  {cloudSyncEnabled
+                    ? `Synced (${user.displayName?.split(' ')[0] || 'Cloud'}${syncedCount > 0 ? ` · ${syncedCount}` : ''})`
+                    : 'Sync Off'}
+                </span>
+                <span className="sm:hidden">{cloudSyncEnabled ? 'Synced' : 'Sync Off'}</span>
+              </button>
+              {cloudSyncEnabled && (
+                <button
+                  type="button"
+                  data-testid="portfolio-sync-now-btn"
+                  disabled={syncInProgress}
+                  onClick={() => void handleManualSyncNow()}
+                  aria-label="Sync holdings across devices now"
+                  title={
+                    lastSyncedAt
+                      ? `Last synced ${new Date(lastSyncedAt).toLocaleTimeString('en-GB', { hour12: false })} · Click to sync now`
+                      : 'Force pull & push holdings across devices'
+                  }
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-full text-xs font-semibold bg-white dark:bg-[#1C1C1E] border border-[#D1D1D6] dark:border-[#2C2C2E] text-[#1C1C1E] dark:text-white hover:border-[#0071E3] disabled:opacity-50 transition-colors shrink-0"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${syncInProgress ? 'animate-spin' : ''}`} />
+                  <span className="hidden md:inline">Sync Now</span>
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => void logout()}
+                aria-label="Sign out of Google Cloud Backup"
+                title={`Disconnect ${user.email || 'Google Account'}`}
+                className="w-8 h-8 rounded-full inline-flex items-center justify-center bg-white dark:bg-[#1C1C1E] border border-[#D1D1D6] dark:border-[#2C2C2E] text-[#6C6C70] dark:text-[#AEAEB2] hover:text-[#D7261C] dark:hover:text-[#FF453A] transition-colors shrink-0"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+              </button>
+            </div>
           ) : (
             <button
               type="button"
-              onClick={() => void signInWithGoogle()}
+              onClick={() => {
+                setCloudSyncEnabled(true);
+                void signInWithGoogle();
+              }}
               disabled={authLoading}
+              data-testid="portfolio-cloud-backup-btn"
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold bg-white dark:bg-[#1C1C1E] border border-[#D1D1D6] dark:border-[#2C2C2E] text-[#6C6C70] dark:text-[#AEAEB2] hover:text-[#1C1C1E] dark:hover:text-white transition-colors whitespace-nowrap"
-              title="Optional: Back up holdings to Cloud Firestore"
+              title="Back up & sync holdings across devices via Google Cloud"
             >
               {authLoading ? (
                 <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -2007,6 +2467,42 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
           )}
         </div>
       </div>
+
+      {/* Actionable Auth / Cross-Device Sync Status & Error Banner */}
+      {(authError || syncError) && (
+        <div
+          role="alert"
+          data-testid="portfolio-sync-error-banner"
+          className="rounded-2xl border border-[#DC2626]/35 bg-[#EF4444]/10 dark:bg-[#FF6B63]/12 px-4 py-3 flex flex-wrap items-center justify-between gap-2 text-xs"
+        >
+          <div className="flex items-center gap-2 min-w-0 text-[#B91C1C] dark:text-[#FF8A80] font-semibold">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            <span className="break-words">{authError || syncError}</span>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            {user && (
+              <button
+                type="button"
+                onClick={() => void handleManualSyncNow()}
+                className="px-3 py-1 rounded-lg bg-[#0071E3] text-white font-bold hover:opacity-90"
+              >
+                Retry Sync
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => {
+                clearAuthError();
+                setSyncError(null);
+              }}
+              aria-label="Dismiss sync warning"
+              className="p-1 rounded-lg text-[#6C6C70] dark:text-[#C7CBD6] hover:bg-black/5 dark:hover:bg-white/10"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Main Portfolio Summary & Interactive Chart Card */}
       <section className="rounded-3xl liquid-glass-card p-5 sm:p-6 flex flex-col gap-4">

@@ -1,6 +1,7 @@
 import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { CandlestickChart, LineChart, RotateCcw } from 'lucide-react';
 import { CandlePoint, MarketAsset, Timeframe } from '../types/market';
+import { formatAssetPrevClose } from '../utils/formatters';
 import { parseFormattedMarketNumber } from '../utils/marketSignals';
 
 interface InteractiveChartProps {
@@ -11,6 +12,7 @@ interface InteractiveChartProps {
   compact?: boolean;
   forceGranularIntraday?: boolean;
   hideTimeframeTabs?: boolean;
+  showKeyStats?: boolean;
 }
 
 type ChartDisplayMode = 'line' | 'candles';
@@ -162,6 +164,7 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
   compact = false,
   forceGranularIntraday = false,
   hideTimeframeTabs = false,
+  showKeyStats = true,
 }) => {
   const uid = useId().replace(/:/g, '');
   const svgRef = useRef<SVGSVGElement | null>(null);
@@ -524,6 +527,68 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
     return TIME_LABELS[timeframe] ?? TIME_LABELS['1D'];
   }, [chartMode, candles, asset.chartTimestamps, timeframe]);
 
+  // Dynamic Price Range computed strictly from the selected timeframe
+  const timeframeRange = useMemo(() => {
+    const label =
+      timeframe === '1D'
+        ? 'Day Range'
+        : timeframe === '1Y'
+          ? '52-Week Range'
+          : timeframe === 'ALL'
+            ? 'All-Time Range'
+            : `${timeframe} Range`;
+
+    const pool: number[] = [...series];
+    const tfCandles = asset.chartCandles?.[timeframe];
+    if (Array.isArray(tfCandles)) {
+      for (const c of tfCandles) {
+        if (Number.isFinite(c.h) && c.h > 0) pool.push(c.h);
+        if (Number.isFinite(c.l) && c.l > 0) pool.push(c.l);
+      }
+    }
+    if (Number.isFinite(asset.price) && asset.price > 0) {
+      pool.push(asset.price);
+    }
+
+    if (timeframe === '1D') {
+      const hi = parseFormattedMarketNumber(asset.dayHigh);
+      const lo = parseFormattedMarketNumber(asset.dayLow);
+      if (Number.isFinite(hi) && hi > 0) pool.push(hi);
+      if (Number.isFinite(lo) && lo > 0) pool.push(lo);
+    } else if (timeframe === '1Y') {
+      const w52Lo = parseFormattedMarketNumber(asset.w52Low);
+      const w52Hi = parseFormattedMarketNumber(asset.w52High);
+      if (Number.isFinite(w52Lo) && w52Lo > 0) pool.push(w52Lo);
+      if (Number.isFinite(w52Hi) && w52Hi > 0) pool.push(w52Hi);
+    }
+
+    const valid = pool.filter((v) => Number.isFinite(v));
+    const low = valid.length > 0 ? Math.min(...valid) : asset.price;
+    const high = valid.length > 0 ? Math.max(...valid) : asset.price;
+    const span = high - low;
+    const pct =
+      span > 0
+        ? Math.max(0, Math.min(100, ((asset.price - low) / span) * 100))
+        : 50;
+
+    return {
+      label,
+      low,
+      high,
+      pct,
+    };
+  }, [series, asset.chartCandles, asset.price, asset.dayHigh, asset.dayLow, asset.w52Low, asset.w52High, timeframe]);
+
+  const primaryExtraStat = useMemo(() => {
+    const blocked = new Set(['Intraday Spread', '52W Position', '52W Midpoint', 'Venue', 'Range']);
+    const candidates = [
+      { label: asset.avgVolLabel, value: asset.avgVol },
+      { label: asset.peLabel, value: asset.peValue },
+      { label: asset.capLabel, value: asset.capValue },
+    ];
+    return candidates.find((c) => c.label && c.value && !blocked.has(c.label)) ?? null;
+  }, [asset.avgVolLabel, asset.avgVol, asset.peLabel, asset.peValue, asset.capLabel, asset.capValue]);
+
   const strokeGradId = `chartSplitStroke-${uid}`;
   const aboveFillId = `chartAboveFill-${uid}`;
   const belowFillId = `chartBelowFill-${uid}`;
@@ -644,13 +709,14 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         </div>
       </div>
 
-      {/* Interactive SVG Canvas with Liquid Glass Frame */}
-      <div
-        data-no-view-swipe="true"
-        className={`liquid-glass-card relative w-full ${
-          compact ? 'h-56 sm:h-64' : 'h-64 sm:h-72'
-        } rounded-2xl p-3 sm:p-4 flex flex-col justify-between overflow-hidden select-none touch-pan-y`}
-      >
+      {/* Unified Interactive SVG Canvas + Integrated Key Statistics Card */}
+      <div className="liquid-glass-card rounded-2xl p-3 sm:p-4 flex flex-col gap-3">
+        <div
+          data-no-view-swipe="true"
+          className={`relative w-full ${
+            compact ? 'h-56 sm:h-64' : 'h-64 sm:h-72'
+          } flex flex-col justify-between overflow-hidden select-none touch-pan-y`}
+        >
         {/* Range Bounds + Timeframe Span Hint */}
         <div className="flex items-center justify-between gap-2 text-[10px] font-mono font-semibold tabular-nums text-[#52525A] dark:text-[#B4B4BE] z-10 pointer-events-none">
           <span>High: {formatVal(maxVal)}</span>
@@ -935,12 +1001,93 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
           </svg>
         </div>
 
-        {/* Time Axis Labels */}
-        <div className="flex items-center justify-between text-[10px] text-[#52525A] dark:text-[#B4B4BE] font-semibold pt-2 border-t border-black/10 dark:border-white/10 tabular-nums">
-          {axisLabels.map((lbl, idx) => (
-            <span key={`${lbl}-${idx}`}>{lbl}</span>
-          ))}
+          {/* Time Axis Labels */}
+          <div className="flex items-center justify-between text-[10px] text-[#52525A] dark:text-[#B4B4BE] font-semibold pt-2 border-t border-black/10 dark:border-white/10 tabular-nums">
+            {axisLabels.map((lbl, idx) => (
+              <span key={`${lbl}-${idx}`}>{lbl}</span>
+            ))}
+          </div>
         </div>
+
+        {/* Key Statistics & Dynamic Timeframe Range Incorporated Directly Into Chart */}
+        {showKeyStats && (
+          <div
+            data-testid="chart-key-statistics"
+            className="pt-3 border-t border-black/8 dark:border-white/10 flex flex-col gap-3"
+          >
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-3 text-xs">
+              <div>
+                <span className="text-[11px] text-[#6C6C70] dark:text-[#9EB5C8]">Open</span>
+                <p className="font-bold text-sm text-[#1C1C1E] dark:text-white tabular-nums font-mono mt-0.5">
+                  {asset.open}
+                </p>
+              </div>
+              <div>
+                <span className="text-[11px] text-[#6C6C70] dark:text-[#9EB5C8]">Prev Close</span>
+                <p className="font-bold text-sm text-[#1C1C1E] dark:text-white tabular-nums font-mono mt-0.5">
+                  {formatAssetPrevClose(asset)}
+                </p>
+              </div>
+              <div>
+                <span className="text-[11px] text-[#6C6C70] dark:text-[#9EB5C8]">Day High</span>
+                <p className="font-bold text-sm text-[#16803C] dark:text-[#4ADE80] tabular-nums font-mono mt-0.5">
+                  {asset.dayHigh}
+                </p>
+              </div>
+              <div>
+                <span className="text-[11px] text-[#6C6C70] dark:text-[#9EB5C8]">Day Low</span>
+                <p className="font-bold text-sm text-[#D7261C] dark:text-[#FF6B63] tabular-nums font-mono mt-0.5">
+                  {asset.dayLow}
+                </p>
+              </div>
+              <div>
+                <span className="text-[11px] text-[#6C6C70] dark:text-[#9EB5C8]">Volume</span>
+                <p className="font-bold text-sm text-[#1C1C1E] dark:text-white tabular-nums font-mono mt-0.5">
+                  {asset.volume}
+                </p>
+              </div>
+              {primaryExtraStat && (
+                <div>
+                  <span className="text-[11px] text-[#6C6C70] dark:text-[#9EB5C8]">
+                    {primaryExtraStat.label}
+                  </span>
+                  <p className="font-bold text-sm text-[#1C1C1E] dark:text-white tabular-nums font-mono mt-0.5 truncate">
+                    {primaryExtraStat.value}
+                  </p>
+                </div>
+              )}
+            </div>
+
+            {/* Dynamic Price Range by Chosen Timeframe */}
+            <div
+              data-testid="chart-timeframe-range"
+              className="pt-2.5 border-t border-black/6 dark:border-white/8"
+            >
+              <div className="flex items-center justify-between text-xs mb-1.5">
+                <span className="text-[#6C6C70] dark:text-[#9EB5C8] font-medium">
+                  {timeframeRange.label}
+                </span>
+                <span className="font-bold text-[#1C1C1E] dark:text-white tabular-nums font-mono">
+                  {formatVal(timeframeRange.low)} — {formatVal(timeframeRange.high)}
+                </span>
+              </div>
+              <div className="relative w-full h-2 rounded-full bg-[#E5E5EA] dark:bg-[#172838] overflow-hidden">
+                <div
+                  className="absolute top-0 bottom-0 left-0 rounded-full bg-gradient-to-r from-[#0EA5E9] to-[#34D399]"
+                  style={{ width: `${timeframeRange.pct}%` }}
+                />
+              </div>
+              <div className="flex items-center justify-between text-[11px] text-[#6C6C70] dark:text-[#9EB5C8] mt-1 tabular-nums font-mono">
+                <span>
+                  {timeframe} Low: {formatVal(timeframeRange.low)}
+                </span>
+                <span>
+                  {timeframe} High: {formatVal(timeframeRange.high)}
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

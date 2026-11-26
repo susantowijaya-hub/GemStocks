@@ -16,7 +16,6 @@ import {
   MessageSquareText,
   RefreshCw,
   Share2,
-  SlidersHorizontal,
   Sparkles,
   Sun,
   Sunset,
@@ -177,12 +176,12 @@ const STORAGE_PREFIX = 'market-share-ts-v4:';
 
 const DISPLAY_INSTRUMENT_NAMES: Record<string, string> = {
   SPX: 'S&P 500',
-  IXIC: 'NASDAQ',
-  DJI: 'Dow Jones',
+  IXIC: 'NASDAQ Composite',
+  DJI: 'Dow Jones Industrial',
   IHSG: 'IDX Composite',
   BTCUSD: 'Bitcoin',
   DXY: 'US Dollar Index',
-  USDIDR: 'USD / IDR',
+  USDIDR: 'US Dollar / Rupiah',
   XAUUSD: 'Spot Gold',
 };
 
@@ -493,7 +492,6 @@ export const MarketExtractShareView: React.FC<MarketExtractShareViewProps> = ({
   const [slotLoading, setSlotLoading] = useState<boolean>(false);
 
   const [textFormat, setTextFormat] = useState<TextFormatMode>('whatsapp');
-  const [includeLevels, setIncludeLevels] = useState<boolean>(true);
   const [deskTitle, setDeskTitle] = useState<string>('MARKET BRIEF EDITION');
   const [deskHandle, setDeskHandle] = useState<string>('Global & IDX Desk');
   const [copiedText, setCopiedText] = useState<boolean>(false);
@@ -614,7 +612,7 @@ export const MarketExtractShareView: React.FC<MarketExtractShareViewProps> = ({
     };
   }, [snapshotsBySlot, selectedSlot, liveById]);
 
-  // Formatted Copy-Paste Text Brief (pure data + optional Support & Resistance; zero commentary)
+  // Formatted Copy-Paste Text Brief (pure instrument names, prices & % delta; zero Support/Resistance)
   const formattedBriefText = useMemo(() => {
     const snap = activeSnapshot;
     const isMorning = snap.slot === 'morning_0530';
@@ -626,8 +624,7 @@ export const MarketExtractShareView: React.FC<MarketExtractShareViewProps> = ({
 
     const fmtRow = (label: string, item?: ShareSnapshotAsset) => {
       if (!item) return `• ${label}: —`;
-      const lvl = includeLevels ? ` | S ${item.support} · R ${item.resistance}` : '';
-      return `• ${bold(label)}: ${code(formatSnapshotPrice(item))} (${formatPct(item.changePercent)})${lvl}`;
+      return `• ${bold(label)}: ${code(formatSnapshotPrice(item))} (${formatPct(item.changePercent)})`;
     };
 
     const lines: string[] = [
@@ -638,30 +635,30 @@ export const MarketExtractShareView: React.FC<MarketExtractShareViewProps> = ({
 
     if (isMorning) {
       lines.push(
-        `${bold('US BENCHMARKS')}`,
-        fmtRow('S&P 500 (SPX)', map.SPX),
-        fmtRow('NASDAQ (IXIC)', map.IXIC),
-        fmtRow('Dow Jones (DJI)', map.DJI),
+        `${bold('UNITED STATES BENCHMARKS')}`,
+        fmtRow(DISPLAY_INSTRUMENT_NAMES.SPX, map.SPX),
+        fmtRow(DISPLAY_INSTRUMENT_NAMES.IXIC, map.IXIC),
+        fmtRow(DISPLAY_INSTRUMENT_NAMES.DJI, map.DJI),
         ``,
         `${bold('INDONESIA & BITCOIN')}`,
-        fmtRow('IHSG (IDX)', map.IHSG),
-        fmtRow('Bitcoin (BTC/USD)', map.BTCUSD),
+        fmtRow(DISPLAY_INSTRUMENT_NAMES.IHSG, map.IHSG),
+        fmtRow(DISPLAY_INSTRUMENT_NAMES.BTCUSD, map.BTCUSD),
         ``,
-        `${bold('FX & GOLD')}`,
-        fmtRow('DXY (Dollar Index)', map.DXY),
-        fmtRow('USD/IDR', map.USDIDR),
-        fmtRow('XAU/USD (Gold Spot)', map.XAUUSD)
+        `${bold('CURRENCY & GOLD')}`,
+        fmtRow(DISPLAY_INSTRUMENT_NAMES.DXY, map.DXY),
+        fmtRow(DISPLAY_INSTRUMENT_NAMES.USDIDR, map.USDIDR),
+        fmtRow(DISPLAY_INSTRUMENT_NAMES.XAUUSD, map.XAUUSD)
       );
     } else {
       lines.push(
         `${bold('INDONESIA & BITCOIN')}`,
-        fmtRow('IHSG (IDX)', map.IHSG),
-        fmtRow('Bitcoin (BTC/USD)', map.BTCUSD),
+        fmtRow(DISPLAY_INSTRUMENT_NAMES.IHSG, map.IHSG),
+        fmtRow(DISPLAY_INSTRUMENT_NAMES.BTCUSD, map.BTCUSD),
         ``,
-        `${bold('FX & GOLD')}`,
-        fmtRow('DXY (Dollar Index)', map.DXY),
-        fmtRow('USD/IDR', map.USDIDR),
-        fmtRow('XAU/USD (Gold Spot)', map.XAUUSD)
+        `${bold('CURRENCY & GOLD')}`,
+        fmtRow(DISPLAY_INSTRUMENT_NAMES.DXY, map.DXY),
+        fmtRow(DISPLAY_INSTRUMENT_NAMES.USDIDR, map.USDIDR),
+        fmtRow(DISPLAY_INSTRUMENT_NAMES.XAUUSD, map.XAUUSD)
       );
     }
 
@@ -670,7 +667,7 @@ export const MarketExtractShareView: React.FC<MarketExtractShareViewProps> = ({
     }
 
     return lines.join('\n');
-  }, [activeSnapshot, textFormat, includeLevels, deskTitle, deskHandle]);
+  }, [activeSnapshot, textFormat, deskTitle, deskHandle]);
 
   const handleCopyText = async () => {
     try {
@@ -832,29 +829,22 @@ export const MarketExtractShareView: React.FC<MarketExtractShareViewProps> = ({
         palette.iconStroke
       );
 
-      // Clear Instrument Name & Symbol beside vector icon
+      // Clear Instrument Name beside vector icon (uses full instrument name, no ticker code)
       const displayName =
         DISPLAY_INSTRUMENT_NAMES[assetId] || item?.shortName || tickerLabel;
       const titleX = x + innerPad + iconBadgeSize + (h >= 240 ? 14 : 11);
       const maxTitleW = Math.max(48, x + w - innerPad - titleX);
 
-      const nameFontSize = h >= 280 ? 24 : h >= 210 ? 20 : 17;
+      const nameFontSize = h >= 280 ? 25 : h >= 210 ? 21 : 18;
       ctx.font = `800 ${nameFontSize}px -apple-system, BlinkMacSystemFont, "Plus Jakarta Sans", sans-serif`;
       ctx.fillStyle = palette.textPrimary;
+      ctx.textBaseline = 'middle';
       ctx.fillText(
         fitTextToWidth(ctx, displayName, maxTitleW),
         titleX,
-        iconCenterY + (h >= 240 ? -2 : -1)
+        iconCenterY + 1
       );
-
-      const tickerFontSize = h >= 280 ? 15 : 13;
-      ctx.font = `700 ${tickerFontSize}px "JetBrains Mono", ui-monospace, monospace`;
-      ctx.fillStyle = palette.goldAccent;
-      ctx.fillText(
-        fitTextToWidth(ctx, tickerLabel, maxTitleW),
-        titleX,
-        iconCenterY + (h >= 240 ? 20 : 16)
-      );
+      ctx.textBaseline = 'alphabetic';
 
       if (!item) {
         ctx.font = '800 34px "JetBrains Mono", ui-monospace, monospace';
@@ -863,16 +853,15 @@ export const MarketExtractShareView: React.FC<MarketExtractShareViewProps> = ({
         return;
       }
 
-      // Compute clean vertical positions inside freed card height
+      // Compute clean vertical positions inside card height (no Support & Resistance footer)
       const topRowBottom = y + innerPad + iconBadgeSize;
-      const srFooterH = includeLevels ? (h >= 240 ? 30 : 22) : 0;
-      const bottomLimit = y + h - innerPad - srFooterH;
+      const bottomLimit = y + h - innerPad;
       const middleSpan = Math.max(82, bottomLimit - topRowBottom);
 
       // Hero Price Value
       const priceStr = formatSnapshotPrice(item);
-      let priceFont = h >= 320 ? 52 : h >= 250 ? 44 : h >= 200 ? 38 : 30;
-      if (w < 330) priceFont = Math.min(priceFont, h >= 250 ? 39 : 33);
+      let priceFont = h >= 320 ? 54 : h >= 250 ? 46 : h >= 200 ? 40 : 32;
+      if (w < 330) priceFont = Math.min(priceFont, h >= 250 ? 40 : 34);
       if (priceStr.length > 10) priceFont = Math.max(24, priceFont - 5);
       else if (priceStr.length > 8) priceFont = Math.max(26, priceFont - 2);
 
@@ -898,7 +887,7 @@ export const MarketExtractShareView: React.FC<MarketExtractShareViewProps> = ({
         ctx.font = `800 ${pctFont}px "JetBrains Mono", ui-monospace, monospace`;
       }
 
-      const contentGap = Math.max(10, Math.min(22, (middleSpan - priceFont - pillH) * 0.45));
+      const contentGap = Math.max(12, Math.min(26, (middleSpan - priceFont - pillH) * 0.45));
       const priceBaselineY = topRowBottom + contentGap + priceFont * 0.85;
       const pillY = Math.min(
         bottomLimit - pillH - 4,
@@ -924,15 +913,6 @@ export const MarketExtractShareView: React.FC<MarketExtractShareViewProps> = ({
       ctx.textBaseline = 'middle';
       ctx.fillText(pctText, x + innerPad + pillPadX, pillY + pillH / 2 + 1);
       ctx.textBaseline = 'alphabetic';
-
-      // Clean Support & Resistance line (if enabled)
-      if (includeLevels) {
-        const srFont = h >= 250 ? 16 : 13;
-        ctx.font = `600 ${srFont}px "JetBrains Mono", ui-monospace, monospace`;
-        ctx.fillStyle = palette.textMuted;
-        const srLine = `S ${item.support}  ·  R ${item.resistance}`;
-        ctx.fillText(fitTextToWidth(ctx, srLine, contentW), x + innerPad, y + h - (innerPad * 0.72));
-      }
     };
 
     // 2. Top Masthead Bar
@@ -968,7 +948,7 @@ export const MarketExtractShareView: React.FC<MarketExtractShareViewProps> = ({
     ctx.fillStyle = palette.textMuted;
     const scopeSummary = isMorning
       ? '05:30 WIB All-Markets Timestamp'
-      : '16:30 WIB IDX, BTC, DXY, IDR & Gold';
+      : '16:30 WIB Indonesia, Bitcoin, Dollar, Rupiah & Gold';
     ctx.fillText(
       fitTextToWidth(ctx, `${activeSnapshot.dateLabel}  ·  ${scopeSummary}`, innerW),
       padX,
@@ -1065,7 +1045,6 @@ export const MarketExtractShareView: React.FC<MarketExtractShareViewProps> = ({
     posterTheme,
     deskTitle,
     deskHandle,
-    includeLevels,
   ]);
 
   useEffect(() => {
@@ -1113,22 +1092,22 @@ export const MarketExtractShareView: React.FC<MarketExtractShareViewProps> = ({
     const m = activeSnapshot.assets;
     if (activeSnapshot.slot === 'morning_0530') {
       return [
-        { id: 'SPX', label: 'SPX', item: m.SPX },
-        { id: 'IXIC', label: 'IXIC', item: m.IXIC },
-        { id: 'DJI', label: 'DJI', item: m.DJI },
-        { id: 'IHSG', label: 'IHSG', item: m.IHSG },
-        { id: 'BTCUSD', label: 'BTC/USD', item: m.BTCUSD },
-        { id: 'DXY', label: 'DXY', item: m.DXY },
-        { id: 'USDIDR', label: 'USD/IDR', item: m.USDIDR },
-        { id: 'XAUUSD', label: 'XAU/USD', item: m.XAUUSD },
+        { id: 'SPX', label: DISPLAY_INSTRUMENT_NAMES.SPX, item: m.SPX },
+        { id: 'IXIC', label: 'NASDAQ', item: m.IXIC },
+        { id: 'DJI', label: 'Dow Jones', item: m.DJI },
+        { id: 'IHSG', label: DISPLAY_INSTRUMENT_NAMES.IHSG, item: m.IHSG },
+        { id: 'BTCUSD', label: DISPLAY_INSTRUMENT_NAMES.BTCUSD, item: m.BTCUSD },
+        { id: 'DXY', label: DISPLAY_INSTRUMENT_NAMES.DXY, item: m.DXY },
+        { id: 'USDIDR', label: DISPLAY_INSTRUMENT_NAMES.USDIDR, item: m.USDIDR },
+        { id: 'XAUUSD', label: DISPLAY_INSTRUMENT_NAMES.XAUUSD, item: m.XAUUSD },
       ];
     }
     return [
-      { id: 'IHSG', label: 'IHSG', item: m.IHSG },
-      { id: 'BTCUSD', label: 'BTC/USD', item: m.BTCUSD },
-      { id: 'DXY', label: 'DXY', item: m.DXY },
-      { id: 'USDIDR', label: 'USD/IDR', item: m.USDIDR },
-      { id: 'XAUUSD', label: 'XAU/USD', item: m.XAUUSD },
+      { id: 'IHSG', label: DISPLAY_INSTRUMENT_NAMES.IHSG, item: m.IHSG },
+      { id: 'BTCUSD', label: DISPLAY_INSTRUMENT_NAMES.BTCUSD, item: m.BTCUSD },
+      { id: 'DXY', label: DISPLAY_INSTRUMENT_NAMES.DXY, item: m.DXY },
+      { id: 'USDIDR', label: DISPLAY_INSTRUMENT_NAMES.USDIDR, item: m.USDIDR },
+      { id: 'XAUUSD', label: DISPLAY_INSTRUMENT_NAMES.XAUUSD, item: m.XAUUSD },
     ];
   }, [activeSnapshot]);
 
@@ -1145,7 +1124,7 @@ export const MarketExtractShareView: React.FC<MarketExtractShareViewProps> = ({
               </h1>
             </div>
             <p className="text-xs text-[#6C6C70] dark:text-[#8E8E93] mt-0.5">
-              Timestamp-anchored data fetched at exact 05:30 WIB (All Markets) &amp; 16:30 WIB (IDX, Bitcoin, DXY, USD/IDR &amp; Gold) bars
+              Timestamp-anchored data fetched at exact 05:30 WIB (All Markets) &amp; 16:30 WIB (IDX Composite, Bitcoin, US Dollar Index, Rupiah &amp; Spot Gold) bars
             </p>
           </div>
 
@@ -1317,24 +1296,6 @@ export const MarketExtractShareView: React.FC<MarketExtractShareViewProps> = ({
                 className="w-full rounded-xl bg-[#F2F2F7] dark:bg-[#141416] border border-[#E5E5EA] dark:border-[#2C2C2E] px-3 py-2 text-xs font-semibold text-[#1C1C1E] dark:text-white focus:outline-none focus:border-[#C4923E]"
               />
             </div>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2 pt-0.5">
-            <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#6C6C70] dark:text-[#8E8E93]">
-              <SlidersHorizontal className="w-3.5 h-3.5" />
-              Levels:
-            </span>
-            <button
-              type="button"
-              onClick={() => setIncludeLevels((v) => !v)}
-              className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border whitespace-nowrap shrink-0 transition-colors ${
-                includeLevels
-                  ? 'bg-[#C4923E]/12 dark:bg-[#ECC476]/15 border-[#C4923E]/40 text-[#9A6F22] dark:text-[#ECC476]'
-                  : 'bg-[#F2F2F7] dark:bg-[#141416] border-[#E5E5EA] dark:border-[#2C2C2E] text-[#6C6C70] dark:text-[#8E8E93]'
-              }`}
-            >
-              Support &amp; Resistance
-            </button>
           </div>
 
           <div className="relative">

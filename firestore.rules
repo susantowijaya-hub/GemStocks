@@ -61,7 +61,9 @@ service cloud.firestore {
         ])
         && data.keys().hasOnly([
           'ownerId', 'symbol', 'name', 'category',
-          'units', 'avgCost', 'currentPrice', 'linkedAssetId', 'createdAt', 'updatedAt'
+          'units', 'avgCost', 'currentPrice', 'linkedAssetId',
+          'portfolioId', 'portfolioName', 'nativeCurrency', 'nativeAvgCost',
+          'createdAt', 'updatedAt'
         ])
         && data.ownerId is string
         && data.ownerId == request.auth.uid
@@ -70,7 +72,7 @@ service cloud.firestore {
         && data.ownerId.matches('^[a-zA-Z0-9_\\-]+$')
         && data.symbol is string
         && data.symbol.size() >= 1 && data.symbol.size() <= 20
-        && data.symbol.matches('^[A-Z0-9._\\-/]+$')
+        && data.symbol.matches('^[A-Z0-9._\\-/^=]+$')
         && data.name is string
         && data.name.size() >= 1 && data.name.size() <= 120
         && data.category is string
@@ -83,6 +85,24 @@ service cloud.firestore {
           data.linkedAssetId is string &&
           data.linkedAssetId.size() <= 32 &&
           data.linkedAssetId.matches('^[a-zA-Z0-9_\\-]*$')
+        ))
+        && (!('portfolioId' in data) || (
+          data.portfolioId is string &&
+          data.portfolioId.size() <= 64 &&
+          data.portfolioId.matches('^[a-zA-Z0-9_\\-]*$')
+        ))
+        && (!('portfolioName' in data) || (
+          data.portfolioName is string &&
+          data.portfolioName.size() <= 40
+        ))
+        && (!('nativeCurrency' in data) || (
+          data.nativeCurrency is string &&
+          data.nativeCurrency.size() <= 4 &&
+          data.nativeCurrency in ['USD', 'IDR']
+        ))
+        && (!('nativeAvgCost' in data) || (
+          (data.nativeAvgCost is int || data.nativeAvgCost is float) &&
+          data.nativeAvgCost >= 0
         ))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
@@ -105,7 +125,7 @@ service cloud.firestore {
         && data.nfpAlertEnabled is bool
         && data.preferredCurrency is string
         && data.preferredCurrency.size() <= 8
-        && data.preferredCurrency in ['USD', 'EUR', 'GBP', 'JPY', 'IDR', 'SGD', 'AUD']
+        && data.preferredCurrency in ['USD', 'EUR', 'GBP', 'JPY', 'IDR', 'SGD', 'AUD', 'NZD', 'CAD', 'CHF', 'CNY']
         && data.favoriteAssetIds is list
         && data.favoriteAssetIds.size() <= 30
         && (data.favoriteAssetIds.size() == 0 || (data.favoriteAssetIds[0] is string && data.favoriteAssetIds[0].size() <= 32))
@@ -188,7 +208,8 @@ service cloud.firestore {
           && incoming().updatedAt == request.time
           && (
             incoming().diff(existing()).affectedKeys().hasOnly([
-              'symbol', 'name', 'category', 'units', 'avgCost', 'currentPrice', 'linkedAssetId', 'updatedAt'
+              'symbol', 'name', 'category', 'units', 'avgCost', 'currentPrice',
+              'linkedAssetId', 'portfolioId', 'portfolioName', 'nativeCurrency', 'nativeAvgCost', 'updatedAt'
             ])
           );
 

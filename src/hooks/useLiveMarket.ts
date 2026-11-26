@@ -479,7 +479,7 @@ export function useLiveMarket() {
     const data = await fetchJsonWithTimeout<{
       points?: number[];
       timestamps?: number[];
-      candles?: Array<{ t: number; o: number; h: number; l: number; c: number }>;
+      candles?: Array<{ t: number; o: number; h: number; l: number; c: number; v?: number }>;
       prevClose?: number;
     }>(
       `/api/market/chart?id=${encodeURIComponent(assetId)}&timeframe=${encodeURIComponent(timeframe)}`,
@@ -553,6 +553,19 @@ export function useLiveMarket() {
       }
     }
   }, [recordFetchOutcome, shouldSkipForBackoff]);
+
+  const refreshCalendar = useCallback(async (force = true) => {
+    const calRes = await fetchJsonWithTimeout<{
+      events?: EconomicEvent[];
+      nextCatalyst?: CalendarCatalyst | null;
+    }>(`/api/calendar/events?range=this_week${force ? '&refresh=1' : ''}`, 9000);
+    if (calRes && Array.isArray(calRes.events) && calRes.events.length > 0) {
+      setEconomicEvents(calRes.events);
+      if (calRes.nextCatalyst) {
+        setNextCatalyst(calRes.nextCatalyst);
+      }
+    }
+  }, []);
 
   // Fetch Top 10 US & Indonesia Stock Movers (impact, gainers, losers + IDX foreign buy/sell)
   const refreshStocks = useCallback(
@@ -727,8 +740,12 @@ export function useLiveMarket() {
     }
   }, [feedsLive, assets, fxRates, fxPairTiles, newsStories, economicEvents, usMoversBucket, idxMoversBucket]);
 
-  // Prioritized staggered initial fetch + 1-second live polling during open sessions
+  // Prioritized staggered initial fetch + 1-second live polling + background refresh strategy
   useEffect(() => {
+    let isTabHidden =
+      typeof document !== 'undefined' ? document.visibilityState === 'hidden' : false;
+    let lastBackgroundPollAt = 0;
+
     // T=0: Critical first-paint quotes & FX rates
     void refreshQuotes(true);
     void refreshFxRates(true);
@@ -746,33 +763,59 @@ export function useLiveMarket() {
       void fetchMarketIntelligence(true);
     }, 340);
 
+    const handleVisibilityChange = () => {
+      if (typeof document === 'undefined') return;
+      const nowHidden = document.visibilityState === 'hidden';
+      const wasHidden = isTabHidden;
+      isTabHidden = nowHidden;
+
+      if (!nowHidden && wasHidden && isPulseRef.current) {
+        // Immediate stale-while-revalidate refresh on resume for instant updated tickers
+        void refreshQuotes(true);
+        void refreshFxRates(false);
+        void refreshStocks(false);
+      }
+    };
+
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+    }
+
     const quoteTimer = window.setInterval(() => {
       if (!isPulseRef.current) return;
+      const now = Date.now();
+      if (isTabHidden) {
+        // Background pre-fetch cadence keeps ticker quotes warm while app sits in background
+        if (now - lastBackgroundPollAt >= 15_000) {
+          lastBackgroundPollAt = now;
+          void refreshQuotes(false);
+          void refreshFxRates(false);
+        }
+        return;
+      }
+
       if (anySessionOpenRef.current) {
         void refreshQuotes(false);
-      } else {
-        const now = Date.now();
-        if (now - lastClosedPollAtRef.current >= 60_000) {
-          lastClosedPollAtRef.current = now;
-          void refreshQuotes(false);
-        }
+      } else if (now - lastClosedPollAtRef.current >= 60_000) {
+        lastClosedPollAtRef.current = now;
+        void refreshQuotes(false);
       }
     }, 1_000);
 
     const stocksTimer = window.setInterval(() => {
-      if (isPulseRef.current) {
+      if (isPulseRef.current && !isTabHidden) {
         void refreshStocks(false);
       }
     }, 5_000);
 
     const heatmapTimer = window.setInterval(() => {
-      if (isPulseRef.current) {
+      if (isPulseRef.current && !isTabHidden) {
         void refreshHeatmap(false);
       }
     }, 20_000);
 
     const secondaryTimer = window.setInterval(() => {
-      if (isPulseRef.current) {
+      if (isPulseRef.current && !isTabHidden) {
         void refreshFxRates(false);
         void refreshSecondaryFeeds(false);
         void fetchDailySummary(false);
@@ -781,6 +824,9 @@ export function useLiveMarket() {
     }, 60_000);
 
     return () => {
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', handleVisibilityChange);
+      }
       window.clearTimeout(t1);
       window.clearTimeout(t2);
       window.clearInterval(quoteTimer);
@@ -1010,6 +1056,7 @@ export function useLiveMarket() {
     refreshDiagnostics,
     togglePulse,
     loadChartTimeframe,
+    refreshCalendar,
     refreshStocks: () => refreshStocks(true),
     refreshAll,
   };

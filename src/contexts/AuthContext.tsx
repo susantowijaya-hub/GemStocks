@@ -20,6 +20,7 @@ interface AuthContextValue {
   signInWithGoogle: () => Promise<void>;
   logout: () => Promise<void>;
   clearAuthError: () => void;
+  retryProfileSync: () => Promise<boolean>;
   updatePreferences: (patch: Partial<UserPreferencesState>) => Promise<void>;
 }
 
@@ -31,6 +32,25 @@ const DEFAULT_PREFERENCES: UserPreferencesState = {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
+function extractReadableFirebaseError(error: unknown, fallback: string): string {
+  const errObj = error as { code?: string; message?: string };
+  const code = errObj?.code || '';
+  const msg = errObj?.message || '';
+  if (code === 'auth/popup-blocked') {
+    return 'Sign-in popup was blocked by your browser. Allow popups for this site and try again.';
+  }
+  if (code === 'auth/unauthorized-domain') {
+    return 'This preview domain is not authorized for Google Sign-In in Firebase Console.';
+  }
+  if (code === 'permission-denied' || /Missing or insufficient permissions/i.test(msg)) {
+    return 'Cloud permissions check failed for your profile. Please sign out and sign in again, or check Firestore rules.';
+  }
+  if (code === 'unavailable' || /offline/i.test(msg)) {
+    return 'Cloud database temporarily unreachable. Check your connection and retry sync.';
+  }
+  return msg || fallback;
+}
+
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
@@ -39,7 +59,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [authError, setAuthError] = useState<string | null>(null);
   const [preferences, setPreferences] = useState<UserPreferencesState>(DEFAULT_PREFERENCES);
 
-  const ensureUserProfile = useCallback(async (firebaseUser: User) => {
+  const ensureUserProfile = useCallback(async (firebaseUser: User): Promise<boolean> => {
     const userPath = `users/${firebaseUser.uid}`;
     const [{ db }, { doc, getDoc, serverTimestamp, setDoc, updateDoc }] = await Promise.all([
       getFirebaseServices(),
@@ -53,7 +73,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       'Investor'
     )
       .trim()
-      .slice(0, 120);
+      .slice(0, 120) || 'Investor';
     const safeEmail = (firebaseUser.email || '').trim().slice(0, 254);
     const safePhoto = firebaseUser.photoURL ? firebaseUser.photoURL.slice(0, 512) : '';
 
@@ -82,17 +102,31 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
         await updateDoc(userRef, updatePayload);
       }
+      setAuthError(null);
       setProfileReady(true);
+      return true;
     } catch (error) {
       setProfileReady(false);
-      handleFirestoreError(error, OperationType.WRITE, userPath);
+      setAuthError(extractReadableFirebaseError(error, 'Unable to initialize cloud profile.'));
+      try {
+        handleFirestoreError(error, OperationType.WRITE, userPath);
+      } catch {
+        // Structured JSON error already logged; handled via authError state so UI stays responsive
+      }
+      return false;
     }
   }, []);
+
+  const retryProfileSync = useCallback(async (): Promise<boolean> => {
+    if (!user) return false;
+    setAuthError(null);
+    return ensureUserProfile(user);
+  }, [user, ensureUserProfile]);
 
   useEffect(() => {
     let disposed = false;
     let unsubscribeAuth: (() => void) | undefined;
-    let timerId: number | null = null;
+    let timerId: ReturnType<typeof globalThis.setTimeout> | null = null;
     let idleId: number | null = null;
 
     const attachAuth = async () => {
@@ -109,12 +143,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           setAuthReady(true);
           setProfileReady(false);
           if (currentUser) {
-            void ensureUserProfile(currentUser).catch((err) => {
-              setAuthError(
-                err instanceof Error ? err.message : 'Unable to sync user profile.'
-              );
-            });
+            void ensureUserProfile(currentUser);
           } else {
+            setAuthError(null);
             setPreferences(DEFAULT_PREFERENCES);
           }
         });
@@ -128,20 +159,28 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     // Defer Firebase Auth initialization until after first paint / idle so initial screen mounts immediately
     const isPortfolioRoute =
       typeof window !== 'undefined' && window.location.hash === '#portfolio';
+    const winWithIdle =
+      typeof window !== 'undefined'
+        ? (window as Window & {
+            requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
+            cancelIdleCallback?: (id: number) => void;
+          })
+        : null;
+
     if (isPortfolioRoute) {
       void attachAuth();
-    } else if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
-      idleId = window.requestIdleCallback(() => void attachAuth(), { timeout: 600 });
+    } else if (winWithIdle && typeof winWithIdle.requestIdleCallback === 'function') {
+      idleId = winWithIdle.requestIdleCallback(() => void attachAuth(), { timeout: 600 });
     } else {
-      timerId = window.setTimeout(() => void attachAuth(), 250);
+      timerId = globalThis.setTimeout(() => void attachAuth(), 250);
     }
 
     return () => {
       disposed = true;
-      if (idleId !== null && 'cancelIdleCallback' in window) {
-        window.cancelIdleCallback(idleId);
+      if (idleId !== null && winWithIdle && typeof winWithIdle.cancelIdleCallback === 'function') {
+        winWithIdle.cancelIdleCallback(idleId);
       }
-      if (timerId !== null) window.clearTimeout(timerId);
+      if (timerId !== null) globalThis.clearTimeout(timerId);
       unsubscribeAuth?.();
     };
   }, [ensureUserProfile]);
@@ -177,7 +216,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           }
         },
         (error) => {
-          handleFirestoreError(error, OperationType.GET, prefPath);
+          try {
+            handleFirestoreError(error, OperationType.GET, prefPath);
+          } catch {
+            // logged silently without crashing React tree
+          }
         }
       );
     };
@@ -227,7 +270,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           });
         }
       } catch (error) {
-        handleFirestoreError(error, OperationType.WRITE, prefPath);
+        try {
+          handleFirestoreError(error, OperationType.WRITE, prefPath);
+        } catch {
+          // structured error logged
+        }
       }
     },
     [preferences, user, profileReady]
@@ -241,16 +288,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         getFirebaseServices(),
         import('firebase/auth'),
       ]);
-      await signInWithPopup(auth, googleProvider);
+      const cred = await signInWithPopup(auth, googleProvider);
+      if (cred?.user) {
+        await ensureUserProfile(cred.user);
+      }
     } catch (error: unknown) {
-      const errObj = error as { code?: string; message?: string };
+      const errObj = error as { code?: string };
       if (errObj?.code !== 'auth/popup-closed-by-user') {
-        setAuthError(errObj?.message || 'Google Sign-In failed. Please try again.');
+        setAuthError(
+          extractReadableFirebaseError(error, 'Google Sign-In failed. Please try again.')
+        );
       }
     } finally {
       setAuthLoading(false);
     }
-  }, []);
+  }, [ensureUserProfile]);
 
   const logout = useCallback(async () => {
     setAuthError(null);
@@ -260,9 +312,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         import('firebase/auth'),
       ]);
       await signOut(auth);
+      setProfileReady(false);
     } catch (error: unknown) {
-      const errObj = error as { message?: string };
-      setAuthError(errObj?.message || 'Failed to sign out.');
+      setAuthError(extractReadableFirebaseError(error, 'Failed to sign out.'));
     }
   }, []);
 
@@ -280,6 +332,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         signInWithGoogle,
         logout,
         clearAuthError,
+        retryProfileSync,
         updatePreferences,
       }}
     >

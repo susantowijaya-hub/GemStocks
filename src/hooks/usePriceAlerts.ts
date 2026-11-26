@@ -2,10 +2,13 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Asset5mVolatility,
   BandarmologyPhase,
+  EconomicEvent,
   IctSignalAnalysis,
   MarketAsset,
   PriceAlertItem,
+  SdCandleVolumeSignal,
   StocksMoversBucket,
+  Timeframe,
 } from '../types/market';
 import {
   BandarmologyQuoteSnapshot,
@@ -18,6 +21,7 @@ import {
   savePersistedBandarPhases,
 } from '../utils/bandarmologyAlerts';
 import { scanAllIctSignals } from '../utils/ictSignals';
+import { scanAllSdCandleVolumeSignals } from '../utils/sdCandleVolumeSignals';
 
 const WINDOW_MS = 5 * 60 * 1000; // 5-minute rolling window
 const LIVE_CONFIRM_MIN_SPAN_MS = 4 * 60 * 1000; // Require >= 4 minutes of browser samples before switching from verified server 5m telemetry
@@ -27,7 +31,7 @@ const CONFIRM_SECOND_TICK_PCT = 1.85; // 2nd confirming sample must hold >= 1.85
 const COOLDOWN_MS = 5 * 60 * 1000; // Prevent duplicate spam within 5 minutes unless move escalates >= 1% or reverses
 const ICT_COOLDOWN_MS = 10 * 60 * 1000; // Avoid repeating identical ICT setups inside 10 minutes
 const TOAST_TTL_MS = 9500;
-const MAX_ALERTS = 30;
+const MAX_ALERTS = 80;
 
 interface PriceSample {
   t: number;
@@ -42,7 +46,7 @@ interface AlertCooldownState {
 
 interface IctCooldownState {
   triggeredAt: number;
-  direction: 'BUY' | 'SELL';
+  direction: 'BUY' | 'SELL' | 'WAIT';
   confidence: number;
   setupName: string;
 }
@@ -181,9 +185,64 @@ function computeMedian(values: number[]): number {
   return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
 }
 
-export function usePriceAlerts(assets: MarketAsset[], idxBucket?: StocksMoversBucket | null) {
-  const [alerts, setAlerts] = useState<PriceAlertItem[]>([]);
+const ICT_POPUP_STORAGE_KEY = 'stocks-ict-popups-enabled';
+const ALERTS_STORAGE_KEY = 'stocks-terminal-alerts-v1';
+const ALERTS_RETENTION_MS = 48 * 60 * 60 * 1000;
+
+function loadPersistedAlerts(): PriceAlertItem[] {
+  try {
+    if (typeof window === 'undefined') return [];
+    const raw = window.localStorage.getItem(ALERTS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const cutoff = Date.now() - ALERTS_RETENTION_MS;
+    return parsed
+      .filter(
+        (item): item is PriceAlertItem =>
+          Boolean(item) &&
+          typeof item.id === 'string' &&
+          typeof item.symbol === 'string' &&
+          typeof item.triggeredAt === 'number' &&
+          item.triggeredAt >= cutoff
+      )
+      .slice(0, MAX_ALERTS);
+  } catch {
+    return [];
+  }
+}
+
+function savePersistedAlerts(items: PriceAlertItem[]): void {
+  try {
+    if (typeof window === 'undefined') return;
+    const cutoff = Date.now() - ALERTS_RETENTION_MS;
+    const pruned = items.filter((a) => a.triggeredAt >= cutoff).slice(0, MAX_ALERTS);
+    window.localStorage.setItem(ALERTS_STORAGE_KEY, JSON.stringify(pruned));
+  } catch {
+    // ignore storage quota errors
+  }
+}
+
+function loadIctPopupPreference(): boolean {
+  try {
+    if (typeof window === 'undefined') return true;
+    const raw = window.localStorage.getItem(ICT_POPUP_STORAGE_KEY);
+    if (raw === 'false') return false;
+    if (raw === 'true') return true;
+  } catch {
+    // ignore storage access issues
+  }
+  return true;
+}
+
+export function usePriceAlerts(
+  assets: MarketAsset[],
+  idxBucket?: StocksMoversBucket | null,
+  economicEvents?: EconomicEvent[]
+) {
+  const [alerts, setAlerts] = useState<PriceAlertItem[]>(loadPersistedAlerts);
   const [toasts, setToasts] = useState<PriceAlertItem[]>([]);
+  const [ictPopupsEnabled, setIctPopupsEnabledState] = useState<boolean>(loadIctPopupPreference);
   const [volatility5mMap, setVolatility5mMap] = useState<Record<string, Asset5mVolatility>>({});
   const [market5mStats, setMarket5mStats] = useState<{
     meanPct: number;
@@ -195,6 +254,9 @@ export function usePriceAlerts(assets: MarketAsset[], idxBucket?: StocksMoversBu
     stdPct: 0.08,
   });
 
+  const ictPopupsEnabledRef = useRef<boolean>(ictPopupsEnabled);
+  ictPopupsEnabledRef.current = ictPopupsEnabled;
+
   const samplesRef = useRef<Record<string, PriceSample[]>>({});
   const cooldownRef = useRef<Record<string, AlertCooldownState>>({});
   const ictCooldownRef = useRef<Record<string, IctCooldownState>>({});
@@ -204,6 +266,23 @@ export function usePriceAlerts(assets: MarketAsset[], idxBucket?: StocksMoversBu
   const latestIdxSnapshotsRef = useRef<Record<string, BandarmologyQuoteSnapshot>>({});
   const pendingSpikeRef = useRef<Record<string, PendingSpikeState>>({});
   const toastTimersRef = useRef<Record<string, number>>({});
+
+  const setIctPopupsEnabled = useCallback((next: boolean) => {
+    setIctPopupsEnabledState(next);
+    ictPopupsEnabledRef.current = next;
+    try {
+      window.localStorage.setItem(ICT_POPUP_STORAGE_KEY, String(next));
+    } catch {
+      // ignore storage errors
+    }
+    if (!next) {
+      setToasts((prev) => prev.filter((t) => t.alertKind !== 'ict'));
+    }
+  }, []);
+
+  const toggleIctPopups = useCallback(() => {
+    setIctPopupsEnabled(!ictPopupsEnabledRef.current);
+  }, [setIctPopupsEnabled]);
 
   const scheduleToastDismiss = useCallback((alertId: string) => {
     if (toastTimersRef.current[alertId]) {
@@ -215,10 +294,16 @@ export function usePriceAlerts(assets: MarketAsset[], idxBucket?: StocksMoversBu
     }, TOAST_TTL_MS);
   }, []);
 
+  useEffect(() => {
+    savePersistedAlerts(alerts);
+  }, [alerts]);
+
   const pushAlert = useCallback(
     (item: PriceAlertItem, showToast = true) => {
       setAlerts((prev) => [item, ...prev].slice(0, MAX_ALERTS));
-      if (showToast) {
+      const allowToast =
+        showToast && (item.alertKind !== 'ict' || ictPopupsEnabledRef.current);
+      if (allowToast) {
         setToasts((prev) => [item, ...prev].slice(0, 3));
         scheduleToastDismiss(item.id);
       }
@@ -227,16 +312,21 @@ export function usePriceAlerts(assets: MarketAsset[], idxBucket?: StocksMoversBu
   );
 
   const buildIctAlertItem = useCallback(
-    (sig: IctSignalAnalysis, forcedDirection?: 'BUY' | 'SELL'): PriceAlertItem => {
-      const action: 'BUY' | 'SELL' =
-        forcedDirection ?? (sig.direction === 'SELL' ? 'SELL' : 'BUY');
+    (
+      sig: IctSignalAnalysis,
+      forcedDirection?: 'BUY' | 'SELL' | 'WAIT',
+      strategy: 'ict' | 'sdcv' = 'ict'
+    ): PriceAlertItem => {
+      const action: 'BUY' | 'SELL' | 'WAIT' =
+        forcedDirection ??
+        (sig.direction === 'BUY' ? 'BUY' : sig.direction === 'SELL' ? 'SELL' : 'WAIT');
       const now = Date.now();
       return {
-        id: `ict-${sig.assetId}-${action}-${now}-${Math.random().toString(36).slice(2, 6)}`,
+        id: `${strategy}-${sig.assetId}-${action}-${now}-${Math.random().toString(36).slice(2, 6)}`,
         assetId: sig.assetId,
         symbol: sig.symbol,
         name: sig.name,
-        direction: action === 'BUY' ? 'surge' : 'drop',
+        direction: action === 'SELL' ? 'drop' : 'surge',
         movePercent: sig.confidence,
         windowMinutes: 15,
         fromPrice: sig.currentPrice,
@@ -247,13 +337,51 @@ export function usePriceAlerts(assets: MarketAsset[], idxBucket?: StocksMoversBu
         triggeredAt: now,
         read: false,
         alertKind: 'ict',
+        ictStrategy: strategy,
         ictAction: action,
         ictSetup: sig.setupName,
         entryZone: sig.entryZone,
         stopLoss: sig.stopLoss,
-        targetPrice: sig.targetPrice,
+        targetPrice: sig.tp2 ?? sig.targetPrice,
         ictTimeframe: sig.timeframe,
         confidence: sig.confidence,
+        outcomeStatus: 'pending',
+      };
+    },
+    []
+  );
+
+  const buildSdcvAlertItem = useCallback(
+    (sdcv: SdCandleVolumeSignal, forcedDirection?: 'BUY' | 'SELL' | 'WAIT'): PriceAlertItem => {
+      const action: 'BUY' | 'SELL' | 'WAIT' =
+        forcedDirection ??
+        (sdcv.direction === 'BUY' ? 'BUY' : sdcv.direction === 'SELL' ? 'SELL' : 'WAIT');
+      const now = Date.now();
+      return {
+        id: `sdcv-${sdcv.assetId}-${action}-${now}-${Math.random().toString(36).slice(2, 6)}`,
+        assetId: sdcv.assetId,
+        symbol: sdcv.symbol,
+        name: sdcv.name,
+        direction: action === 'SELL' ? 'drop' : 'surge',
+        movePercent: sdcv.confidence,
+        windowMinutes: 15,
+        fromPrice: sdcv.currentPrice,
+        toPrice: sdcv.currentPrice,
+        decimals: sdcv.decimals,
+        currencyPrefix: sdcv.currencyPrefix,
+        unitSuffix: sdcv.unitSuffix,
+        triggeredAt: now,
+        read: false,
+        alertKind: 'ict',
+        ictStrategy: 'sdcv',
+        ictAction: action,
+        ictSetup: `${sdcv.zoneStatus} ${sdcv.zoneBias} · ${sdcv.candlePattern} (${sdcv.volumeRatio.toFixed(2)}x)`,
+        entryZone: sdcv.entryZone,
+        stopLoss: sdcv.stopLoss,
+        targetPrice: sdcv.tp2,
+        ictTimeframe: sdcv.timeframe,
+        confidence: sdcv.confidence,
+        outcomeStatus: 'pending',
       };
     },
     []
@@ -478,49 +606,81 @@ export function usePriceAlerts(assets: MarketAsset[], idxBucket?: StocksMoversBu
     };
   }, []);
 
-  // Automated ICT Smart Money setup monitor across FX Majors, BTC/USD, and XAU/USD
+  // Automated Dual-Engine Monitor (ICT Liquidity + S&D Candle & Volume) across FX Majors, BTC/USD, and XAU/USD
   useEffect(() => {
     if (assets.length === 0) return;
     const now = Date.now();
-    const signals = scanAllIctSignals(assets);
-    const activeSetups = signals.filter(
-      (s) => s.direction !== 'NEUTRAL' && s.confidence >= 60
-    );
-    if (activeSetups.length === 0) return;
+    const ictSignals = scanAllIctSignals(assets, undefined, true, economicEvents, true);
+    const activeIct = ictSignals.filter((s) => s.direction !== 'NEUTRAL' && s.confidence >= 58);
+
+    const sdcvSignals = scanAllSdCandleVolumeSignals(assets, undefined, true, economicEvents, true);
+    const activeSdcv = sdcvSignals.filter((s) => s.direction !== 'NEUTRAL' && s.confidence >= 66);
 
     if (!initialIctScannedRef.current) {
       initialIctScannedRef.current = true;
-      for (const sig of activeSetups.slice(0, 2).reverse()) {
+      for (const sig of activeIct.slice(0, 2).reverse()) {
         const dir = sig.direction === 'SELL' ? 'SELL' : 'BUY';
-        ictCooldownRef.current[sig.assetId] = {
+        const key = `ict:${sig.assetId}`;
+        ictCooldownRef.current[key] = {
           triggeredAt: now,
           direction: dir,
           confidence: sig.confidence,
           setupName: sig.setupName,
         };
-        pushAlert(buildIctAlertItem(sig, dir), false);
+        pushAlert(buildIctAlertItem(sig, dir, 'ict'), false);
+      }
+      for (const sig of activeSdcv.slice(0, 1)) {
+        const dir = sig.direction === 'SELL' ? 'SELL' : 'BUY';
+        const key = `sdcv:${sig.assetId}`;
+        ictCooldownRef.current[key] = {
+          triggeredAt: now,
+          direction: dir,
+          confidence: sig.confidence,
+          setupName: sig.candlePattern,
+        };
+        pushAlert(buildSdcvAlertItem(sig, dir), false);
       }
       return;
     }
 
-    for (const sig of activeSetups) {
+    for (const sig of activeIct) {
       const dir = sig.direction === 'SELL' ? 'SELL' : 'BUY';
-      const prev = ictCooldownRef.current[sig.assetId];
+      const key = `ict:${sig.assetId}`;
+      const prev = ictCooldownRef.current[key];
       const withinCooldown = prev && now - prev.triggeredAt < ICT_COOLDOWN_MS;
       const changedDirection = !prev || prev.direction !== dir;
       const upgraded = prev && sig.confidence - prev.confidence >= 12;
 
       if (!prev || !withinCooldown || changedDirection || upgraded) {
-        ictCooldownRef.current[sig.assetId] = {
+        ictCooldownRef.current[key] = {
           triggeredAt: now,
           direction: dir,
           confidence: sig.confidence,
           setupName: sig.setupName,
         };
-        pushAlert(buildIctAlertItem(sig, dir), true);
+        pushAlert(buildIctAlertItem(sig, dir, 'ict'), true);
       }
     }
-  }, [assets, buildIctAlertItem, pushAlert]);
+
+    for (const sig of activeSdcv) {
+      const dir = sig.direction === 'SELL' ? 'SELL' : 'BUY';
+      const key = `sdcv:${sig.assetId}`;
+      const prev = ictCooldownRef.current[key];
+      const withinCooldown = prev && now - prev.triggeredAt < ICT_COOLDOWN_MS;
+      const changedDirection = !prev || prev.direction !== dir;
+      const upgraded = prev && sig.confidence - prev.confidence >= 12;
+
+      if (!prev || !withinCooldown || changedDirection || upgraded) {
+        ictCooldownRef.current[key] = {
+          triggeredAt: now,
+          direction: dir,
+          confidence: sig.confidence,
+          setupName: sig.candlePattern,
+        };
+        pushAlert(buildSdcvAlertItem(sig, dir), true);
+      }
+    }
+  }, [assets, economicEvents, buildIctAlertItem, buildSdcvAlertItem, pushAlert]);
 
   const processBandarmologySnapshots = useCallback(
     (snapshots: BandarmologyQuoteSnapshot[], showToast = true): number => {
@@ -568,31 +728,79 @@ export function usePriceAlerts(assets: MarketAsset[], idxBucket?: StocksMoversBu
   }, [processBandarmologySnapshots]);
 
   const pushIctSignalAlert = useCallback(
-    (sig: IctSignalAnalysis) => {
-      const forcedDir: 'BUY' | 'SELL' =
-        sig.direction === 'SELL'
-          ? 'SELL'
-          : sig.direction === 'BUY'
-            ? 'BUY'
-            : sig.pdZone === 'Premium'
-              ? 'SELL'
-              : 'BUY';
+    (sig: IctSignalAnalysis, strategy: 'ict' | 'sdcv' = 'ict') => {
+      const resolvedDir: 'BUY' | 'SELL' | 'WAIT' =
+        sig.direction === 'BUY' ? 'BUY' : sig.direction === 'SELL' ? 'SELL' : 'WAIT';
       const now = Date.now();
-      ictCooldownRef.current[sig.assetId] = {
+      ictCooldownRef.current[`${strategy}:${sig.assetId}`] = {
         triggeredAt: now,
-        direction: forcedDir,
+        direction: resolvedDir,
         confidence: sig.confidence,
         setupName: sig.setupName,
       };
-      pushAlert(buildIctAlertItem(sig, forcedDir), true);
+      pushAlert(buildIctAlertItem(sig, resolvedDir, strategy), true);
     },
     [buildIctAlertItem, pushAlert]
   );
 
   const scanIctAlerts = useCallback(
-    (preferredAssetId?: string): number => {
-      const signals = scanAllIctSignals(assets);
-      const actionable = signals.filter((s) => s.direction !== 'NEUTRAL');
+    (
+      preferredAssetId?: string,
+      strategy: 'ict' | 'sdcv' = 'ict',
+      timeframe?: Timeframe,
+      enforceVolatilityFilter = true,
+      enforceNewsBlackout = true
+    ): number => {
+      const prefMap: Record<string, Timeframe> | undefined = timeframe
+        ? Object.fromEntries(assets.map((a) => [a.id, timeframe]))
+        : undefined;
+      const now = Date.now();
+
+      if (strategy === 'sdcv') {
+        const signals = scanAllSdCandleVolumeSignals(
+          assets,
+          prefMap,
+          enforceVolatilityFilter,
+          economicEvents,
+          enforceNewsBlackout
+        );
+        const actionable = signals.filter(
+          (s) => s.direction === 'BUY' || s.direction === 'SELL'
+        );
+        const selected =
+          actionable.length > 0
+            ? actionable.slice(0, 3)
+            : [
+                signals.find((s) => s.assetId === preferredAssetId) ?? signals[0],
+              ].filter((x): x is SdCandleVolumeSignal => Boolean(x));
+
+        selected
+          .slice()
+          .reverse()
+          .forEach((sig, idx) => {
+            const resolvedDir: 'BUY' | 'SELL' | 'WAIT' =
+              sig.direction === 'BUY' ? 'BUY' : sig.direction === 'SELL' ? 'SELL' : 'WAIT';
+            ictCooldownRef.current[`sdcv:${sig.assetId}`] = {
+              triggeredAt: now,
+              direction: resolvedDir,
+              confidence: sig.confidence,
+              setupName: sig.candlePattern,
+            };
+            pushAlert(buildSdcvAlertItem(sig, resolvedDir), idx === selected.length - 1);
+          });
+        return selected.length;
+      }
+
+      const signals = scanAllIctSignals(
+        assets,
+        prefMap,
+        enforceVolatilityFilter,
+        economicEvents,
+        enforceNewsBlackout
+      );
+      const actionable = signals.filter(
+        (s) => s.direction === 'BUY' || s.direction === 'SELL'
+      );
       const selected =
         actionable.length > 0
           ? actionable.slice(0, 3)
@@ -600,30 +808,23 @@ export function usePriceAlerts(assets: MarketAsset[], idxBucket?: StocksMoversBu
               signals.find((s) => s.assetId === preferredAssetId) ?? signals[0],
             ].filter((x): x is IctSignalAnalysis => Boolean(x));
 
-      const now = Date.now();
       selected
         .slice()
         .reverse()
         .forEach((sig, idx) => {
-          const forcedDir: 'BUY' | 'SELL' =
-            sig.direction === 'SELL'
-              ? 'SELL'
-              : sig.direction === 'BUY'
-                ? 'BUY'
-                : sig.pdZone === 'Premium'
-                  ? 'SELL'
-                  : 'BUY';
-          ictCooldownRef.current[sig.assetId] = {
+          const resolvedDir: 'BUY' | 'SELL' | 'WAIT' =
+            sig.direction === 'BUY' ? 'BUY' : sig.direction === 'SELL' ? 'SELL' : 'WAIT';
+          ictCooldownRef.current[`ict:${sig.assetId}`] = {
             triggeredAt: now,
-            direction: forcedDir,
+            direction: resolvedDir,
             confidence: sig.confidence,
             setupName: sig.setupName,
           };
-          pushAlert(buildIctAlertItem(sig, forcedDir), idx === selected.length - 1);
+          pushAlert(buildIctAlertItem(sig, resolvedDir, 'ict'), idx === selected.length - 1);
         });
       return selected.length;
     },
-    [assets, buildIctAlertItem, pushAlert]
+    [assets, economicEvents, buildIctAlertItem, buildSdcvAlertItem, pushAlert]
   );
 
   const dismissToast = useCallback((id: string) => {
@@ -642,9 +843,25 @@ export function usePriceAlerts(assets: MarketAsset[], idxBucket?: StocksMoversBu
     setAlerts((prev) => prev.map((a) => (a.id === id ? { ...a, read: true } : a)));
   }, []);
 
+  const updateAlertOutcome = useCallback(
+    (id: string, outcome: 'pending' | 'win' | 'be' | 'loss') => {
+      setAlerts((prev) =>
+        prev.map((a) => (a.id === id ? { ...a, outcomeStatus: outcome } : a))
+      );
+    },
+    []
+  );
+
   const clearAlerts = useCallback(() => {
     setAlerts([]);
     setToasts([]);
+    try {
+      if (typeof window !== 'undefined') {
+        window.localStorage.removeItem(ALERTS_STORAGE_KEY);
+      }
+    } catch {
+      // ignore storage errors
+    }
   }, []);
 
   const triggerTestAlert = useCallback(
@@ -719,11 +936,15 @@ export function usePriceAlerts(assets: MarketAsset[], idxBucket?: StocksMoversBu
     alerts,
     toasts,
     unreadCount,
+    ictPopupsEnabled,
+    setIctPopupsEnabled,
+    toggleIctPopups,
     volatility5mMap,
     market5mStats,
     dismissToast,
     markRead,
     markAllRead,
+    updateAlertOutcome,
     clearAlerts,
     triggerTestAlert,
     pushIctSignalAlert,

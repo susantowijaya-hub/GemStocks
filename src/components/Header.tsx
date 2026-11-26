@@ -6,6 +6,7 @@ import {
   CalendarDays,
   Check,
   ChevronDown,
+  Crosshair,
   Gem,
   LayoutDashboard,
   LayoutGrid,
@@ -71,6 +72,7 @@ interface HeaderProps {
   feedsLive: boolean;
   onRefreshAll: () => void;
   onRefreshDiagnostics: () => void;
+  onPrefetchRoute?: (route: AppRoute) => void;
 }
 
 const INDEX_IDS = ['SPX', 'IXIC', 'DJI', 'IHSG', 'EIDO', 'HSI', 'TAIEX', 'KOSPI', 'SSEC', 'NIFTY'];
@@ -85,6 +87,7 @@ const NAV_TABS: {
   { id: 'portfolio', label: 'Portfolio', icon: Briefcase },
   { id: 'stocks', label: 'Stocks', icon: BarChart3 },
   { id: 'heatmap', label: 'Heatmap', icon: LayoutGrid },
+  { id: 'ict', label: 'ICT Radar', icon: Crosshair },
   { id: 'news', label: 'News', icon: Newspaper },
   { id: 'calendar', label: 'Calendar', icon: CalendarDays },
   { id: 'extract', label: 'Share', icon: Share2 },
@@ -135,6 +138,7 @@ export const Header: React.FC<HeaderProps> = ({
   feedsLive,
   onRefreshAll,
   onRefreshDiagnostics,
+  onPrefetchRoute,
 }) => {
   const [now, setNow] = useState(() => new Date());
   const [searchExpanded, setSearchExpanded] = useState(false);
@@ -403,7 +407,7 @@ export const Header: React.FC<HeaderProps> = ({
 
     const topEcon = economicEvents.find((e) => e.impact === 'HIGH') ?? economicEvents[0];
     const econPhrase = topEcon
-      ? topEcon.actual && topEcon.actual !== 'Pending' && topEcon.actual !== '—'
+      ? topEcon.actual && topEcon.actual !== '-' && topEcon.actual !== 'Pending' && topEcon.actual !== '—'
         ? `following ${topEcon.currency} ${topEcon.title} (${topEcon.actual} vs ${topEcon.forecast})`
         : `ahead of ${topEcon.currency} ${topEcon.title} (${topEcon.timeWib})`
       : 'as global desks track sovereign yield spreads';
@@ -478,24 +482,30 @@ export const Header: React.FC<HeaderProps> = ({
       ref={headerRef}
       className="sticky top-0 z-40 pt-safe liquid-glass-strong !border-x-0 !border-t-0"
     >
-      {/* Main Row */}
-      <div className="relative px-3 sm:px-4 lg:px-6 py-2 sm:py-2.5 lg:py-3 flex items-center justify-between gap-2 sm:gap-3">
-        {/* Left: Brand + Clock + Translucent Glass Tab Switcher */}
-        <div className="flex items-center gap-2 sm:gap-3 xl:gap-5 min-w-0">
+      {/* Main Row: Mobile stays flex; Desktop uses CSS Grid to isolate Brand+Clock from Search+Actions */}
+      <div className="relative px-3 sm:px-4 lg:px-6 py-2 sm:py-2.5 lg:py-3 flex items-center justify-between gap-2 sm:gap-3 lg:grid lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center lg:gap-4">
+        {/* Left Grid Track: Brand + Full Date/Time Clock */}
+        <div className="flex items-center gap-2 sm:gap-3 min-w-0 lg:justify-self-start lg:overflow-hidden">
           <button
             type="button"
             onClick={() => handleNavClick('dashboard')}
-            className="flex items-center gap-1.5 sm:gap-2 text-left min-w-0 shrink focus:outline-none focus-visible:ring-2 focus-visible:ring-[#0071E3] rounded-lg"
+            className="flex items-center gap-1.5 sm:gap-2 text-left min-w-0 shrink lg:shrink-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#0071E3] rounded-lg"
           >
             <TrendingUp className="w-5 h-5 sm:w-6 sm:h-6 text-[#0F7033] dark:text-[#4ADE80] shrink-0" />
             <div className="flex flex-col sm:flex-row sm:items-baseline sm:gap-2.5 leading-tight min-w-0">
               <span className="text-base sm:text-lg lg:text-xl font-extrabold tracking-tight text-[#1C1C1E] dark:text-white whitespace-nowrap">
                 Stocks
               </span>
-              <span className="hidden xl:inline text-xs font-mono font-semibold text-[#4A4D57] dark:text-[#B4B8C4] tabular-nums whitespace-nowrap">
+              <span
+                data-testid="header-clock-full"
+                className="hidden xl:inline text-xs font-mono font-semibold text-[#4A4D57] dark:text-[#B4B8C4] tabular-nums whitespace-nowrap"
+              >
                 {clock.full}
               </span>
-              <span className="hidden sm:inline xl:hidden text-xs font-mono font-semibold text-[#4A4D57] dark:text-[#B4B8C4] tabular-nums whitespace-nowrap">
+              <span
+                data-testid="header-clock-short"
+                className="hidden sm:inline xl:hidden text-xs font-mono font-semibold text-[#4A4D57] dark:text-[#B4B8C4] tabular-nums whitespace-nowrap"
+              >
                 {clock.short}
               </span>
               <span className="sm:hidden text-[9px] font-mono font-semibold text-[#4A4D57] dark:text-[#B4B8C4] tabular-nums whitespace-nowrap truncate">
@@ -509,56 +519,10 @@ export const Header: React.FC<HeaderProps> = ({
               </span>
             </div>
           </button>
-
-          {/* Desktop Translucent Liquid Glass Tab Switcher (subtle idle contrast, wakes & animates on click/hover) */}
-          <nav
-            aria-label="Primary Navigation"
-            onMouseEnter={() => setNavAwake(true)}
-            onMouseLeave={() => setNavAwake(false)}
-            className={`hidden lg:flex items-center gap-0.5 xl:gap-1 p-1 rounded-full max-w-full overflow-x-auto no-scrollbar liquid-glass-pill transition-all duration-500 ${
-              navAwake
-                ? 'opacity-100 scale-100'
-                : 'opacity-65 hover:opacity-100 focus-within:opacity-100'
-            }`}
-          >
-            {NAV_TABS.map((tab) => {
-              const Icon = tab.icon;
-              const isActive = activeRoute === tab.id;
-              return (
-                <motion.button
-                  key={tab.id}
-                  type="button"
-                  whileTap={{ scale: 0.92 }}
-                  onClick={() => handleNavClick(tab.id)}
-                  className={`relative px-2.5 xl:px-3 py-1.5 rounded-full text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors focus:outline-none ${
-                    isActive
-                      ? 'text-white'
-                      : 'text-[#6C6C70] dark:text-[#AEAEB2] hover:text-[#1C1C1E] dark:hover:text-white'
-                  }`}
-                >
-                  {isActive && (
-                    <motion.span
-                      layoutId="header-active-tab-pill"
-                      transition={{ type: 'spring', stiffness: 460, damping: 32 }}
-                      className="absolute inset-0 rounded-full bg-[#0066CC] dark:bg-[#0066CC] shadow-[0_2px_10px_rgba(0,102,204,0.35)]"
-                    />
-                  )}
-                  <motion.span
-                    animate={isActive ? { scale: [1, 1.18, 1] } : { scale: 1 }}
-                    transition={{ duration: 0.28 }}
-                    className="relative z-10 inline-flex items-center"
-                  >
-                    <Icon className="w-3.5 h-3.5" />
-                  </motion.span>
-                  <span className="relative z-10">{tab.label}</span>
-                </motion.button>
-              );
-            })}
-          </nav>
         </div>
 
-        {/* Right Controls: Mobile-Safe Compact Icon Bar (PWA + Briefing + Search + Unified Live/Cached + Theme) */}
-        <div className="flex items-center gap-1 sm:gap-2 shrink-0" data-testid="header-actions-bar">
+        {/* Right Grid Track: Mobile-Safe Compact Icon Bar (PWA + Briefing + Search + Unified Live/Cached + Theme) */}
+        <div className="flex items-center gap-1 sm:gap-2 shrink-0 lg:justify-self-end" data-testid="header-actions-bar">
           <PWAInstallButton />
 
           {/* Icon-Only Morning Briefing Pack Pop-Up Trigger */}
@@ -834,6 +798,56 @@ export const Header: React.FC<HeaderProps> = ({
             })()}
           </div>
         </div>
+      </div>
+
+      {/* Desktop Row 2: Dedicated CSS Grid Centered Liquid Glass Top Menu (zero overlap with Brand & Date/Time Clock; hidden on mobile) */}
+      <div className="hidden lg:grid lg:grid-cols-[1fr_auto_1fr] lg:items-center px-6 pb-2.5">
+        <nav
+          aria-label="Primary Navigation"
+          onMouseEnter={() => setNavAwake(true)}
+          onMouseLeave={() => setNavAwake(false)}
+          className={`lg:col-start-2 lg:justify-self-center flex items-center gap-0.5 xl:gap-1 p-1 rounded-full max-w-full overflow-x-auto no-scrollbar liquid-glass-pill transition-all duration-500 ${
+            navAwake
+              ? 'opacity-100 scale-100'
+              : 'opacity-75 hover:opacity-100 focus-within:opacity-100'
+          }`}
+        >
+          {NAV_TABS.map((tab) => {
+            const Icon = tab.icon;
+            const isActive = activeRoute === tab.id;
+            return (
+              <motion.button
+                key={tab.id}
+                type="button"
+                whileTap={{ scale: 0.92 }}
+                onMouseEnter={() => onPrefetchRoute?.(tab.id)}
+                onFocus={() => onPrefetchRoute?.(tab.id)}
+                onClick={() => handleNavClick(tab.id)}
+                className={`relative px-2.5 xl:px-3 py-1.5 rounded-full text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors focus:outline-none ${
+                  isActive
+                    ? 'text-white'
+                    : 'text-[#6C6C70] dark:text-[#AEAEB2] hover:text-[#1C1C1E] dark:hover:text-white'
+                }`}
+              >
+                {isActive && (
+                  <motion.span
+                    layoutId="header-active-tab-pill"
+                    transition={{ type: 'spring', stiffness: 460, damping: 32 }}
+                    className="absolute inset-0 rounded-full bg-[#0066CC] dark:bg-[#0066CC] shadow-[0_2px_10px_rgba(0,102,204,0.35)]"
+                  />
+                )}
+                <motion.span
+                  animate={isActive ? { scale: [1, 1.18, 1] } : { scale: 1 }}
+                  transition={{ duration: 0.28 }}
+                  className="relative z-10 inline-flex items-center"
+                >
+                  <Icon className="w-3.5 h-3.5" />
+                </motion.span>
+                <span className="relative z-10">{tab.label}</span>
+              </motion.button>
+            );
+          })}
+        </nav>
       </div>
 
       {/* Compact Nerve-Style News & Live Tape Bar (Full-width Morning Brief moved to Top Icon Pop-Up) */}

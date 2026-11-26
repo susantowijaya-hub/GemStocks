@@ -9,18 +9,17 @@ import {
   Bookmark,
   CalendarClock,
   Clock,
+  Crosshair,
   Flame,
-  LineChart,
   Loader2,
   Moon,
   Newspaper,
   Sun,
-  TrendingUp,
 } from 'lucide-react';
+import { useRenderPerformance } from '../hooks/useRenderPerformance';
 import {
   AppRoute,
   Asset5mVolatility,
-  IctSignalAnalysis,
   MarketAsset,
   MarketIntelligenceResponse,
   NewsStory,
@@ -29,10 +28,10 @@ import {
   Timeframe,
 } from '../types/market';
 import {
-  formatAssetPrevClose,
   formatAssetPrice,
   formatFullDelta,
 } from '../utils/formatters';
+import { analyzeHeadlineSentiment } from '../utils/headlineSentiment';
 import { lazyWithRetry } from '../utils/lazyWithRetry';
 import {
   DashboardRegionTab,
@@ -41,32 +40,27 @@ import {
 } from '../utils/marketSessions';
 import {
   computeAssetTimeframeReturn,
-  computeOverallMarketFearGreed,
-  computeRiskRegimeSentiment,
-  computeVolatilityFearGreed,
+  computeUnifiedMarketPulse,
   extractFiveMinuteTrajectory,
   getAssetFearGreed,
   getAssetSignal,
 } from '../utils/marketSignals';
 import { D3FiveMinSparkline } from './D3FiveMinSparkline';
 import { GoogleFinanceDeltaPill } from './GoogleFinanceMiniChart';
-import { HeadlineSentimentGaugeCard } from './HeadlineSentimentGaugeCard';
-import { IctSignalCard } from './IctSignalCard';
-import { InteractiveChart } from './InteractiveChart';
-import { MarketFearGreedGaugeCard } from './MarketFearGreedGaugeCard';
+import { MarketSkeleton } from './MarketSkeleton';
 import {
   AssetCategoryMiniIcon,
-  FearGreedMeter,
-  GlobalMarketFearGreedCard,
   getFearGreedTextTone,
   SignalBadge,
 } from './MarketUiPrimitives';
 import { PriceAlertDrawer } from './PriceAlertOverlay';
-import { RiskRegimeGaugeCard } from './RiskRegimeGaugeCard';
 import { WidgetErrorBoundary } from './WidgetErrorBoundary';
 
-const MarketDepthCard = lazyWithRetry(() =>
-  import('./MarketDepthCard').then((m) => ({ default: m.MarketDepthCard }))
+const InteractiveChart = lazyWithRetry(() =>
+  import('./InteractiveChart').then((m) => ({ default: m.InteractiveChart }))
+);
+const UnifiedMarketPulseCard = lazyWithRetry(() =>
+  import('./UnifiedMarketPulseCard').then((m) => ({ default: m.UnifiedMarketPulseCard }))
 );
 const CorrelationMatrixCard = lazyWithRetry(() =>
   import('./CorrelationMatrixCard').then((m) => ({ default: m.CorrelationMatrixCard }))
@@ -78,14 +72,7 @@ const MarketIntelligencePanel = lazyWithRetry(() =>
 const DashboardWidgetSkeleton: React.FC<{ label: string; minHeightClass?: string }> = ({
   label,
   minHeightClass = 'min-h-[220px]',
-}) => (
-  <div
-    className={`rounded-2xl liquid-glass-card p-5 flex items-center justify-center gap-2 text-xs font-semibold text-[#6C6C70] dark:text-[#9EB5C8] ${minHeightClass}`}
-  >
-    <Loader2 className="w-4 h-4 animate-spin text-[#0071E3] dark:text-[#38BDF8]" />
-    <span>{label}</span>
-  </div>
-);
+}) => <MarketSkeleton variant="panel" label={label} minHeightClass={minHeightClass} />;
 
 interface DashboardTickerCardProps {
   tile: MarketAsset;
@@ -319,7 +306,6 @@ interface MarketDashboardViewProps {
   onClearAlerts?: () => void;
   onTriggerTestAlert?: (assetId?: string) => void;
   onScanIct?: (assetId?: string) => void;
-  onPushIctAlert?: (signal: IctSignalAnalysis) => void;
   onScanBandar?: () => void;
   onInspectSymbol?: (yahooSymbol: string) => void;
 }
@@ -344,8 +330,6 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
   newsStories = [],
   onOpenStory,
   marketIntelligence = null,
-  intelligenceLoading = false,
-  onRefreshIntelligence,
   alerts = [],
   unreadAlertCount = 0,
   volatility5mMap = {},
@@ -355,10 +339,10 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
   onClearAlerts,
   onTriggerTestAlert,
   onScanIct,
-  onPushIctAlert,
   onScanBandar,
   onInspectSymbol,
 }) => {
+  useRenderPerformance('MarketDashboardView');
   const [timeframe, setTimeframe] = useState<Timeframe>('1D');
   const [regionTab, setRegionTab] = useState<DashboardRegionTab>('all');
   const [isCompactCards, setIsCompactCards] = useState<boolean>(false);
@@ -470,12 +454,19 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
   const isGain = activeAsset.changePercent >= 0;
   const flash = flashMap[activeAsset.id];
   const activeSignal = useMemo(() => getAssetSignal(activeAsset), [activeAsset]);
-  const activeFearGreed = useMemo(() => getAssetFearGreed(activeAsset), [activeAsset]);
-  const overallFearGreed = useMemo(() => computeOverallMarketFearGreed(assets), [assets]);
-  const riskRegime = useMemo(() => computeRiskRegimeSentiment(assets), [assets]);
-  const volatilityFearGreed = useMemo(
-    () => computeVolatilityFearGreed(assets, volatility5mMap),
-    [assets, volatility5mMap]
+  const headlineSentimentSummary = useMemo(
+    () => analyzeHeadlineSentiment(newsStories),
+    [newsStories]
+  );
+  const unifiedPulse = useMemo(
+    () =>
+      computeUnifiedMarketPulse({
+        activeAsset,
+        assets,
+        volatility5mMap,
+        headlineSentimentScore: headlineSentimentSummary.score,
+      }),
+    [activeAsset, assets, volatility5mMap, headlineSentimentSummary.score]
   );
   const timeframeReturn = useMemo(
     () => computeAssetTimeframeReturn(activeAsset, timeframe, inspectedChartIndex),
@@ -490,23 +481,6 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
     });
     return `${sign}${asset.currencyPrefix ?? ''}${absStr}${asset.unitSuffix ?? ''}`;
   };
-
-  // Clean secondary Key Statistics excluding removed Intraday Spread / 52W Position / 52W Midpoint / Venue
-  const extraStats = useMemo(() => {
-    const blocked = new Set(['Intraday Spread', '52W Position', '52W Midpoint', 'Venue']);
-    const items: { label: string; value: string }[] = [];
-    const candidates = [
-      { label: activeAsset.avgVolLabel, value: activeAsset.avgVol },
-      { label: activeAsset.peLabel, value: activeAsset.peValue },
-      { label: activeAsset.capLabel, value: activeAsset.capValue },
-    ];
-    for (const c of candidates) {
-      if (c.label && c.value && !blocked.has(c.label)) {
-        items.push({ label: c.label, value: c.value });
-      }
-    }
-    return items;
-  }, [activeAsset]);
 
   // Top active instruments sorted by 5m |zScore| & realized 5m range for the Insights Rail widget
   const top5mVolMovers = useMemo(() => {
@@ -813,260 +787,44 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
               </div>
             </motion.div>
 
-            {/* Focal Interactive Chart */}
-            <InteractiveChart
-              asset={activeAsset}
-              timeframe={timeframe}
-              onTimeframeChange={setTimeframe}
-              onInspectIndexChange={setInspectedChartIndex}
-            />
-
-            {/* Key Statistics Strip */}
-            <div className="rounded-2xl liquid-glass-card p-4 sm:p-5 flex flex-col gap-4">
-              <div className="flex items-center justify-between border-b border-black/8 dark:border-white/10 pb-2.5">
-                <h2 className="text-sm sm:text-base font-bold text-[#1C1C1E] dark:text-white">
-                  Key Statistics
-                </h2>
-                <span className="text-xs text-[#6C6C70] dark:text-[#9EB5C8] font-medium tabular-nums">
-                  {activeAsset.updatedAtEpoch
-                    ? `Updated ${new Intl.DateTimeFormat('en-GB', {
-                        timeZone: 'Asia/Jakarta',
-                        hour: '2-digit',
-                        minute: '2-digit',
-                        second: '2-digit',
-                        hour12: false,
-                      }).format(new Date(activeAsset.updatedAtEpoch))} WIB`
-                    : 'Session Snapshot'}
-                </span>
-              </div>
-
-              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-4 text-xs">
-                <div>
-                  <span className="text-[#6C6C70] dark:text-[#9EB5C8]">Open</span>
-                  <p className="font-bold text-sm text-[#1C1C1E] dark:text-white tabular-nums font-mono mt-0.5">
-                    {activeAsset.open}
-                  </p>
-                </div>
-                <div>
-                  <span className="text-[#6C6C70] dark:text-[#9EB5C8]">Prev Close</span>
-                  <p className="font-bold text-sm text-[#1C1C1E] dark:text-white tabular-nums font-mono mt-0.5">
-                    {formatAssetPrevClose(activeAsset)}
-                  </p>
-                </div>
-                <div>
-                  <span className="text-[#6C6C70] dark:text-[#9EB5C8]">Day High</span>
-                  <p className="font-bold text-sm text-[#16803C] dark:text-[#4ADE80] tabular-nums font-mono mt-0.5">
-                    {activeAsset.dayHigh}
-                  </p>
-                </div>
-                <div>
-                  <span className="text-[#6C6C70] dark:text-[#9EB5C8]">Day Low</span>
-                  <p className="font-bold text-sm text-[#D7261C] dark:text-[#FF6B63] tabular-nums font-mono mt-0.5">
-                    {activeAsset.dayLow}
-                  </p>
-                </div>
-                <div>
-                  <span className="text-[#6C6C70] dark:text-[#9EB5C8]">Volume</span>
-                  <p className="font-bold text-sm text-[#1C1C1E] dark:text-white tabular-nums font-mono mt-0.5">
-                    {activeAsset.volume}
-                  </p>
-                </div>
-                {extraStats.slice(0, 1).map((stat) => (
-                  <div key={stat.label}>
-                    <span className="text-[#6C6C70] dark:text-[#9EB5C8]">{stat.label}</span>
-                    <p className="font-bold text-sm text-[#1C1C1E] dark:text-white tabular-nums font-mono mt-0.5 truncate">
-                      {stat.value}
-                    </p>
-                  </div>
-                ))}
-              </div>
-
-              {extraStats.length > 1 && (
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 text-xs pt-2 border-t border-black/6 dark:border-white/8">
-                  {extraStats.slice(1).map((stat) => (
-                    <div key={stat.label}>
-                      <span className="text-[#6C6C70] dark:text-[#9EB5C8]">{stat.label}</span>
-                      <p className="font-bold text-sm text-[#1C1C1E] dark:text-white tabular-nums font-mono mt-0.5 truncate">
-                        {stat.value}
-                      </p>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {/* 52-Week Range Progress Bar */}
-              <div className="pt-3 border-t border-[#E5E5EA] dark:border-[#1E3142]">
-                <div className="flex items-center justify-between text-xs mb-1.5">
-                  <span className="text-[#6C6C70] dark:text-[#9EB5C8] font-medium">
-                    52-Week Range
-                  </span>
-                  <span className="font-bold text-[#1C1C1E] dark:text-white tabular-nums font-mono">
-                    {activeAsset.w52Low} — {activeAsset.w52High}
-                  </span>
-                </div>
-                <div className="relative w-full h-2 rounded-full bg-[#E5E5EA] dark:bg-[#172838] overflow-hidden">
-                  <div
-                    className="absolute top-0 bottom-0 left-0 rounded-full bg-gradient-to-r from-[#0EA5E9] to-[#34D399]"
-                    style={{ width: `${activeAsset.w52Pct}%` }}
-                  />
-                </div>
-                <div className="flex items-center justify-between text-[11px] text-[#6C6C70] dark:text-[#9EB5C8] mt-1.5 tabular-nums font-mono">
-                  <span>52W Low: {activeAsset.w52Low}</span>
-                  <span>52W High: {activeAsset.w52High}</span>
-                </div>
-              </div>
-            </div>
-
-            {/* ICT Smart Money Buy/Sell Radar for FX Majors, BTC/USD, & XAU/USD */}
-            <IctSignalCard
-              assets={assets}
-              activeAsset={activeAsset}
-              activeTimeframe={timeframe}
-              onSelectAsset={onSelectAsset}
-              onLoadTimeframe={onLoadTimeframe}
-              onTriggerIctAlert={(sig) => {
-                onPushIctAlert?.(sig);
-                setIsAlertDrawerOpen(true);
-              }}
-            />
-
-            {/* Lazy-Loaded Secondary Widget 1: Market Depth */}
-            <WidgetErrorBoundary widgetName="Market Depth & Order Book">
+            {/* Focal Interactive Chart (With Integrated Key Statistics & Dynamic Timeframe Range) */}
+            <WidgetErrorBoundary widgetName="Interactive Market Chart">
               <Suspense
-                fallback={
-                  <DashboardWidgetSkeleton
-                    label="Loading Market Depth & Order Book..."
-                    minHeightClass="min-h-[280px]"
-                  />
-                }
+                fallback={<MarketSkeleton variant="chart" label="Loading price chart..." />}
               >
-                <MarketDepthCard
-                  activeAsset={activeAsset}
-                  themeMode={themeMode}
+                <InteractiveChart
+                  asset={activeAsset}
+                  timeframe={timeframe}
+                  onTimeframeChange={setTimeframe}
+                  onInspectIndexChange={setInspectedChartIndex}
                 />
               </Suspense>
             </WidgetErrorBoundary>
           </div>
 
-          {/* CHILD 2 (Order 2 on mobile — ABOVE Correlation Matrix, Col 2 spanning rows on desktop): Insights & Technical Sentiment Rail */}
+          {/* CHILD 2 (Order 2 on mobile — ABOVE Correlation Matrix, Col 2 spanning rows on desktop): Single Unified Market Pulse & Insights Rail */}
           <aside className="order-2 xl:col-start-2 xl:row-start-1 xl:row-span-2 flex flex-col gap-4 min-w-0">
-            {/* 1. Weighted Index & Sector Risk-On vs Risk-Off Sentiment Gauge */}
-            <RiskRegimeGaugeCard regime={riskRegime} themeMode={themeMode} />
-
-            {/* 2. Volatility-Driven Market Fear & Greed Sentiment Gauge */}
-            <MarketFearGreedGaugeCard sentiment={volatilityFearGreed} themeMode={themeMode} />
-
-            {/* 3. Overall Global Market Fear & Greed Composite */}
-            <GlobalMarketFearGreedCard sentiment={overallFearGreed} compactRail />
-
-            {/* 3. Live Headline Sentiment SVG Circular Gauge */}
-            <HeadlineSentimentGaugeCard
-              stories={newsStories}
-              themeMode={themeMode}
-              onOpenStory={onOpenStory}
-              onNavigate={onNavigate}
-            />
-
-            {/* 4. Active Instrument Technicals, Fear & Greed, & S/R Levels */}
-            <article
-              data-testid="technicals-sentiment-card"
-              className="rounded-2xl liquid-glass-card p-4 flex flex-col gap-3.5"
-            >
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="flex items-center gap-2">
-                  <LineChart className="w-4 h-4 text-[#0071E3] dark:text-[#38BDF8]" />
-                  <h2 className="text-sm font-bold text-[#1C1C1E] dark:text-white">
-                    Technicals &amp; Sentiment
-                  </h2>
-                </div>
-                <SignalBadge signal={activeSignal} compact />
-              </div>
-
-              <FearGreedMeter
-                fearGreed={activeFearGreed}
-                instrumentLabel={activeAsset.symbol}
-                compact
-                showComponents
-              />
-
-              <div className="grid grid-cols-2 gap-3 pb-3 border-b border-[#E5E5EA] dark:border-[#1E3142]">
-                <div>
-                  <span className="text-[11px] text-[#6C6C70] dark:text-[#9EB5C8] font-semibold">
-                    Key Support
-                  </span>
-                  <p className="text-sm font-extrabold text-[#1C1C1E] dark:text-white tabular-nums font-mono mt-0.5">
-                    {activeAsset.support}
-                  </p>
-                  <span className="text-[10px] text-[#6C6C70] dark:text-[#9EB5C8] leading-tight block">
-                    {activeAsset.supportNote}
-                  </span>
-                </div>
-                <div>
-                  <span className="text-[11px] text-[#6C6C70] dark:text-[#9EB5C8] font-semibold">
-                    Key Resistance
-                  </span>
-                  <p className="text-sm font-extrabold text-[#1C1C1E] dark:text-white tabular-nums font-mono mt-0.5">
-                    {activeAsset.resistance}
-                  </p>
-                  <span className="text-[10px] text-[#6C6C70] dark:text-[#9EB5C8] leading-tight block">
-                    {activeAsset.resistanceNote}
-                  </span>
-                </div>
-              </div>
-
-              {activeAsset.isYield && (
-                <div className="p-3 rounded-xl liquid-glass-inset flex flex-col gap-1">
-                  {activeAsset.id === 'ID10Y' ? (
-                    <>
-                      <div className="flex items-center justify-between text-xs font-semibold">
-                        <span className="text-[#1C1C1E] dark:text-white flex items-center gap-1.5">
-                          <TrendingUp className="w-3.5 h-3.5 text-[#0071E3] dark:text-[#38BDF8]" />
-                          ID–US 10Y Spread
-                        </span>
-                        <span className="font-bold font-mono tabular-nums text-[#0071E3] dark:text-[#38BDF8]">
-                          {yieldCurveInfo.idUsSpreadBps >= 0 ? '+' : ''}
-                          {yieldCurveInfo.idUsSpreadBps.toFixed(1)} bps
-                        </span>
-                      </div>
-                      <p className="text-[11px] text-[#6C6C70] dark:text-[#9EB5C8]">
-                        SBN 10Y ({yieldCurveInfo.id10yVal}%) vs US 10Y ({yieldCurveInfo.us10yVal}%).
-                      </p>
-                    </>
-                  ) : (
-                    <>
-                      <div className="flex items-center justify-between text-xs font-semibold">
-                        <span className="text-[#1C1C1E] dark:text-white flex items-center gap-1.5">
-                          <TrendingUp className="w-3.5 h-3.5 text-[#0071E3] dark:text-[#38BDF8]" />
-                          30Y–10Y Spread
-                        </span>
-                        <span
-                          className={`font-bold font-mono tabular-nums ${
-                            yieldCurveInfo.spreadBps >= 0
-                              ? 'text-[#16803C] dark:text-[#4ADE80]'
-                              : 'text-[#D7261C] dark:text-[#FF6B63]'
-                          }`}
-                        >
-                          {yieldCurveInfo.spreadBps >= 0 ? '+' : ''}
-                          {yieldCurveInfo.spreadBps.toFixed(1)} bps ({yieldCurveInfo.posture})
-                        </span>
-                      </div>
-                      <p className="text-[11px] text-[#6C6C70] dark:text-[#9EB5C8]">
-                        US 30Y ({yieldCurveInfo.us30yVal}%) vs US 10Y ({yieldCurveInfo.us10yVal}%).
-                      </p>
-                    </>
-                  )}
-                </div>
-              )}
-
-              <div>
-                <h3 className="text-[11px] font-bold uppercase tracking-wider text-[#6C6C70] dark:text-[#9EB5C8] mb-1">
-                  Session Technical Thesis
-                </h3>
-                <p className="text-xs text-[#1C1C1E] dark:text-[#D5E3EE] leading-relaxed">
-                  {activeAsset.commentary}
-                </p>
-              </div>
-            </article>
+            {/* Single Consolidated Sentiment, Risk Regime, Technicals, Headlines & Order Book Card */}
+            <WidgetErrorBoundary widgetName="Market Pulse & Sentiment">
+              <Suspense
+                fallback={
+                  <DashboardWidgetSkeleton
+                    label="Loading Market Pulse & Order Book..."
+                    minHeightClass="min-h-[320px]"
+                  />
+                }
+              >
+                <UnifiedMarketPulseCard
+                  pulse={unifiedPulse}
+                  activeAsset={activeAsset}
+                  stories={newsStories}
+                  themeMode={themeMode}
+                  yieldCurveInfo={yieldCurveInfo}
+                  onOpenStory={onOpenStory}
+                  onNavigate={onNavigate}
+                />
+              </Suspense>
+            </WidgetErrorBoundary>
 
             {/* 3. Live 5m Volatility Leaders Widget */}
             <section className="rounded-2xl liquid-glass-card p-4 flex flex-col gap-3">
@@ -1148,6 +906,23 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
             <section className="flex flex-col gap-2.5">
               <button
                 type="button"
+                onClick={() => onNavigate('ict')}
+                className="p-3.5 rounded-2xl liquid-glass-card text-[#1C1C1E] dark:text-white hover:brightness-[0.98] dark:hover:brightness-110 flex items-center justify-between gap-3 text-left transition-transform"
+              >
+                <div className="flex items-center gap-3">
+                  <Crosshair className="w-4 h-4 text-[#0071E3] dark:text-[#FBBF24] shrink-0" />
+                  <div>
+                    <p className="text-xs font-bold text-[#1C1C1E] dark:text-white">ICT Liquidity &amp; OTE Radar</p>
+                    <p className="text-[11px] text-[#4A4D57] dark:text-[#9EB5C8]">
+                      BTC/USD, XAU/USD &amp; FX Smart Money signals
+                    </p>
+                  </div>
+                </div>
+                <ArrowRight className="w-4 h-4 text-[#4A4D57] dark:text-[#9EB5C8] shrink-0" />
+              </button>
+
+              <button
+                type="button"
                 onClick={() => onNavigate('watchlist')}
                 className="p-3.5 rounded-2xl liquid-glass-card text-[#1C1C1E] dark:text-white hover:brightness-[0.98] dark:hover:brightness-110 flex items-center justify-between gap-3 text-left transition-transform"
               >
@@ -1222,23 +997,18 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
               </Suspense>
             </WidgetErrorBoundary>
 
-            <WidgetErrorBoundary widgetName="Session Briefings & Catalysts">
+            <WidgetErrorBoundary widgetName="Multi-Source Market Intelligence">
               <Suspense
                 fallback={
                   <DashboardWidgetSkeleton
-                    label="Loading Session Briefings & Catalysts..."
+                    label="Loading Market Intelligence..."
                     minHeightClass="min-h-[240px]"
                   />
                 }
               >
                 <MarketIntelligencePanel
                   intelligence={marketIntelligence}
-                  loading={intelligenceLoading}
-                  selectedAssetId={activeAsset.id}
-                  assets={assets}
-                  onSelectAsset={onSelectAsset}
                   onNavigate={onNavigate}
-                  onRefresh={onRefreshIntelligence}
                 />
               </Suspense>
             </WidgetErrorBoundary>

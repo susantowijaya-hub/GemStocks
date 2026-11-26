@@ -57,10 +57,10 @@
         },
         "symbol": {
           "type": "string",
-          "description": "Ticker or asset symbol (e.g. SPX, BTC, XAU).",
+          "description": "Ticker or Yahoo asset symbol (e.g. ^GSPC, BTC-USD, GC=F, BBCA.JK).",
           "minLength": 1,
           "maxLength": 20,
-          "pattern": "^[A-Z0-9._\\-/]+$"
+          "pattern": "^[A-Z0-9._\\-/^=]+$"
         },
         "name": {
           "type": "string",
@@ -91,6 +91,27 @@
           "description": "Optional market feed symbol ID for live price syncing.",
           "maxLength": 32,
           "pattern": "^[a-zA-Z0-9_\\-]*$"
+        },
+        "portfolioId": {
+          "type": "string",
+          "description": "Optional portfolio list identifier for multi-list sync across devices.",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]*$"
+        },
+        "portfolioName": {
+          "type": "string",
+          "description": "Optional portfolio display name for cross-device list restoration.",
+          "maxLength": 40
+        },
+        "nativeCurrency": {
+          "type": "string",
+          "description": "Native quote currency of the holding (USD or IDR).",
+          "enum": ["USD", "IDR"],
+          "maxLength": 4
+        },
+        "nativeAvgCost": {
+          "type": "number",
+          "description": "Average purchase cost in the holding's native currency to prevent FX drift."
         },
         "createdAt": {
           "type": "string",
@@ -134,7 +155,7 @@
         "preferredCurrency": {
           "type": "string",
           "description": "Default currency code for FX Matrix.",
-          "enum": ["USD", "EUR", "GBP", "JPY", "IDR", "SGD", "AUD"],
+          "enum": ["USD", "EUR", "GBP", "JPY", "IDR", "SGD", "AUD", "NZD", "CAD", "CHF", "CNY"],
           "maxLength": 8
         },
         "favoriteAssetIds": {

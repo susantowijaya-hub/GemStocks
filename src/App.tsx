@@ -4,17 +4,18 @@
  */
 
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronLeft, ChevronRight, Loader2 } from 'lucide-react';
+import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { motion } from 'motion/react';
 import { BottomDock } from './components/BottomDock';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { Header } from './components/Header';
 import { MarketDashboardView } from './components/MarketDashboardView';
-import { OfflineIndicator } from './components/OfflineIndicator';
-import { PriceAlertToastStack } from './components/PriceAlertOverlay';
+import { MarketSkeleton } from './components/MarketSkeleton';
 import { AuthProvider } from './contexts/AuthContext';
 import { useLiveMarket } from './hooks/useLiveMarket';
+import { usePrefetch } from './hooks/usePrefetch';
 import { usePriceAlerts } from './hooks/usePriceAlerts';
+import { useRenderPerformance } from './hooks/useRenderPerformance';
 import { useTheme } from './hooks/useTheme';
 import { AppRoute, CalendarCatalyst, NewsStory, PriceAlertItem } from './types/market';
 import { lazyWithRetry } from './utils/lazyWithRetry';
@@ -31,6 +32,9 @@ const TopStocksView = lazyWithRetry(() =>
 const MarketHeatmapView = lazyWithRetry(() =>
   import('./components/MarketHeatmapView').then((m) => ({ default: m.MarketHeatmapView }))
 );
+const IctRadarView = lazyWithRetry(() =>
+  import('./components/IctRadarView').then((m) => ({ default: m.IctRadarView }))
+);
 const NewsFeedView = lazyWithRetry(() =>
   import('./components/NewsFeedView').then((m) => ({ default: m.NewsFeedView }))
 );
@@ -46,15 +50,14 @@ const NewsModal = lazyWithRetry(() =>
 const SymbolDetailModal = lazyWithRetry(() =>
   import('./components/SymbolDetailModal').then((m) => ({ default: m.SymbolDetailModal }))
 );
-
-const RouteLoadingFallback = () => (
-  <div className="flex-1 flex items-center justify-center py-20 text-xs font-semibold text-[#4A4D57] dark:text-[#B4B8C4] gap-2">
-    <Loader2 className="w-4 h-4 animate-spin text-[#0071E3] dark:text-[#3898FF]" />
-    <span>Loading terminal view...</span>
-  </div>
+const OfflineIndicator = lazyWithRetry(() =>
+  import('./components/OfflineIndicator').then((m) => ({ default: m.OfflineIndicator }))
+);
+const PriceAlertToastStack = lazyWithRetry(() =>
+  import('./components/PriceAlertOverlay').then((m) => ({ default: m.PriceAlertToastStack }))
 );
 
-const VALID_ROUTES: AppRoute[] = ['dashboard', 'watchlist', 'portfolio', 'stocks', 'heatmap', 'news', 'calendar', 'extract'];
+const VALID_ROUTES: AppRoute[] = ['dashboard', 'watchlist', 'portfolio', 'stocks', 'heatmap', 'ict', 'news', 'calendar', 'extract'];
 
 const ROUTE_SHORT_LABELS: Record<AppRoute, string> = {
   dashboard: 'Markets',
@@ -62,6 +65,7 @@ const ROUTE_SHORT_LABELS: Record<AppRoute, string> = {
   portfolio: 'Portfolio',
   stocks: 'Stocks',
   heatmap: 'Heatmap',
+  ict: 'ICT Radar',
   news: 'News',
   calendar: 'Calendar',
   extract: 'Share',
@@ -94,6 +98,7 @@ function getInitialRoute(): AppRoute {
 }
 
 function StocksTerminalShell() {
+  useRenderPerformance('StocksTerminalShell');
   const { themeMode, setThemeMode, toggleTheme } = useTheme();
   const {
     assets,
@@ -125,11 +130,13 @@ function StocksTerminalShell() {
     refreshDiagnostics,
     togglePulse,
     loadChartTimeframe,
+    refreshCalendar,
     refreshStocks,
     refreshAll,
   } = useLiveMarket();
 
   const [activeRoute, setActiveRoute] = useState<AppRoute>(getInitialRoute);
+  const [priorityReady, setPriorityReady] = useState<boolean>(false);
   const [swipeSlideDir, setSwipeSlideDir] = useState<1 | -1 | 0>(0);
   const [swipeHint, setSwipeHint] = useState<{
     direction: 'prev' | 'next';
@@ -160,21 +167,43 @@ function StocksTerminalShell() {
     lastDx: 0,
   });
 
+  // Priority Loading: mark dashboard interactive after first browser paint before warming non-critical views
+  useEffect(() => {
+    let rafId = 0;
+    let fallbackTimer: number | null = null;
+    if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+      rafId = window.requestAnimationFrame(() => {
+        setPriorityReady(true);
+      });
+    } else {
+      fallbackTimer = globalThis.setTimeout(() => setPriorityReady(true), 60) as unknown as number;
+    }
+    return () => {
+      if (rafId) window.cancelAnimationFrame(rafId);
+      if (fallbackTimer !== null) globalThis.clearTimeout(fallbackTimer);
+    };
+  }, []);
+
+  const { prefetchRoute } = usePrefetch(activeRoute, priorityReady);
+
   const {
     alerts,
     toasts,
     unreadCount,
+    ictPopupsEnabled,
+    toggleIctPopups,
     volatility5mMap,
     market5mStats,
     dismissToast,
     markRead,
     markAllRead,
+    updateAlertOutcome,
     clearAlerts,
     triggerTestAlert,
     pushIctSignalAlert,
     scanIctAlerts,
     scanBandarmologyAlerts,
-  } = usePriceAlerts(assets, idxMoversBucket);
+  } = usePriceAlerts(assets, idxMoversBucket, economicEvents);
 
   // Sync browser hash navigation (Back/Forward on Desktop, Android, and iOS Safari)
   useEffect(() => {
@@ -387,6 +416,7 @@ function StocksTerminalShell() {
         feedsLive={feedsLive}
         onRefreshAll={refreshAll}
         onRefreshDiagnostics={refreshDiagnostics}
+        onPrefetchRoute={prefetchRoute}
       />
 
       <main
@@ -426,7 +456,7 @@ function StocksTerminalShell() {
           transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
           className="flex-1 flex flex-col"
         >
-        <Suspense fallback={<RouteLoadingFallback />}>
+        <Suspense fallback={<MarketSkeleton variant="route" label="Loading terminal view..." />}>
         {activeRoute === 'dashboard' && (
           <MarketDashboardView
             assets={assets}
@@ -451,7 +481,6 @@ function StocksTerminalShell() {
             onClearAlerts={clearAlerts}
             onTriggerTestAlert={triggerTestAlert}
             onScanIct={scanIctAlerts}
-            onPushIctAlert={pushIctSignalAlert}
             onScanBandar={scanBandarmologyAlerts}
             onInspectSymbol={(sym) => handleInspectSymbol(sym)}
           />
@@ -509,6 +538,22 @@ function StocksTerminalShell() {
           />
         )}
 
+        {activeRoute === 'ict' && (
+          <IctRadarView
+            assets={assets}
+            alerts={alerts}
+            economicEvents={economicEvents}
+            ictPopupsEnabled={ictPopupsEnabled}
+            onToggleIctPopups={toggleIctPopups}
+            onScanIct={scanIctAlerts}
+            onTriggerIctAlert={pushIctSignalAlert}
+            onLoadTimeframe={loadChartTimeframe}
+            onMarkAlertRead={markRead}
+            onUpdateAlertOutcome={updateAlertOutcome}
+            searchQuery={searchQuery}
+          />
+        )}
+
         {activeRoute === 'news' && (
           <NewsFeedView
             stories={newsStories}
@@ -534,6 +579,7 @@ function StocksTerminalShell() {
             nextCatalyst={activeCatalyst}
             searchQuery={searchQuery}
             countdownSeconds={countdownSeconds}
+            onRefreshCalendar={() => refreshCalendar(true)}
           />
         )}
 
@@ -556,36 +602,43 @@ function StocksTerminalShell() {
         onNavigate={handleNavigate}
         themeMode={themeMode}
         onToggleTheme={toggleTheme}
+        onPrefetchRoute={prefetchRoute}
       />
 
-      <OfflineIndicator />
-      <PriceAlertToastStack
-        toasts={toasts}
-        onDismiss={dismissToast}
-        onSelectAlert={(alert: PriceAlertItem) => {
-          markRead(alert.id);
-          dismissToast(alert.id);
-          if (alert.alertKind === 'bandarmology') {
-            handleInspectSymbol(alert.assetId);
-            return;
-          }
-          setSelectedAssetId(alert.assetId);
-          if (activeRoute !== 'dashboard') {
-            handleNavigate('dashboard');
-          }
-        }}
-      />
-      <Suspense fallback={null}>
-        {activeStory && (
-          <NewsModal story={activeStory} onClose={() => setActiveStory(null)} />
-        )}
-        {inspectedSymbol && (
-          <SymbolDetailModal
-            yahooSymbol={inspectedSymbol}
-            onClose={() => setInspectedSymbol(null)}
+      {priorityReady && (
+        <Suspense fallback={null}>
+          <OfflineIndicator />
+          <PriceAlertToastStack
+            toasts={toasts}
+            onDismiss={dismissToast}
+            onSelectAlert={(alert: PriceAlertItem) => {
+              markRead(alert.id);
+              dismissToast(alert.id);
+              if (alert.alertKind === 'bandarmology') {
+                handleInspectSymbol(alert.assetId);
+                return;
+              }
+              if (alert.alertKind === 'ict') {
+                handleNavigate('ict');
+                return;
+              }
+              setSelectedAssetId(alert.assetId);
+              if (activeRoute !== 'dashboard') {
+                handleNavigate('dashboard');
+              }
+            }}
           />
-        )}
-      </Suspense>
+          {activeStory && (
+            <NewsModal story={activeStory} onClose={() => setActiveStory(null)} />
+          )}
+          {inspectedSymbol && (
+            <SymbolDetailModal
+              yahooSymbol={inspectedSymbol}
+              onClose={() => setInspectedSymbol(null)}
+            />
+          )}
+        </Suspense>
+      )}
       </div>
     </div>
   );

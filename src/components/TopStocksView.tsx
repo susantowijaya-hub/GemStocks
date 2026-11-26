@@ -22,18 +22,23 @@ import {
   BandarmologyPhase,
   MarketIntelligenceResponse,
   PriceAlertItem,
+  StockExecutionAction,
   StockMover,
   StocksMoversBucket,
 } from '../types/market';
 import { getAllMarketSessions, MarketSessionStatus } from '../utils/marketSessions';
-import { getStockFearGreed, getStockSignal } from '../utils/marketSignals';
+import {
+  computeStockTradeStrategy,
+  formatStockCurrencyValue,
+  getStockFearGreed,
+  getStockSignal,
+} from '../utils/marketSignals';
 import { GoogleFinanceDeltaPill, GoogleFinanceMiniChart } from './GoogleFinanceMiniChart';
 import {
   BandarmologyBadge,
   FearGreedInlineBar,
   FearGreedTrendSparkline,
   getFearGreedTextTone,
-  SignalBadge,
 } from './MarketUiPrimitives';
 
 interface TopStocksViewProps {
@@ -54,16 +59,10 @@ interface TopStocksViewProps {
 type MarketFilter = 'all' | 'us' | 'id';
 type DirectionFilter = 'impact' | 'gainers' | 'losers' | 'foreignBuy' | 'foreignSell';
 type BandarFilter = 'all' | BandarmologyPhase;
+type ActionSetupFilter = 'all' | StockExecutionAction;
 
 function formatStockPrice(stock: StockMover): string {
-  if (stock.price <= 0) return '—';
-  if (stock.currency === 'IDR') {
-    return `Rp ${Math.round(stock.price).toLocaleString('en-US')}`;
-  }
-  return `$${stock.price.toLocaleString('en-US', {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  })}`;
+  return formatStockCurrencyValue(stock.price, stock.currency);
 }
 
 function formatStockDelta(stock: StockMover): string {
@@ -84,6 +83,16 @@ function formatStockRange(stock: StockMover): string {
     ).toLocaleString('en-US')}`;
   }
   return `$${stock.dayLow.toFixed(2)} – $${stock.dayHigh.toFixed(2)}`;
+}
+
+function getActionBadgeClasses(action: StockExecutionAction): string {
+  if (action === 'BUY') {
+    return 'bg-[#16A34A]/18 text-[#0B5D2A] dark:bg-[#22C55E]/20 dark:text-[#4ADE80] border-[#16A34A]/45';
+  }
+  if (action === 'SELL') {
+    return 'bg-[#DC2626]/18 text-[#B91C1C] dark:bg-[#EF4444]/20 dark:text-[#FF6B63] border-[#DC2626]/45';
+  }
+  return 'bg-[#D97706]/18 text-[#9A5A0A] dark:bg-[#F59E0B]/20 dark:text-[#FBBF24] border-[#D97706]/45';
 }
 
 function SessionStatusCard({
@@ -163,8 +172,6 @@ function MarketMoversSection({
   onClearSearch?: () => void;
   onInspectSymbol?: (yahooSymbol: string) => void;
 }) {
-  const isIdMarket = stocks.some((s) => s.market === 'ID');
-
   const openChartForStock = (stock: StockMover) => {
     if (!onInspectSymbol) return;
     const sym = stock.market === 'ID' ? `${stock.symbol}.JK` : stock.symbol;
@@ -204,7 +211,7 @@ function MarketMoversSection({
                 ? `No equity tickers match "${searchQuery.trim()}".`
                 : isForeignFlow
                   ? 'Syncing latest IDX Foreign Flow report...'
-                  : 'No live movers available right now.'}
+                  : 'No stocks match the active Bandarmology / Execution filters.'}
             </span>
             <div className="flex items-center gap-2">
               {searchQuery.trim() && onClearSearch && (
@@ -237,8 +244,8 @@ function MarketMoversSection({
                 <tr className="border-b border-[#E5E5EA] dark:border-[#2C2C2E] text-[11px] font-bold uppercase tracking-wider text-[#6C6C70] dark:text-[#8E8E93]">
                   <th className="py-3 pl-5 pr-2 w-12">Rank</th>
                   <th className="py-3 px-3">Stock</th>
-                  <th className="py-3 px-3">Signal</th>
-                  {isIdMarket && <th className="py-3 px-3">Bandarmology</th>}
+                  <th className="py-3 px-3">Bandar / Flow</th>
+                  <th className="py-3 px-3">Execution Signal &amp; Levels</th>
                   <th className="py-3 px-3">Fear &amp; Greed</th>
                   <th className="py-3 px-3">Trend</th>
                   {isForeignFlow && (
@@ -257,8 +264,10 @@ function MarketMoversSection({
                 {stocks.map((stock, idx) => {
                   const isGain = stock.changePercent >= 0;
                   const isForeignBuy = (stock.foreignNetAmount ?? 0) >= 0;
-                  const signal = getStockSignal(stock);
                   const fearGreed = getStockFearGreed(stock);
+                  const plan = computeStockTradeStrategy(stock);
+                  const badgeCls = getActionBadgeClasses(plan.action);
+
                   return (
                     <tr
                       key={`${stock.market}-${stock.symbol}-${idx}`}
@@ -282,25 +291,51 @@ function MarketMoversSection({
                             />
                           )}
                         </div>
-                        <div className="text-[11px] text-[#6C6C70] dark:text-[#8E8E93] truncate max-w-[200px]">
+                        <div className="text-[11px] text-[#6C6C70] dark:text-[#8E8E93] truncate max-w-[175px]">
                           {stock.name} · {stock.exchange}
                         </div>
                       </td>
                       <td className="py-3 px-3">
-                        <SignalBadge signal={signal} compact />
+                        <div className="flex flex-col items-start gap-0.5">
+                          <BandarmologyBadge bandarmology={stock.bandarmology} compact />
+                          <span className="text-[10px] font-mono tabular-nums text-[#6C6C70] dark:text-[#9EB5C8] whitespace-nowrap">
+                            {stock.bandarmology
+                              ? `${stock.bandarmology.volumeRatio.toFixed(1)}x vol · Flow ${stock.bandarmology.accumulationPressure}%`
+                              : plan.bandarFlowBias}
+                          </span>
+                        </div>
                       </td>
-                      {isIdMarket && (
-                        <td className="py-3 px-3">
-                          <div className="flex flex-col items-start gap-0.5">
-                            <BandarmologyBadge bandarmology={stock.bandarmology} compact />
-                            {stock.bandarmology && (
-                              <span className="text-[10px] font-mono tabular-nums text-[#6C6C70] dark:text-[#9EB5C8]">
-                                {stock.bandarmology.volumeRatio.toFixed(1)}x vol · Flow {stock.bandarmology.accumulationPressure}%
-                              </span>
-                            )}
+                      <td className="py-3 px-3">
+                        <div
+                          data-testid={`stock-trade-plan-${stock.symbol}`}
+                          className="flex flex-col gap-1 min-w-[215px]"
+                        >
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span
+                              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[10.5px] font-extrabold font-mono tabular-nums whitespace-nowrap ${badgeCls}`}
+                            >
+                              {plan.action} · {plan.conviction}%
+                            </span>
+                            <span className="text-[10px] font-mono font-bold text-[#4A4D57] dark:text-[#C7CBD6] whitespace-nowrap">
+                              R:R {plan.riskReward}
+                            </span>
                           </div>
-                        </td>
-                      )}
+                          <div className="text-[10.5px] font-mono tabular-nums flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                            <span className="font-bold text-[#1C1C1E] dark:text-white">
+                              {plan.action === 'WAIT' ? 'Wait' : 'Entry'} {formatStockCurrencyValue(plan.entryPrice, stock.currency)}
+                            </span>
+                            <span className="text-[#0F7033] dark:text-[#4ADE80] font-semibold">
+                              TP1 {formatStockCurrencyValue(plan.takeProfit1, stock.currency)}
+                            </span>
+                            <span className="text-[#C41C16] dark:text-[#FF6B63] font-semibold">
+                              SL {formatStockCurrencyValue(plan.stopLoss, stock.currency)}
+                            </span>
+                          </div>
+                          <span className="text-[10px] text-[#6C6C70] dark:text-[#9EB5C8] truncate max-w-[235px]">
+                            {plan.strategyTag}
+                          </span>
+                        </div>
+                      </td>
                       <td className="py-3 px-3">
                         <FearGreedInlineBar fearGreed={fearGreed} compact />
                       </td>
@@ -369,92 +404,126 @@ function MarketMoversSection({
             {stocks.map((stock, idx) => {
               const isGain = stock.changePercent >= 0;
               const isForeignBuy = (stock.foreignNetAmount ?? 0) >= 0;
-              const signal = getStockSignal(stock);
               const fearGreed = getStockFearGreed(stock);
+              const plan = computeStockTradeStrategy(stock);
+              const badgeCls = getActionBadgeClasses(plan.action);
+
               return (
                 <div
                   key={`${stock.market}-${stock.symbol}-m-${idx}`}
                   onClick={() => openChartForStock(stock)}
-                  className={`p-4 flex items-center justify-between gap-3 ${
+                  className={`p-4 flex flex-col gap-2.5 ${
                     onInspectSymbol ? 'cursor-pointer active:bg-[#E5E5EA]/40 dark:active:bg-[#2C2C2E]/40' : ''
                   }`}
                 >
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-1.5 flex-wrap">
-                      <span className="text-[11px] font-mono font-bold text-[#6C6C70] dark:text-[#8E8E93]">
-                        #{idx + 1}
-                      </span>
-                      <span className="text-sm font-extrabold text-[#1C1C1E] dark:text-white">
-                        {stock.symbol}
-                      </span>
-                      <SignalBadge signal={signal} compact />
-                      {stock.market === 'ID' && (
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="text-[11px] font-mono font-bold text-[#6C6C70] dark:text-[#8E8E93]">
+                          #{idx + 1}
+                        </span>
+                        <span className="text-sm font-extrabold text-[#1C1C1E] dark:text-white">
+                          {stock.symbol}
+                        </span>
+                        <span
+                          className={`inline-flex items-center px-1.5 py-0.5 rounded border text-[10px] font-extrabold font-mono tabular-nums ${badgeCls}`}
+                        >
+                          {plan.action} · {plan.conviction}%
+                        </span>
                         <BandarmologyBadge bandarmology={stock.bandarmology} compact />
+                      </div>
+                      <p className="text-xs text-[#6C6C70] dark:text-[#8E8E93] truncate mt-0.5">
+                        {stock.name} · Vol {stock.volume}
+                        {stock.bandarmology
+                          ? ` · ${stock.bandarmology.volumeRatio.toFixed(1)}x Vol`
+                          : ''}
+                      </p>
+                      {isForeignFlow && stock.foreignNetLabel ? (
+                        <div
+                          className={`text-[11px] font-mono font-bold mt-1 tabular-nums flex items-center gap-1.5 flex-wrap ${
+                            isForeignBuy
+                              ? 'text-[#16803C] dark:text-[#30D158]'
+                              : 'text-[#D7261C] dark:text-[#FF453A]'
+                          }`}
+                        >
+                          <span>
+                            {isForeignBuy ? 'Foreign Buy: ' : 'Foreign Sell: '}
+                            {stock.foreignNetLabel}
+                          </span>
+                          <span className={`inline-flex items-center gap-1 ${getFearGreedTextTone(fearGreed.zone)}`}>
+                            <span>· F&amp;G {fearGreed.score}</span>
+                            <FearGreedTrendSparkline
+                              history7d={fearGreed.history7d}
+                              score={fearGreed.score}
+                              zone={fearGreed.zone}
+                              compact
+                              showLabel={false}
+                            />
+                          </span>
+                        </div>
+                      ) : (
+                        <div className="text-[10px] font-mono text-[#6C6C70] dark:text-[#8E8E93] mt-0.5 tabular-nums flex items-center gap-1.5 flex-wrap">
+                          <span>Range: {formatStockRange(stock)} ·</span>
+                          <span className={`inline-flex items-center gap-1 font-bold ${getFearGreedTextTone(fearGreed.zone)}`}>
+                            <span>F&amp;G {fearGreed.score}</span>
+                            <FearGreedTrendSparkline
+                              history7d={fearGreed.history7d}
+                              score={fearGreed.score}
+                              zone={fearGreed.zone}
+                              compact
+                              showLabel={false}
+                            />
+                          </span>
+                        </div>
                       )}
                     </div>
-                    <p className="text-xs text-[#6C6C70] dark:text-[#8E8E93] truncate mt-0.5">
-                      {stock.name} · Vol {stock.volume}
-                      {stock.market === 'ID' && stock.bandarmology
-                        ? ` · ${stock.bandarmology.volumeRatio.toFixed(1)}x Vol`
-                        : ''}
-                    </p>
-                    {isForeignFlow && stock.foreignNetLabel ? (
-                      <div
-                        className={`text-[11px] font-mono font-bold mt-1 tabular-nums flex items-center gap-1.5 flex-wrap ${
-                          isForeignBuy
-                            ? 'text-[#16803C] dark:text-[#30D158]'
-                            : 'text-[#D7261C] dark:text-[#FF453A]'
-                        }`}
-                      >
-                        <span>
-                          {isForeignBuy ? 'Foreign Buy: ' : 'Foreign Sell: '}
-                          {stock.foreignNetLabel}
-                        </span>
-                        <span className={`inline-flex items-center gap-1 ${getFearGreedTextTone(fearGreed.zone)}`}>
-                          <span>· F&amp;G {fearGreed.score}</span>
-                          <FearGreedTrendSparkline
-                            history7d={fearGreed.history7d}
-                            score={fearGreed.score}
-                            zone={fearGreed.zone}
-                            compact
-                            showLabel={false}
-                          />
-                        </span>
-                      </div>
-                    ) : (
-                      <div className="text-[10px] font-mono text-[#6C6C70] dark:text-[#8E8E93] mt-0.5 tabular-nums flex items-center gap-1.5 flex-wrap">
-                        <span>Range: {formatStockRange(stock)} ·</span>
-                        <span className={`inline-flex items-center gap-1 font-bold ${getFearGreedTextTone(fearGreed.zone)}`}>
-                          <span>F&amp;G {fearGreed.score}</span>
-                          <FearGreedTrendSparkline
-                            history7d={fearGreed.history7d}
-                            score={fearGreed.score}
-                            zone={fearGreed.zone}
-                            compact
-                            showLabel={false}
-                          />
-                        </span>
-                      </div>
-                    )}
-                  </div>
 
-                  <div className="w-16 h-7 shrink-0">
-                    <GoogleFinanceMiniChart
-                      points={stock.sparklinePoints}
-                      prevClose={stock.prevClose}
-                      isGain={isGain}
-                      progressRatio={session.isLiveRunning ? 0.85 : 1}
-                      className="w-16 h-7"
-                      showEndDot={session.isLiveRunning}
-                    />
-                  </div>
-
-                  <div className="text-right shrink-0">
-                    <div className="text-sm font-bold font-mono text-[#1C1C1E] dark:text-white tabular-nums">
-                      {formatStockPrice(stock)}
+                    <div className="w-16 h-7 shrink-0">
+                      <GoogleFinanceMiniChart
+                        points={stock.sparklinePoints}
+                        prevClose={stock.prevClose}
+                        isGain={isGain}
+                        progressRatio={session.isLiveRunning ? 0.85 : 1}
+                        className="w-16 h-7"
+                        showEndDot={session.isLiveRunning}
+                      />
                     </div>
-                    <div className="mt-0.5 flex justify-end">
-                      <GoogleFinanceDeltaPill changePercent={stock.changePercent} compact />
+
+                    <div className="text-right shrink-0">
+                      <div className="text-sm font-bold font-mono text-[#1C1C1E] dark:text-white tabular-nums">
+                        {formatStockPrice(stock)}
+                      </div>
+                      <div className="mt-0.5 flex justify-end">
+                        <GoogleFinanceDeltaPill changePercent={stock.changePercent} compact />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Mobile Execution Plan Strip */}
+                  <div className="rounded-xl liquid-glass-inset px-3 py-2 grid grid-cols-3 gap-2 text-[10.5px] font-mono tabular-nums">
+                    <div>
+                      <span className="text-[#6C6C70] dark:text-[#9EB5C8] block text-[9.5px] font-sans uppercase">
+                        {plan.action === 'WAIT' ? 'Trigger Entry' : `${plan.action} Entry`}
+                      </span>
+                      <span className="font-bold text-[#1C1C1E] dark:text-white">
+                        {formatStockCurrencyValue(plan.entryPrice, stock.currency)}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-[#6C6C70] dark:text-[#9EB5C8] block text-[9.5px] font-sans uppercase">
+                        TP1 / TP2
+                      </span>
+                      <span className="font-bold text-[#0F7033] dark:text-[#4ADE80]">
+                        {formatStockCurrencyValue(plan.takeProfit1, stock.currency)}
+                      </span>
+                    </div>
+                    <div className="text-right">
+                      <span className="text-[#6C6C70] dark:text-[#9EB5C8] block text-[9.5px] font-sans uppercase">
+                        SL · {plan.riskReward}
+                      </span>
+                      <span className="font-bold text-[#C41C16] dark:text-[#FF6B63]">
+                        {formatStockCurrencyValue(plan.stopLoss, stock.currency)}
+                      </span>
                     </div>
                   </div>
                 </div>
@@ -484,6 +553,7 @@ export const TopStocksView: React.FC<TopStocksViewProps> = ({
   const [marketFilter, setMarketFilter] = useState<MarketFilter>('all');
   const [directionFilter, setDirectionFilter] = useState<DirectionFilter>('impact');
   const [bandarFilter, setBandarFilter] = useState<BandarFilter>('all');
+  const [actionFilter, setActionFilter] = useState<ActionSetupFilter>('all');
   const [isRefreshing, setIsRefreshing] = useState(false);
 
   const bandarShiftAlerts = useMemo(
@@ -506,15 +576,22 @@ export const TopStocksView: React.FC<TopStocksViewProps> = ({
     }
   }, [marketFilter, directionFilter]);
 
-  const filterSearch = (list: StockMover[]) => {
+  const filterSearchAndSetup = (list: StockMover[]) => {
     const q = searchQuery.toLowerCase().trim();
-    if (!q) return list.slice(0, 10);
-    return list.filter(
-      (s) =>
-        s.symbol.toLowerCase().includes(q) ||
-        s.name.toLowerCase().includes(q) ||
-        s.exchange.toLowerCase().includes(q)
-    );
+    const base = !q
+      ? list.slice(0, 10)
+      : list.filter(
+          (s) =>
+            s.symbol.toLowerCase().includes(q) ||
+            s.name.toLowerCase().includes(q) ||
+            s.exchange.toLowerCase().includes(q)
+        );
+    const byBandar =
+      bandarFilter === 'all'
+        ? base
+        : base.filter((s) => (s.bandarmology?.phase ?? 'Neutral') === bandarFilter);
+    if (actionFilter === 'all') return byBandar;
+    return byBandar.filter((s) => computeStockTradeStrategy(s).action === actionFilter);
   };
 
   const activeUsList = useMemo(() => {
@@ -524,8 +601,8 @@ export const TopStocksView: React.FC<TopStocksViewProps> = ({
         : directionFilter === 'losers'
           ? usBucket.losers
           : usBucket.impact;
-    return filterSearch(raw);
-  }, [usBucket, directionFilter, searchQuery]);
+    return filterSearchAndSetup(raw);
+  }, [usBucket, directionFilter, searchQuery, bandarFilter, actionFilter]);
 
   const activeIdxList = useMemo(() => {
     const raw =
@@ -538,20 +615,25 @@ export const TopStocksView: React.FC<TopStocksViewProps> = ({
             : directionFilter === 'foreignSell'
               ? idxBucket.foreignSell ?? []
               : idxBucket.impact;
-    const searched = filterSearch(raw);
-    if (bandarFilter === 'all') return searched;
-    return searched.filter((s) => (s.bandarmology?.phase ?? 'Neutral') === bandarFilter);
-  }, [idxBucket, directionFilter, searchQuery, bandarFilter]);
+    return filterSearchAndSetup(raw);
+  }, [idxBucket, directionFilter, searchQuery, bandarFilter, actionFilter]);
 
   const combinedSignalTally = useMemo(() => {
     let bull = 0;
     let bear = 0;
+    let buy = 0;
+    let sell = 0;
+    let wait = 0;
     for (const s of [...activeUsList, ...activeIdxList]) {
       const sig = getStockSignal(s);
       if (sig.direction === 'bull') bull += 1;
       else if (sig.direction === 'bear') bear += 1;
+      const plan = computeStockTradeStrategy(s);
+      if (plan.action === 'BUY') buy += 1;
+      else if (plan.action === 'SELL') sell += 1;
+      else wait += 1;
     }
-    return { bull, bear };
+    return { bull, bear, buy, sell, wait };
   }, [activeUsList, activeIdxList]);
 
   const idxBandarSummary = useMemo(() => {
@@ -609,7 +691,7 @@ export const TopStocksView: React.FC<TopStocksViewProps> = ({
             </h1>
           </div>
           <p className="text-xs sm:text-sm text-[#6C6C70] dark:text-[#8E8E93] mt-1">
-            Always 10 institutional-weighted equities across US (NYSE/NASDAQ) &amp; Indonesia (IDX), plus daily IDX Foreign Buy &amp; Foreign Sell flow.
+            Bandarmology Accumulation + Order Flow + Technical Supply &amp; Demand execution prices (Entry, TP1/TP2, SL) across US &amp; IDX.
           </p>
         </div>
 
@@ -640,23 +722,23 @@ export const TopStocksView: React.FC<TopStocksViewProps> = ({
           <div className="flex flex-wrap items-center gap-2">
             <Compass className="w-4 h-4 text-[#0071E3] dark:text-[#0A84FF] shrink-0" />
             <span className="text-xs font-bold text-[#1C1C1E] dark:text-white">
-              Stocks &amp; Foreign Flow Briefing
+              Bandarmology + Flow + Supply/Demand Brief
             </span>
             <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[#30D158]/15 text-[#16803C] dark:text-[#30D158] text-[10px] font-bold tabular-nums">
               <TrendingUp className="w-3 h-3" />
-              {combinedSignalTally.bull} Bull Signals
+              {combinedSignalTally.buy} BUY · {combinedSignalTally.bull} Bull
             </span>
             <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[#FF453A]/15 text-[#D7261C] dark:text-[#FF453A] text-[10px] font-bold tabular-nums">
               <TrendingDown className="w-3 h-3" />
-              {combinedSignalTally.bear} Bear Signals
+              {combinedSignalTally.sell} SELL · {combinedSignalTally.bear} Bear
             </span>
             <span className="text-[11px] font-semibold text-[#4A4D57] dark:text-[#C7CBD6] tabular-nums">
-              IDX Bandarmology: {idxBandarSummary.acc} Accumulation · {idxBandarSummary.dist} Distribution
+              IDX Bandarmology: {idxBandarSummary.acc} Acc · {idxBandarSummary.dist} Dist
             </span>
           </div>
           <p className="text-xs text-[#3A3A3C] dark:text-[#D1D1D6] leading-relaxed mt-1.5">
             {marketIntelligence?.stocksAndFlowSummary ||
-              'Synchronizing US institutional capitalization leaders, Jakarta IDX liquidity movers, and foreign net buy/sell flows across active sessions.'}
+              'Synchronizing US institutional capitalization leaders, Jakarta IDX liquidity movers, and Supply/Demand execution zones across active sessions.'}
           </p>
         </div>
 
@@ -682,104 +764,143 @@ export const TopStocksView: React.FC<TopStocksViewProps> = ({
         )}
       </section>
 
-      {/* Market & Category Filter Bar */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="inline-flex rounded-xl liquid-glass-pill p-1">
-          {(
-            [
-              {
-                id: 'all',
-                label: `All Markets (${(showUsSection ? activeUsList.length : 0) + activeIdxList.length})`,
-              },
-              { id: 'us', label: `United States (${activeUsList.length})` },
-              { id: 'id', label: `Indonesia IDX (${activeIdxList.length})` },
-            ] as const
-          ).map((tab) => (
-            <button
-              key={tab.id}
-              type="button"
-              onClick={() => setMarketFilter(tab.id)}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-colors ${
-                marketFilter === tab.id
-                  ? 'bg-[#0071E3] dark:bg-[#0A84FF] text-white shadow-sm'
-                  : 'text-[#4A4D57] dark:text-[#B4B8C4] hover:text-[#1C1C1E] dark:hover:text-white'
-              }`}
-            >
-              {tab.label}
-            </button>
-          ))}
-        </div>
-
-        <div className="inline-flex flex-wrap rounded-xl liquid-glass-pill p-1 gap-0.5">
-          {(
-            [
-              { id: 'impact', label: 'Highest Impact', idxOnly: false },
-              { id: 'gainers', label: 'Top Gainers', idxOnly: false },
-              { id: 'losers', label: 'Top Losers', idxOnly: false },
-              { id: 'foreignBuy', label: 'IDX Foreign Buy', idxOnly: true },
-              { id: 'foreignSell', label: 'IDX Foreign Sell', idxOnly: true },
-            ] as const
-          )
-            .filter((item) => (marketFilter === 'us' ? !item.idxOnly : true))
-            .map((dir) => (
-              <button
-                key={dir.id}
-                type="button"
-                onClick={() => {
-                  setDirectionFilter(dir.id);
-                  if (dir.idxOnly && marketFilter === 'all') {
-                    setMarketFilter('id');
-                  }
-                }}
-                className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-colors ${
-                  directionFilter === dir.id
-                    ? dir.id === 'foreignBuy'
-                      ? 'bg-[#16803C] text-white shadow-sm'
-                      : dir.id === 'foreignSell'
-                        ? 'bg-[#D7261C] text-white shadow-sm'
-                        : 'bg-white dark:bg-[#2C2C2E] text-[#1C1C1E] dark:text-white shadow-sm'
-                    : 'text-[#6C6C70] dark:text-[#8E8E93] hover:text-[#1C1C1E] dark:hover:text-white'
-                }`}
-              >
-                {dir.label}
-              </button>
-            ))}
-        </div>
-      </div>
-
-      {showIdxSection && (
-        <div className="flex flex-col gap-2.5">
-          <div
-            data-testid="idx-bandarmology-filter"
-            className="flex flex-wrap items-center gap-1.5 text-xs"
-          >
-            <span className="text-[11px] font-bold uppercase tracking-wider text-[#6C6C70] dark:text-[#9EB5C8] mr-1">
-              IDX Bandarmology:
-            </span>
+      {/* Market, Category & Action Setup Filter Bar */}
+      <div className="flex flex-col gap-2.5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="inline-flex rounded-xl liquid-glass-pill p-1">
             {(
               [
-                { id: 'all', label: 'All Phases' },
-                { id: 'Strong Accumulation', label: 'Strong Accumulation' },
-                { id: 'Early Accumulation', label: 'Early Accumulation' },
-                { id: 'Early Distribution', label: 'Early Distribution' },
-                { id: 'Strong Distribution', label: 'Strong Distribution' },
+                {
+                  id: 'all',
+                  label: `All Markets (${(showUsSection ? activeUsList.length : 0) + activeIdxList.length})`,
+                },
+                { id: 'us', label: `United States (${activeUsList.length})` },
+                { id: 'id', label: `Indonesia IDX (${activeIdxList.length})` },
               ] as const
-            ).map((phase) => (
+            ).map((tab) => (
               <button
-                key={phase.id}
+                key={tab.id}
                 type="button"
-                onClick={() => setBandarFilter(phase.id)}
-                className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold whitespace-nowrap shrink-0 transition-colors border ${
-                  bandarFilter === phase.id
-                    ? 'bg-[#1C1C1E] dark:bg-white text-white dark:text-[#111318] border-transparent shadow-sm'
-                    : 'liquid-glass-pill text-[#4A4D57] dark:text-[#C7CBD6] hover:text-[#1C1C1E] dark:hover:text-white'
+                onClick={() => setMarketFilter(tab.id)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-colors ${
+                  marketFilter === tab.id
+                    ? 'bg-[#0071E3] dark:bg-[#0A84FF] text-white shadow-sm'
+                    : 'text-[#4A4D57] dark:text-[#B4B8C4] hover:text-[#1C1C1E] dark:hover:text-white'
                 }`}
               >
-                {phase.label}
+                {tab.label}
               </button>
             ))}
           </div>
 
+          <div className="inline-flex flex-wrap rounded-xl liquid-glass-pill p-1 gap-0.5">
+            {(
+              [
+                { id: 'impact', label: 'Highest Impact', idxOnly: false },
+                { id: 'gainers', label: 'Top Gainers', idxOnly: false },
+                { id: 'losers', label: 'Top Losers', idxOnly: false },
+                { id: 'foreignBuy', label: 'IDX Foreign Buy', idxOnly: true },
+                { id: 'foreignSell', label: 'IDX Foreign Sell', idxOnly: true },
+              ] as const
+            )
+              .filter((item) => (marketFilter === 'us' ? !item.idxOnly : true))
+              .map((dir) => (
+                <button
+                  key={dir.id}
+                  type="button"
+                  onClick={() => {
+                    setDirectionFilter(dir.id);
+                    if (dir.idxOnly && marketFilter === 'all') {
+                      setMarketFilter('id');
+                    }
+                  }}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-colors ${
+                    directionFilter === dir.id
+                      ? dir.id === 'foreignBuy'
+                        ? 'bg-[#16803C] text-white shadow-sm'
+                        : dir.id === 'foreignSell'
+                          ? 'bg-[#D7261C] text-white shadow-sm'
+                          : 'bg-white dark:bg-[#2C2C2E] text-[#1C1C1E] dark:text-white shadow-sm'
+                      : 'text-[#6C6C70] dark:text-[#8E8E93] hover:text-[#1C1C1E] dark:hover:text-white'
+                  }`}
+                >
+                  {dir.label}
+                </button>
+              ))}
+          </div>
+        </div>
+
+        {/* Action Signal Setup Filter (BUY / SELL / WAIT) */}
+        <div
+          data-testid="stocks-action-filter"
+          className="flex flex-wrap items-center gap-1.5 text-xs"
+        >
+          <span className="text-[11px] font-bold uppercase tracking-wider text-[#6C6C70] dark:text-[#9EB5C8] mr-1">
+            Execution Setup:
+          </span>
+          {(
+            [
+              { id: 'all', label: 'All Setups' },
+              { id: 'BUY', label: 'BUY (Demand + Acc)' },
+              { id: 'SELL', label: 'SELL (Supply + Dist)' },
+              { id: 'WAIT', label: 'WAIT (Zone Pullback)' },
+            ] as const
+          ).map((act) => (
+            <button
+              key={act.id}
+              type="button"
+              onClick={() => setActionFilter(act.id)}
+              className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold whitespace-nowrap shrink-0 transition-colors border ${
+                actionFilter === act.id
+                  ? act.id === 'BUY'
+                    ? 'bg-[#16803C] text-white border-transparent shadow-sm'
+                    : act.id === 'SELL'
+                      ? 'bg-[#D7261C] text-white border-transparent shadow-sm'
+                      : act.id === 'WAIT'
+                        ? 'bg-[#B45309] text-white border-transparent shadow-sm'
+                        : 'bg-[#1C1C1E] dark:bg-white text-white dark:text-[#111318] border-transparent shadow-sm'
+                  : 'liquid-glass-pill text-[#4A4D57] dark:text-[#C7CBD6] hover:text-[#1C1C1E] dark:hover:text-white'
+              }`}
+            >
+              {act.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-2.5">
+        <div
+          data-testid="idx-bandarmology-filter"
+          className="flex flex-wrap items-center gap-1.5 text-xs"
+        >
+          <span className="text-[11px] font-bold uppercase tracking-wider text-[#6C6C70] dark:text-[#9EB5C8] mr-1">
+            Bandarmology Phase:
+          </span>
+          {(
+            [
+              { id: 'all', label: 'All Phases' },
+              { id: 'Strong Accumulation', label: 'Strong Accumulation' },
+              { id: 'Early Accumulation', label: 'Early Accumulation' },
+              { id: 'Early Distribution', label: 'Early Distribution' },
+              { id: 'Strong Distribution', label: 'Strong Distribution' },
+            ] as const
+          ).map((phase) => (
+            <button
+              key={phase.id}
+              type="button"
+              onClick={() => setBandarFilter(phase.id)}
+              className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold whitespace-nowrap shrink-0 transition-colors border ${
+                bandarFilter === phase.id
+                  ? 'bg-[#1C1C1E] dark:bg-white text-white dark:text-[#111318] border-transparent shadow-sm'
+                  : 'liquid-glass-pill text-[#4A4D57] dark:text-[#C7CBD6] hover:text-[#1C1C1E] dark:hover:text-white'
+              }`}
+            >
+              {phase.label}
+            </button>
+          ))}
+        </div>
+
+        {showIdxSection && (
           <div
             data-testid="idx-bandar-shift-monitor"
             className="rounded-xl liquid-glass-inset px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2.5 text-xs"
@@ -822,14 +943,14 @@ export const TopStocksView: React.FC<TopStocksViewProps> = ({
               </button>
             )}
           </div>
-        </div>
-      )}
+        )}
+      </div>
 
       {/* Tables */}
       {showUsSection && (
         <MarketMoversSection
           title={`United States · ${directionTitleSuffix}`}
-          subtitle="Ranked by institutional market-cap weight, dollar turnover, relative volume, and price displacement"
+          subtitle="Institutional Accumulation/Flow + Supply/Demand Execution Prices (USD)"
           session={sessions.us}
           stocks={activeUsList}
           loading={stocksLoading}
@@ -845,10 +966,10 @@ export const TopStocksView: React.FC<TopStocksViewProps> = ({
           title={`Indonesia (IDX / BEI) · ${directionTitleSuffix}`}
           subtitle={
             directionFilter === 'foreignBuy'
-              ? 'Top 10 Indonesian equities by net foreign institutional buy value (IDR)'
+              ? 'Top 10 Indonesian equities by net foreign institutional buy value (IDR) with Supply/Demand levels'
               : directionFilter === 'foreignSell'
-                ? 'Top 10 Indonesian equities by net foreign institutional sell value (IDR)'
-                : 'Top 10 institutional IDX/LQ45 equities ranked by market-cap impact, turnover & relative volume'
+                ? 'Top 10 Indonesian equities by net foreign institutional sell value (IDR) with Supply/Demand levels'
+                : 'Bandarmology + Foreign Flow + BEI Supply/Demand execution prices (Fraksi Harga IDR)'
           }
           session={sessions.idx}
           stocks={activeIdxList}
@@ -864,3 +985,4 @@ export const TopStocksView: React.FC<TopStocksViewProps> = ({
     </div>
   );
 };
+

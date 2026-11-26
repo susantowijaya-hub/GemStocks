@@ -2,6 +2,7 @@ import { expect, test, type Page } from '@playwright/test';
 
 const ALL_ROUTES = [
   { id: 'dashboard', navLabel: 'Markets' },
+  { id: 'ict', navLabel: 'ICT Radar' },
   { id: 'watchlist', navLabel: 'Watchlist' },
   { id: 'portfolio', navLabel: 'Portfolio' },
   { id: 'stocks', navLabel: 'Stocks' },
@@ -44,7 +45,7 @@ function attachErrorCollectors(page: Page) {
 }
 
 test.describe('Stocks Terminal E2E & Visual Contrast Regression', () => {
-  test('renders all 8 routes with zero console, hydration, or runtime errors', async ({
+  test('renders all 9 routes with zero console, hydration, or runtime errors', async ({
     page,
   }) => {
     test.setTimeout(120_000);
@@ -66,7 +67,8 @@ test.describe('Stocks Terminal E2E & Visual Contrast Regression', () => {
         .poll(() => new URL(page.url()).hash)
         .toBe(`#${route.id}`);
 
-      // Wait for lazy chunk fallback to settle
+      // Wait for lazy chunk fallback (MarketSkeleton) to settle
+      await expect(page.getByTestId('market-skeleton')).toHaveCount(0);
       await expect(page.getByText('Loading terminal view...')).toHaveCount(0);
       await expect(page.getByText('Session Recovery Needed')).toHaveCount(0);
       await expect(page.getByText('Unable to render')).toHaveCount(0);
@@ -82,8 +84,8 @@ test.describe('Stocks Terminal E2E & Visual Contrast Regression', () => {
       /hydration|did not match|failed to fetch dynamically imported/i.test(msg)
     );
     expect(hydrationIssues, 'No hydration or dynamic chunk errors').toEqual([]);
-    expect(consoleErrors, 'Zero console.error messages across all 8 routes').toEqual([]);
-    expect(pageErrors, 'Zero uncaught page errors across all 8 routes').toEqual([]);
+    expect(consoleErrors, 'Zero console.error messages across all 9 routes').toEqual([]);
+    expect(pageErrors, 'Zero uncaught page errors across all 9 routes').toEqual([]);
     expect(serverErrors, 'Zero 5xx responses from /api/* routes').toEqual([]);
   });
 
@@ -93,6 +95,7 @@ test.describe('Stocks Terminal E2E & Visual Contrast Regression', () => {
     const { consoleErrors, pageErrors } = attachErrorCollectors(page);
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto('/#dashboard', { waitUntil: 'domcontentloaded' });
+    await expect(page.getByTestId('market-skeleton')).toHaveCount(0);
     await expect(page.getByText('Loading terminal view...')).toHaveCount(0);
 
     // Ensure lazy widgets on dashboard have settled
@@ -413,10 +416,12 @@ test.describe('Stocks Terminal E2E & Visual Contrast Regression', () => {
       await page.waitForTimeout(250);
       expect(new URL(page.url()).hash).toBe('#dashboard');
 
-      // 2. Swipe inside MarketDepthCard depth curve guard -> wait for lazy card & verify stays on #dashboard
-      const depthHeading = page.getByText('Market Depth & Order Book');
-      await depthHeading.scrollIntoViewIfNeeded();
-      await expect(depthHeading).toBeVisible();
+      // 2. Swipe inside UnifiedMarketPulseCard Depth Book tab curve guard -> verify stays on #dashboard
+      const pulseCard = page.getByTestId('unified-market-pulse-card');
+      await pulseCard.scrollIntoViewIfNeeded();
+      await expect(pulseCard).toBeVisible();
+      await pulseCard.locator('[data-pulse-tab="depth"]').click();
+      await expect(pulseCard.getByText('Cumulative Depth Curve')).toBeVisible();
       const depthGuardCount = await page.locator('[data-no-view-swipe="true"]').count();
       expect(depthGuardCount).toBeGreaterThanOrEqual(2);
       await page.evaluate(() => {
@@ -477,21 +482,21 @@ test.describe('Stocks Terminal E2E & Visual Contrast Regression', () => {
         .poll(() => new URL(page.url()).hash)
         .toBe('#dashboard');
 
-      // 4. Mobile layout order: Technicals & Sentiment MUST render strictly above Correlation Matrix on 390px viewports
+      // 4. Mobile layout order: Unified Market Pulse card MUST render strictly above Correlation Matrix on 390px viewports
       await page.goto('/#dashboard', { waitUntil: 'domcontentloaded' });
       await page.waitForTimeout(450);
-      const technicalCard = page.getByTestId('technicals-sentiment-card');
+      const mobilePulseCard = page.getByTestId('unified-market-pulse-card');
       const correlationSection = page.getByTestId('correlation-matrix-section');
-      await technicalCard.scrollIntoViewIfNeeded();
-      await expect(technicalCard).toBeVisible();
+      await mobilePulseCard.scrollIntoViewIfNeeded();
+      await expect(mobilePulseCard).toBeVisible();
       await correlationSection.scrollIntoViewIfNeeded();
       await expect(correlationSection).toBeVisible();
 
-      const techBox = await technicalCard.boundingBox();
+      const pulseBox = await mobilePulseCard.boundingBox();
       const corrBox = await correlationSection.boundingBox();
-      expect(techBox).not.toBeNull();
+      expect(pulseBox).not.toBeNull();
       expect(corrBox).not.toBeNull();
-      expect(techBox!.y + techBox!.height).toBeLessThanOrEqual(corrBox!.y + 2);
+      expect(pulseBox!.y + pulseBox!.height).toBeLessThanOrEqual(corrBox!.y + 2);
 
       // 5. Mobile ambient liquid glass backdrop & collapsible BottomDock floating icon
       const backdropStyle = await page.getByTestId('ambient-glass-backdrop').evaluate((el) => {
@@ -523,7 +528,7 @@ test.describe('Stocks Terminal E2E & Visual Contrast Regression', () => {
   test('surfaces real-time multi-provider failover and cached snapshot diagnostics badge & drawer', async ({
     page,
   }) => {
-    test.setTimeout(120_000);
+    test.setTimeout(180_000);
     const { pageErrors } = attachErrorCollectors(page);
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto('/#dashboard', { waitUntil: 'domcontentloaded' });
@@ -680,52 +685,44 @@ test.describe('Stocks Terminal E2E & Visual Contrast Regression', () => {
     await expect(firstSparkSvg).toBeVisible();
     expect(await firstSparkSvg.locator('path').count()).toBeGreaterThanOrEqual(1);
 
-    // Verify Weighted Risk-On vs Risk-Off Market Sentiment Gauge
-    const riskGauge = page.getByTestId('risk-regime-gauge');
-    await riskGauge.scrollIntoViewIfNeeded();
-    await expect(riskGauge).toBeVisible();
-    const riskScore = Number(await page.getByTestId('risk-regime-score').innerText());
-    expect(riskScore).toBeGreaterThanOrEqual(0);
-    expect(riskScore).toBeLessThanOrEqual(100);
-    await expect(page.getByTestId('risk-regime-status')).toHaveText(
-      /Strong Risk-On|Risk-On|Neutral|Risk-Off|Strong Risk-Off/
+    // Verify redundant overlapping cards were consolidated into ONE UnifiedMarketPulseCard
+    await expect(page.getByTestId('risk-regime-gauge')).toHaveCount(0);
+    await expect(page.getByTestId('market-fear-greed-gauge')).toHaveCount(0);
+    await expect(page.getByTestId('headline-sentiment-gauge')).toHaveCount(0);
+    await expect(page.getByTestId('technicals-sentiment-card')).toHaveCount(0);
+    await expect(page.getByText('Index 3-Phase Session Briefings')).toHaveCount(0);
+
+    const pulseCard = page.getByTestId('unified-market-pulse-card');
+    await pulseCard.scrollIntoViewIfNeeded();
+    await expect(pulseCard).toBeVisible();
+    const compositeScore = Number(await page.getByTestId('unified-pulse-score').innerText());
+    expect(compositeScore).toBeGreaterThanOrEqual(0);
+    expect(compositeScore).toBeLessThanOrEqual(100);
+    await expect(page.getByTestId('unified-pulse-stance')).toHaveText(
+      /Strong Risk-On|Risk-On|Neutral|Balanced|Risk-Off|Strong Risk-Off/
     );
-    await expect(page.getByTestId('risk-regime-weighted-move')).toHaveText(/[+\-]?\d+\.\d{2}%/);
-    for (const sectorLabel of ['US Indices', 'Asia & IDX', 'Cyclicals & Crypto', 'Safe Havens (Inv)']) {
-      await expect(riskGauge).toContainText(sectorLabel);
-    }
+    await expect(pulseCard).toContainText('Risk-On');
+    await expect(pulseCard).toContainText('Fear/Greed');
+    await expect(pulseCard).toContainText('Headlines');
+    await expect(pulseCard).toContainText('Key Support');
 
-    // Verify Volatility-Driven Market Fear & Greed Sentiment Gauge
-    const volGauge = page.getByTestId('market-fear-greed-gauge');
-    await volGauge.scrollIntoViewIfNeeded();
-    await expect(volGauge).toBeVisible();
-    const volScore = Number(await page.getByTestId('market-fear-greed-score').innerText());
-    expect(volScore).toBeGreaterThanOrEqual(0);
-    expect(volScore).toBeLessThanOrEqual(100);
-    await expect(page.getByTestId('market-fear-greed-regime')).toHaveText(
-      /Compressed Vol|Normal Vol|Elevated Vol|Panic Vol/
-    );
-    await expect(volGauge).toContainText(/Extreme Fear|Fear|Neutral|Greed|Extreme Greed/);
+    // Switch internal tabs inside the single unified card (Depth Book + News & Vol)
+    await pulseCard.locator('[data-pulse-tab="depth"]').click();
+    await expect(pulseCard.getByText('Cumulative Depth Curve')).toBeVisible();
+    await pulseCard.locator('[data-pulse-tab="drivers"]').click();
+    await expect(pulseCard.getByText('Avg 5m Range')).toBeVisible();
+    await pulseCard.getByRole('tab', { name: 'Bull' }).click();
+    await pulseCard.getByRole('tab', { name: 'Bear' }).click();
+    await pulseCard.getByRole('tab', { name: 'Top' }).click();
+    await pulseCard.locator('[data-pulse-tab="overview"]').click();
 
-    // Verify Headline Sentiment SVG circular path gauge on MarketDashboardView
-    const sentimentCard = page.getByTestId('headline-sentiment-gauge');
-    await sentimentCard.scrollIntoViewIfNeeded();
-    await expect(sentimentCard).toBeVisible();
-    const pathCount = await sentimentCard.locator('svg path').count();
-    expect(pathCount).toBeGreaterThanOrEqual(2);
-    const scoreText = await page.getByTestId('headline-sentiment-score').innerText();
-    expect(Number(scoreText)).toBeGreaterThanOrEqual(0);
-    expect(Number(scoreText)).toBeLessThanOrEqual(100);
-    await expect(page.getByTestId('headline-sentiment-regime')).toHaveText(
-      /Strong Bullish|Bullish|Neutral|Bearish|Strong Bearish/
-    );
+    // Verify Key Statistics & Dynamic Timeframe Range incorporated directly inside chart
+    const chartStats = page.getByTestId('chart-key-statistics');
+    await chartStats.scrollIntoViewIfNeeded();
+    await expect(chartStats).toBeVisible();
+    await expect(page.getByTestId('chart-timeframe-range')).toContainText('Day Range');
 
-    // Interactive filter tabs inside the gauge card
-    await sentimentCard.getByRole('tab', { name: 'Bull' }).click();
-    await sentimentCard.getByRole('tab', { name: 'Bear' }).click();
-    await sentimentCard.getByRole('tab', { name: 'Top' }).click();
-
-    // Verify major FX currencies & granular intraday timeframes (1m..4h) + Candlestick toggle
+    // Verify major FX currencies & granular intraday timeframes (1m..4h) + Candlestick toggle + Dynamic Range switch
     await page.evaluate(() => window.scrollTo(0, 0));
     const fxTab = page.locator('main button').filter({ hasText: 'Currencies & Yields' }).first();
     await fxTab.click();
@@ -741,6 +738,7 @@ test.describe('Stocks Terminal E2E & Visual Contrast Regression', () => {
       await expect(page.locator('main button', { hasText: new RegExp(`^${tf}$`) })).toBeVisible();
     }
     await page.locator('main button', { hasText: /^15m$/ }).click();
+    await expect(page.getByTestId('chart-timeframe-range')).toContainText('15m Range');
     await chartToggle.getByRole('button', { name: 'Candles' }).click();
     const candleGroup = page.getByTestId('candlestick-series');
     await expect(candleGroup).toBeVisible();
@@ -751,40 +749,190 @@ test.describe('Stocks Terminal E2E & Visual Contrast Regression', () => {
     // Verify BTC/USD and XAU/USD also expose granular 1m..4h timeframes
     const commTab = page.locator('main button').filter({ hasText: 'Commodities & Crypto' }).first();
     await commTab.click();
-    await page.locator('main button').filter({ hasText: 'BTC/USD' }).first().click();
+    await page.locator('main button').filter({ hasText: 'Bitcoin' }).first().click();
     await expect(page.locator('main button', { hasText: /^1m$/ })).toBeVisible();
     await expect(page.locator('main button', { hasText: /^4h$/ })).toBeVisible();
     await page.locator('main button').filter({ hasText: 'Gold' }).first().click();
     await expect(page.locator('main button', { hasText: /^5m$/ })).toBeVisible();
     await expect(page.locator('main button', { hasText: /^1h$/ })).toBeVisible();
 
-    // Verify ICT Smart Money Signal Radar & Alert Drawer workflows (ICT + IDX Bandarmology)
-    const ictCard = page.getByTestId('ict-signal-card');
-    await ictCard.scrollIntoViewIfNeeded();
-    await expect(ictCard).toBeVisible();
-    await expect(ictCard).toContainText(/ICT BUY|ICT SELL|ICT NEUTRAL/);
+    // Verify ICT Liquidity & OTE Radar moved to its own chart-free #ict tab with Active/Deactive pop-up toggle & timestamps
     await page.evaluate(() => window.scrollTo(0, 0));
+    await page
+      .locator('header nav[aria-label="Primary Navigation"] button')
+      .filter({ hasText: 'ICT Radar' })
+      .first()
+      .click();
+    await expect.poll(() => new URL(page.url()).hash).toBe('#ict');
+
+    const ictView = page.getByTestId('ict-radar-view');
+    await expect(ictView).toBeVisible();
+    // Strictly zero charts inside #ict
+    await expect(ictView.getByTestId('candlestick-series')).toHaveCount(0);
+    await expect(ictView.locator('canvas')).toHaveCount(0);
+
+    const ictGrid = ictView.getByTestId('ict-pairs-grid');
+    await expect(ictGrid).toBeVisible();
+    for (const sym of ['BTC/USD', 'XAU/USD', 'EUR/USD', 'GBP/USD', 'USD/JPY', 'AUD/USD']) {
+      await expect(ictGrid).toContainText(sym);
+    }
+    await expect(ictGrid).not.toContainText('USD/IDR');
+    await expect(ictGrid).not.toContainText('USD/CNY');
+    await expect(ictGrid).not.toContainText('US10Y');
+    await expect(ictGrid).not.toContainText('ID10Y');
+    await expect(ictGrid).not.toContainText('DXY');
+
+    // Verify Volatility Noise Filter & Macro News Guard toggles + Relative Timestamps inside #ict
+    const volFilterToggle = ictView.getByTestId('ict-vol-filter-toggle');
+    await expect(volFilterToggle).toBeVisible();
+    await expect(volFilterToggle).toContainText('On');
+    await volFilterToggle.click();
+    await expect(volFilterToggle).toContainText('Off');
+    await volFilterToggle.click();
+    await expect(volFilterToggle).toContainText('On');
+
+    const newsGuardToggle = ictView.getByTestId('ict-news-guard-toggle');
+    await expect(newsGuardToggle).toBeVisible();
+    await expect(newsGuardToggle).toContainText('On');
+    await newsGuardToggle.click();
+    await expect(newsGuardToggle).toContainText('Off');
+    await newsGuardToggle.click();
+    await expect(newsGuardToggle).toContainText('On');
+
+    await expect(ictView.getByTestId('ict-focused-vol-status')).toContainText(/ATR \d+\.\d{3}%/);
+    const focusedSpotPlaque = ictView.getByTestId('ict-focused-spot-price');
+    await expect(focusedSpotPlaque).toBeVisible();
+    await expect(focusedSpotPlaque).toHaveClass(/spot-plaque-surface/);
+    await expect(focusedSpotPlaque.locator('.spot-price-3d-hero')).toBeVisible();
+    await expect(ictView.getByTestId('ict-spot-proximity')).toBeVisible();
+    await expect(ictView.getByTestId('ict-invalidation-box')).toBeVisible();
+    await expect(ictView.getByTestId('ict-invalidation-box')).toContainText('Allowed 15m ATR:');
+    await expect(ictView.getByTestId('ict-focused-relative-time')).toHaveText(/Just now|\d+[smhd] ago/);
+    await expect(ictGrid.locator('[data-testid="ict-signal-relative-time"]').first()).toHaveText(
+      /Just now|\d+[smhd] ago/
+    );
+    await expect(ictView.getByTestId('ict-action-callout')).toBeVisible();
+    await expect(ictView.getByTestId('ict-confluence-strip')).toBeVisible();
+
+    // Verify WAIT-state safety: never show IN ENTRY ZONE or live lot order sizing during WAIT
+    const focusedBadgeText = await ictView.getByTestId('ict-focused-signal-badge').innerText();
+    const posCalc = ictView.getByTestId('ict-position-calculator');
+    await expect(posCalc).toBeVisible();
+    if (focusedBadgeText.includes('WAIT')) {
+      await expect(ictView.getByTestId('ict-spot-proximity')).not.toContainText('IN ENTRY ZONE');
+      await expect(ictView.getByTestId('ict-spot-proximity')).toContainText(/Standby|Invalidated|Missed/);
+      await expect(posCalc).toContainText('Standby (WAIT)');
+      await expect(posCalc).toContainText('Unlocks on BUY/SELL');
+    }
+
+    // Verify Inline Position Size Calculator & Copy Ticket button
+    await posCalc.getByRole('button', { name: '2%' }).click();
+    await expect(posCalc).toContainText('Risk $200');
+    await posCalc.getByRole('button', { name: '1%' }).click();
+    await expect(posCalc).toContainText('Risk $100');
+
+    const copyTicketBtn = ictView.getByTestId('ict-copy-ticket-btn');
+    await expect(copyTicketBtn).toBeVisible();
+    await copyTicketBtn.click();
+    await expect(copyTicketBtn).toContainText('Copied');
+
+    await ictView.getByTestId('ict-guide-toggle').click();
+    await expect(ictView.getByTestId('ict-how-to-guide')).toBeVisible();
+    await ictView.getByTestId('ict-guide-toggle').click();
+    await expect(ictView.getByTestId('ict-how-to-guide')).toHaveCount(0);
+
+    await expect(ictView.getByTestId('ict-sort-toggle')).toBeVisible();
+    await ictView.getByTestId('ict-sort-volatility').click();
+    await expect(ictView.getByTestId('ict-sort-volatility')).toHaveAttribute('aria-pressed', 'true');
+    await ictView.getByTestId('ict-sort-occurrence').click();
+    await expect(ictView.getByTestId('ict-sort-occurrence')).toHaveAttribute('aria-pressed', 'true');
+
+    // Switch to Supply & Demand · Candle & Volume strategy system inside #ict, verify zero charts & batch scan
+    const strategySwitcher = ictView.getByTestId('radar-strategy-switcher');
+    await expect(strategySwitcher).toBeVisible();
+    await ictView.getByTestId('strategy-tab-sdcv').click();
+    await expect(ictView.getByTestId('strategy-tab-sdcv')).toHaveAttribute('aria-selected', 'true');
+    await expect(ictView.getByTestId('sdcv-pillar-strip')).toBeVisible();
+    await expect(ictView.getByTestId('ict-focused-spot-price')).toBeVisible();
+    await expect(ictView.getByTestId('ict-invalidation-box')).toBeVisible();
+    await expect(ictView).toContainText('Candle Reading:');
+    await expect(ictView).toContainText(/Relative Volume|Tick-Range Effort|Bar Volume/);
+    await expect(ictView.locator('canvas')).toHaveCount(0);
+
+    const sdcvBadgeText = await ictView.getByTestId('ict-focused-signal-badge').innerText();
+    if (sdcvBadgeText.includes('WAIT')) {
+      await expect(ictView.getByTestId('ict-spot-proximity')).not.toContainText('IN ENTRY ZONE');
+      await expect(posCalc).toContainText('Standby (WAIT)');
+    }
+
+    await ictView.getByTestId('ict-scan-now-btn').click();
+    await expect(ictView.getByTestId('ict-alert-log')).toContainText(/S&D (BUY|SELL|WAIT)/);
+
+    await ictView.getByTestId('strategy-tab-ict').click();
+    await expect(ictView.getByTestId('strategy-tab-ict')).toHaveAttribute('aria-selected', 'true');
+
+    // Toggle ICT Pop-up notifications Deactive -> Scan still appends to timestamped log without spawning ICT pop-up toast
+    const popupToggle = ictView.getByTestId('ict-popup-toggle');
+    await expect(popupToggle).toBeVisible();
+    await popupToggle.click();
+    await expect(popupToggle).toContainText('Deactive');
+
+    const alertLog = ictView.getByTestId('ict-alert-log');
+    const beforeLogCount = await alertLog.locator('[data-testid="ict-alert-timestamp"]').count();
+    await ictView.getByTestId('ict-scan-now-btn').click();
+    await expect
+      .poll(() => alertLog.locator('[data-testid="ict-alert-timestamp"]').count())
+      .toBeGreaterThan(beforeLogCount);
+    await expect(alertLog.locator('[data-testid="ict-alert-timestamp"]').first()).toContainText('WIB');
+    await expect(alertLog.locator('[data-testid="ict-alert-relative-time"]').first()).toHaveText(
+      /Just now|\d+[smhd] ago/
+    );
+    const firstOutcomeControls = alertLog.locator('[data-testid="alert-outcome-controls"]').first();
+    await expect(firstOutcomeControls).toBeVisible();
+    const winBtn = firstOutcomeControls.getByRole('button', { name: 'Win' });
+    await winBtn.click();
+    await expect(winBtn).toHaveAttribute('aria-pressed', 'true');
+
+    // Toast stack unmounts completely when no pop-up toasts exist; if non-ICT toast is present, ensure no ICT toast appeared
+    await page.waitForTimeout(250);
+    if ((await page.getByTestId('price-alert-toast-stack').count()) > 0) {
+      await expect(page.getByTestId('price-alert-toast-stack')).not.toContainText(/ICT (BUY|SELL|WAIT)/);
+    }
+
+    // Toggle back to Active -> Scan triggers ICT toast notification AND updates log
+    await popupToggle.click();
+    await expect(popupToggle).toContainText('Active');
+    await ictView.getByTestId('ict-scan-now-btn').click();
+    await expect(page.getByTestId('price-alert-toast-stack')).toContainText(/ICT (BUY|SELL|WAIT)/, { timeout: 10_000 });
+
+    // Navigate back to Markets (#dashboard) and verify Alert Drawer IDX Bandarmology & ICT scanning
+    await page
+      .locator('header nav[aria-label="Primary Navigation"] button')
+      .filter({ hasText: 'Markets' })
+      .first()
+      .click();
+    await expect.poll(() => new URL(page.url()).hash).toBe('#dashboard');
     await page.getByTestId('alerts-drawer-toggle').click();
     const alertDrawer = page.getByTestId('price-alert-drawer');
     await expect(alertDrawer).toBeVisible();
     await alertDrawer.getByRole('button', { name: 'Scan ICT' }).click();
-    await expect(alertDrawer).toContainText(/ICT (BUY|SELL)/);
+    await expect(alertDrawer).toContainText(/ICT (BUY|SELL|WAIT)/);
     await alertDrawer.getByTestId('scan-idx-bandar-btn').click();
     await alertDrawer.getByTestId('alert-filter-tabs').getByRole('tab', { name: /IDX Bandar/ }).click();
     await expect(alertDrawer).toContainText(/Early Acc|Strong Acc|IDX Bandar/);
     await alertDrawer.getByTestId('alert-filter-tabs').getByRole('tab', { name: /All/ }).click();
     await alertDrawer.getByRole('button', { name: 'Close alerts panel' }).click();
 
-    // Verify Icon-Only Collapsible BottomDock FAB hover expansion on desktop
+    // Verify Collapsible Left SideDock click-to-expand with illuminated navigation names
     const dockTrigger = page.getByTestId('bottom-dock-trigger');
     await expect(dockTrigger).toBeVisible();
     const triggerText = await dockTrigger.evaluate((el) => (el as HTMLElement).innerText.trim());
     expect(triggerText).toBe('');
-    await dockTrigger.hover();
+    await dockTrigger.click();
     const dockBar = page.getByTestId('bottom-dock-bar');
     await expect(dockBar).toBeVisible();
     const dockRouteText = await dockBar.locator('[data-route-id="stocks"]').evaluate((el) => (el as HTMLElement).innerText.trim());
-    expect(dockRouteText).toBe('');
+    expect(dockRouteText).toContain('Stocks');
 
     await dockBar.locator('[data-route-id="stocks"]').click();
     await expect
@@ -803,9 +951,13 @@ test.describe('Stocks Terminal E2E & Visual Contrast Regression', () => {
     await page.goto('/#stocks', { waitUntil: 'domcontentloaded' });
 
     await expect(page.getByTestId('idx-bandarmology-filter')).toBeVisible();
+    await expect(page.getByTestId('stocks-action-filter')).toBeVisible();
     await expect(page.getByTestId('idx-bandar-shift-monitor')).toBeVisible();
     const firstStockRow = page.locator('main tbody tr').first();
     await expect(firstStockRow).toBeVisible({ timeout: 15_000 });
+    await expect(firstStockRow).toContainText(/BUY|SELL|WAIT/);
+    await expect(firstStockRow).toContainText(/TP1/);
+    await expect(firstStockRow).toContainText(/SL/);
     await expect(
       page.locator('main').getByText(/Strong Acc|Early Acc|Neutral|Early Dist|Strong Dist/).first()
     ).toBeVisible({ timeout: 15_000 });
@@ -886,10 +1038,15 @@ test.describe('Stocks Terminal E2E & Visual Contrast Regression', () => {
     await expect(page.getByTestId('price-alert-toast-stack')).toContainText(expectedShiftRegex);
     await page.unrouteAll({ behavior: 'ignoreErrors' });
 
-    // Open SymbolDetailModal and verify Persistent Quick-Switch Intraday Tabs (1m..4h) + Candlestick chart
+    // Open SymbolDetailModal and verify Persistent Quick-Switch Intraday Tabs (1m..4h) + Execution Trade Plan + Candlestick chart
     await firstStockRow.click();
     const modal = page.getByTestId('symbol-detail-modal');
     await expect(modal).toBeVisible();
+    const tradePlanCard = modal.getByTestId('modal-trade-plan-card');
+    await expect(tradePlanCard).toBeVisible();
+    await expect(tradePlanCard).toContainText(/Execution Trade Plan/);
+    await expect(tradePlanCard).toContainText(/Stop Loss/);
+    await expect(tradePlanCard).toContainText(/Take Profit 1/);
     const mtfTabs = modal.getByTestId('symbol-detail-timeframe-tabs');
     await expect(mtfTabs).toBeVisible();
     for (const tf of ['1m', '5m', '15m', '30m', '1h', '4h']) {
@@ -1012,6 +1169,64 @@ test.describe('Stocks Terminal E2E & Visual Contrast Regression', () => {
     await digestModal.getByRole('button', { name: 'Close Daily Digest' }).click();
     await expect(digestModal).toHaveCount(0);
     await page.unrouteAll({ behavior: 'ignoreErrors' });
+
+    // Verify Share Studio (#extract): zero Support & Resistance and readable instrument names only
+    await dockTrigger.click();
+    await page.getByTestId('bottom-dock-bar').locator('[data-route-id="extract"]').click();
+    await expect.poll(() => new URL(page.url()).hash).toBe('#extract');
+    await expect(page.getByText('Scheduled Market Share Studio')).toBeVisible();
+    await expect(page.getByRole('button', { name: /Support & Resistance/i })).toHaveCount(0);
+    await page.getByRole('button', { name: /05:30 WIB Morning/i }).click();
+    const briefArea = page.getByLabel('Formatted brief for Telegram or WhatsApp');
+    const briefText = await briefArea.inputValue();
+    expect(briefText).toContain('S&P 500');
+    expect(briefText).toContain('Bitcoin');
+    expect(briefText).toContain('IDX Composite');
+    expect(briefText).not.toMatch(/\(SPX\)|\(IXIC\)|\(DJI\)|\(IHSG\)/);
+    expect(briefText).not.toMatch(/\|\s*S\s+[^·\n]+·\s*R\s+/);
+
+    // Verify Unified Market Intelligence Panel on #dashboard (4 legacy panels merged into 1)
+    await dockTrigger.click();
+    await page.getByTestId('bottom-dock-bar').locator('[data-route-id="dashboard"]').click();
+    await expect.poll(() => new URL(page.url()).hash).toBe('#dashboard');
+
+    const unifiedIntel = page.getByTestId('market-intelligence-unified-card');
+    await unifiedIntel.scrollIntoViewIfNeeded();
+    await expect(unifiedIntel).toBeVisible({ timeout: 15_000 });
+    await expect(unifiedIntel).toContainText('Unified Market Thesis & Outlook');
+    await expect(unifiedIntel).toContainText('Forward Market Outlook');
+    await expect(page.getByText('Headline, Rumor & Sentiment Watch')).toHaveCount(0);
+    await expect(page.getByText('Macro Data Implications (High & Mid)')).toHaveCount(0);
+    await expect(page.getByText('Compiled Multi-Source Market & Stocks Summary')).toHaveCount(0);
+
+    // Verify ForexFactory-mirrored Calendar (#calendar)
+    await dockTrigger.click();
+    await page.getByTestId('bottom-dock-bar').locator('[data-route-id="calendar"]').click();
+    await expect.poll(() => new URL(page.url()).hash).toBe('#calendar');
+
+    const ffCalendar = page.getByTestId('forex-calendar-view');
+    await expect(ffCalendar).toBeVisible();
+    await expect(ffCalendar).toContainText('ForexFactory Weekly Schedule');
+    await expect(ffCalendar.getByTestId('calendar-refresh-btn')).toBeVisible();
+    const rangeTablist = ffCalendar.getByTestId('calendar-range-filter');
+    await expect(rangeTablist).toHaveAttribute('role', 'tablist');
+    await expect(ffCalendar.getByTestId('calendar-range-this_week')).toHaveAttribute('role', 'tab');
+    await expect(ffCalendar.getByTestId('calendar-range-next_week')).toHaveAttribute('role', 'tab');
+    await expect(ffCalendar.getByTestId('calendar-range-this_month')).toHaveAttribute('role', 'tab');
+    for (const tier of ['high', 'med', 'low', 'holiday']) {
+      await expect(ffCalendar.getByTestId(`ff-impact-filter-${tier}`)).toBeVisible();
+    }
+    const calCurrencySelect = ffCalendar.getByLabel('Filter by currency');
+    await expect(calCurrencySelect).toBeVisible();
+    for (const cur of ['USD', 'EUR', 'GBP', 'JPY', 'AUD', 'CAD', 'CHF', 'NZD', 'CNY']) {
+      await expect(calCurrencySelect.locator(`option[value="${cur}"]`)).toHaveCount(1);
+    }
+    await expect(ffCalendar.locator('table thead')).toContainText('Actual');
+    await expect(ffCalendar.locator('table thead')).toContainText('Forecast');
+    await expect(ffCalendar.locator('table thead')).toContainText('Previous');
+    if ((await ffCalendar.getByTestId('calendar-actual-cell').count()) > 0) {
+      await expect(ffCalendar.getByTestId('calendar-actual-cell').first()).not.toContainText(/pending/i);
+    }
 
     expect(pageErrors).toEqual([]);
   });

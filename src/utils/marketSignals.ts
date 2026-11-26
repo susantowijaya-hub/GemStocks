@@ -4,12 +4,16 @@ import {
   FearGreedZone,
   MarketAsset,
   MarketSignalInfo,
+  OverallMarketFearGreed,
   RiskRegimeInfo,
   RiskRegimeSectorBreakdown,
   RiskRegimeStatus,
   SignalTier,
+  StockExecutionAction,
   StockMover,
+  StockTradePlan,
   Timeframe,
+  UnifiedMarketPulse,
   VolatilityFearGreedInfo,
 } from '../types/market';
 
@@ -544,24 +548,7 @@ export function getStockFearGreed(stock: StockMover): FearGreedInfo {
   return result;
 }
 
-export interface OverallMarketFearGreed {
-  score: number;
-  zone: FearGreedZone;
-  shortLabel: string;
-  history7d: number[];
-  delta1d: number;
-  greedCount: number;
-  neutralCount: number;
-  fearCount: number;
-  totalAssets: number;
-  driver: string;
-  sectors: Array<{
-    id: string;
-    label: string;
-    score: number;
-    zone: FearGreedZone;
-  }>;
-}
+export type { OverallMarketFearGreed };
 
 export function computeOverallMarketFearGreed(assets: MarketAsset[]): OverallMarketFearGreed {
   if (!assets || assets.length === 0) {
@@ -1098,5 +1085,255 @@ export function computeRiskRegimeSentiment(assets: MarketAsset[]): RiskRegimeInf
     sectors,
   };
 }
+
+export function computeUnifiedMarketPulse(params: {
+  activeAsset: MarketAsset;
+  assets: MarketAsset[];
+  volatility5mMap: Record<string, Asset5mVolatility>;
+  headlineSentimentScore: number;
+}): UnifiedMarketPulse {
+  const { activeAsset, assets, volatility5mMap, headlineSentimentScore } = params;
+  const riskRegime = computeRiskRegimeSentiment(assets);
+  const volatilityFearGreed = computeVolatilityFearGreed(assets, volatility5mMap);
+  const overallFearGreed = computeOverallMarketFearGreed(assets);
+  const activeSignal = getAssetSignal(activeAsset);
+  const activeFearGreed = getAssetFearGreed(activeAsset);
+
+  const fearGreedScore = clamp0100(
+    volatilityFearGreed.score * 0.55 + overallFearGreed.score * 0.45
+  );
+  const { zone: fearGreedZone } = getFearGreedZone(fearGreedScore);
+
+  const activeTechScore = clamp0100(
+    50 + Math.max(-45, Math.min(45, activeSignal.score))
+  );
+
+  // Unified 4-vector composite blending macro Risk-On/Off, Vol & Cross-Asset Fear/Greed,
+  // NLP headline sentiment, and active instrument technicals
+  const compositeScore = clamp0100(
+    riskRegime.score * 0.30 +
+      fearGreedScore * 0.25 +
+      clamp0100(headlineSentimentScore) * 0.20 +
+      (activeTechScore * 0.65 + activeFearGreed.score * 0.35) * 0.25
+  );
+
+  let stanceLabel: RiskRegimeStatus = 'Neutral';
+  let polarity: UnifiedMarketPulse['polarity'] = 'neutral';
+  if (compositeScore >= 65) {
+    stanceLabel = 'Strong Risk-On';
+    polarity = 'risk-on';
+  } else if (compositeScore >= 54) {
+    stanceLabel = 'Risk-On';
+    polarity = 'risk-on';
+  } else if (compositeScore <= 35) {
+    stanceLabel = 'Strong Risk-Off';
+    polarity = 'risk-off';
+  } else if (compositeScore <= 46) {
+    stanceLabel = 'Risk-Off';
+    polarity = 'risk-off';
+  }
+
+  const driver = `${stanceLabel} · ${fearGreedZone} (${fearGreedScore}/100) · ${volatilityFearGreed.volRegime} Vol`;
+
+  return {
+    compositeScore,
+    stanceLabel,
+    polarity,
+    fearGreedScore,
+    fearGreedZone,
+    driver,
+    riskRegime,
+    volatilityFearGreed,
+    overallFearGreed,
+    activeSignal,
+    activeFearGreed,
+  };
+}
+
+export function snapStockPriceToTick(price: number, currency: 'USD' | 'IDR'): number {
+  if (!Number.isFinite(price) || price <= 0) return 0;
+  if (currency !== 'IDR') {
+    return Number(price.toFixed(2));
+  }
+  const step =
+    price < 200
+      ? 1
+      : price < 500
+        ? 2
+        : price < 2000
+          ? 5
+          : price < 5000
+            ? 10
+            : 25;
+  return Math.max(step, Math.round(price / step) * step);
+}
+
+export function formatStockCurrencyValue(price: number, currency: 'USD' | 'IDR'): string {
+  if (!Number.isFinite(price) || price <= 0) return '—';
+  if (currency === 'IDR') {
+    return `Rp ${Math.round(price).toLocaleString('en-US')}`;
+  }
+  return `$${price.toLocaleString('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
+
+export function computeStockTradeStrategy(stock: StockMover): StockTradePlan {
+  if (
+    stock.tradePlan &&
+    stock.tradePlan.entryPrice > 0 &&
+    stock.tradePlan.stopLoss > 0 &&
+    stock.tradePlan.takeProfit1 > 0 &&
+    stock.tradePlan.takeProfit2 > 0
+  ) {
+    return stock.tradePlan;
+  }
+
+  const cur = stock.currency;
+  const px = Math.max(stock.price, stock.prevClose, 1);
+  const validPts = (stock.sparklinePoints ?? []).filter(
+    (v) => typeof v === 'number' && Number.isFinite(v) && v > 0
+  );
+  const seriesLow = validPts.length > 0 ? Math.min(...validPts) : px * 0.985;
+  const seriesHigh = validPts.length > 0 ? Math.max(...validPts) : px * 1.015;
+  const dayLow = stock.dayLow > 0 ? Math.min(stock.dayLow, px) : seriesLow;
+  const dayHigh = stock.dayHigh > 0 ? Math.max(stock.dayHigh, px) : seriesHigh;
+  const swingLow = Math.min(dayLow, seriesLow, stock.prevClose > 0 ? stock.prevClose * 0.992 : px * 0.985);
+  const swingHigh = Math.max(dayHigh, seriesHigh, stock.prevClose > 0 ? stock.prevClose * 1.008 : px * 1.015);
+  const totalSpan = Math.max(swingHigh - swingLow, px * 0.025);
+
+  const demandLow = snapStockPriceToTick(swingLow, cur);
+  const demandHigh = snapStockPriceToTick(swingLow + totalSpan * 0.24, cur);
+  const supplyLow = snapStockPriceToTick(swingHigh - totalSpan * 0.24, cur);
+  const supplyHigh = snapStockPriceToTick(swingHigh, cur);
+
+  const rangePos = Math.max(0, Math.min(1, (px - swingLow) / totalSpan));
+  const bandar = stock.bandarmology;
+  const bandarScore = bandar?.score ?? Math.round(Math.tanh(stock.changePercent / 2) * 35);
+  const accPressure = bandar?.accumulationPressure ?? 50;
+  const volRatio = bandar?.volumeRatio ?? 1.0;
+
+  let flowBonus = 0;
+  if (stock.foreignFlowSide === 'BUY' || (stock.foreignNetAmount ?? 0) > 0) flowBonus = 18;
+  else if (stock.foreignFlowSide === 'SELL' || (stock.foreignNetAmount ?? 0) < 0) flowBonus = -18;
+
+  const zoneBias = rangePos <= 0.38 ? 16 : rangePos >= 0.72 ? -14 : 0;
+  const composite = bandarScore * 0.65 + (accPressure - 50) * 0.65 + flowBonus + zoneBias;
+
+  let action: StockExecutionAction = 'WAIT';
+  if (composite >= 14 && rangePos <= 0.78) {
+    action = 'BUY';
+  } else if (composite <= -14 && rangePos >= 0.22) {
+    action = 'SELL';
+  }
+
+  const conviction = Math.max(
+    44,
+    Math.min(95, Math.round(52 + Math.abs(composite) * 0.55 + Math.min(12, Math.max(0, (volRatio - 1) * 8))))
+  );
+
+  const demandZoneLabel = `${formatStockCurrencyValue(demandLow, cur)} – ${formatStockCurrencyValue(demandHigh, cur)}`;
+  const supplyZoneLabel = `${formatStockCurrencyValue(supplyLow, cur)} – ${formatStockCurrencyValue(supplyHigh, cur)}`;
+  const bandarFlowBias =
+    stock.foreignFlowSide === 'BUY'
+      ? `Net Foreign Buy${stock.foreignNetLabel ? ` (${stock.foreignNetLabel})` : ''}`
+      : stock.foreignFlowSide === 'SELL'
+        ? `Net Foreign Sell${stock.foreignNetLabel ? ` (${stock.foreignNetLabel})` : ''}`
+        : bandar?.foreignBias || (accPressure >= 55 ? 'Smart-Money Inflow' : accPressure <= 45 ? 'Distribution Flow' : 'Balanced Flow');
+
+  const tickStep =
+    cur === 'IDR'
+      ? px < 200 ? 1 : px < 500 ? 2 : px < 2000 ? 5 : px < 5000 ? 10 : 25
+      : 0.01;
+
+  if (action === 'BUY') {
+    const rawEntry = rangePos <= 0.45 ? px : Math.min(px, (px + demandHigh) / 2);
+    const entryPrice = snapStockPriceToTick(rawEntry, cur);
+    const entryHi = snapStockPriceToTick(Math.max(entryPrice, Math.min(px, entryPrice * 1.006)), cur);
+    const stopLoss = snapStockPriceToTick(Math.min(demandLow - tickStep * 2, entryPrice - totalSpan * 0.42), cur);
+    const risk = Math.max(tickStep * 2, entryPrice - stopLoss);
+    const tp1 = snapStockPriceToTick(Math.max(supplyLow, entryPrice + risk * 1.5), cur);
+    const tp2 = snapStockPriceToTick(Math.max(tp1 + risk * 0.75, supplyHigh, entryPrice + risk * 2.4), cur);
+    const rrVal = Math.max(1.5, Number(((tp2 - entryPrice) / risk).toFixed(1)));
+    const phaseText = bandar?.phase && bandar.phase !== 'Neutral' ? bandar.phase : 'Demand Accumulation';
+
+    return {
+      action,
+      conviction,
+      strategyTag: `${phaseText} + Demand Entry`,
+      entryPrice,
+      entryZoneLabel:
+        entryHi > entryPrice
+          ? `${formatStockCurrencyValue(entryPrice, cur)} – ${formatStockCurrencyValue(entryHi, cur)}`
+          : formatStockCurrencyValue(entryPrice, cur),
+      takeProfit1: tp1,
+      takeProfit2: tp2,
+      stopLoss,
+      riskReward: `1:${rrVal.toFixed(1)}`,
+      demandZoneLabel,
+      supplyZoneLabel,
+      bandarFlowBias,
+      executionNote: `BUY limit/market near ${formatStockCurrencyValue(entryPrice, cur)} on ${bandarFlowBias}; take 50% at ${formatStockCurrencyValue(tp1, cur)} (Supply), trail runner to ${formatStockCurrencyValue(tp2, cur)}, SL below demand at ${formatStockCurrencyValue(stopLoss, cur)}.`,
+    };
+  }
+
+  if (action === 'SELL') {
+    const rawEntry = rangePos >= 0.55 ? px : Math.max(px, (px + supplyLow) / 2);
+    const entryPrice = snapStockPriceToTick(rawEntry, cur);
+    const entryLo = snapStockPriceToTick(Math.min(entryPrice, Math.max(px, entryPrice * 0.994)), cur);
+    const stopLoss = snapStockPriceToTick(Math.max(supplyHigh + tickStep * 2, entryPrice + totalSpan * 0.42), cur);
+    const risk = Math.max(tickStep * 2, stopLoss - entryPrice);
+    const tp1 = snapStockPriceToTick(Math.min(demandHigh, entryPrice - risk * 1.5), cur);
+    const tp2 = snapStockPriceToTick(Math.min(tp1 - risk * 0.75, demandLow, entryPrice - risk * 2.4), cur);
+    const rrVal = Math.max(1.5, Number(((entryPrice - tp2) / risk).toFixed(1)));
+    const phaseText = bandar?.phase && bandar.phase !== 'Neutral' ? bandar.phase : 'Supply Distribution';
+
+    return {
+      action,
+      conviction,
+      strategyTag: `${phaseText} + Supply Reject`,
+      entryPrice,
+      entryZoneLabel:
+        entryLo < entryPrice
+          ? `${formatStockCurrencyValue(entryLo, cur)} – ${formatStockCurrencyValue(entryPrice, cur)}`
+          : formatStockCurrencyValue(entryPrice, cur),
+      takeProfit1: tp1,
+      takeProfit2: tp2,
+      stopLoss,
+      riskReward: `1:${rrVal.toFixed(1)}`,
+      demandZoneLabel,
+      supplyZoneLabel,
+      bandarFlowBias,
+      executionNote: `SELL / Take-Profit near Supply ${formatStockCurrencyValue(entryPrice, cur)} on distribution flow; scale down into ${formatStockCurrencyValue(tp1, cur)} & Demand ${formatStockCurrencyValue(tp2, cur)}, hard SL above ${formatStockCurrencyValue(stopLoss, cur)}.`,
+    };
+  }
+
+  // WAIT setup: expose clear conditional buy limit at Demand Zone with protective SL and Supply TP targets
+  const entryPrice = snapStockPriceToTick(demandHigh, cur);
+  const stopLoss = snapStockPriceToTick(Math.min(demandLow - tickStep * 2, entryPrice - totalSpan * 0.45), cur);
+  const risk = Math.max(tickStep * 2, entryPrice - stopLoss);
+  const tp1 = snapStockPriceToTick(Math.max(supplyLow, entryPrice + risk * 1.5), cur);
+  const tp2 = snapStockPriceToTick(Math.max(tp1 + risk * 0.65, supplyHigh), cur);
+  const rrVal = Math.max(1.5, Number(((tp2 - entryPrice) / risk).toFixed(1)));
+
+  return {
+    action: 'WAIT',
+    conviction,
+    strategyTag: 'Neutral Zone · Await Pullback / Flow',
+    entryPrice,
+    entryZoneLabel: demandZoneLabel,
+    takeProfit1: tp1,
+    takeProfit2: tp2,
+    stopLoss,
+    riskReward: `1:${rrVal.toFixed(1)}`,
+    demandZoneLabel,
+    supplyZoneLabel,
+    bandarFlowBias,
+    executionNote: `WAIT mid-range: only place BUY limit inside Demand ${demandZoneLabel} on volume/foreign confirmation (TP ${formatStockCurrencyValue(tp1, cur)}, SL ${formatStockCurrencyValue(stopLoss, cur)}), or sell rallies into ${supplyZoneLabel}.`,
+  };
+}
+
+
 
 

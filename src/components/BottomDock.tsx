@@ -4,6 +4,8 @@ import {
   Bookmark,
   Briefcase,
   CalendarDays,
+  ChevronRight,
+  Crosshair,
   Gem,
   LayoutDashboard,
   LayoutGrid,
@@ -22,6 +24,7 @@ interface BottomDockProps {
   onNavigate: (route: AppRoute) => void;
   themeMode: ThemeMode;
   onToggleTheme: () => void;
+  onPrefetchRoute?: (route: AppRoute) => void;
 }
 
 const DOCK_ITEMS: {
@@ -35,6 +38,7 @@ const DOCK_ITEMS: {
   { id: 'portfolio', label: 'Portfolios & Lists', shortLabel: 'Portfolio', icon: Briefcase },
   { id: 'stocks', label: 'Top 10 Stocks (US & ID)', shortLabel: 'Stocks', icon: BarChart3 },
   { id: 'heatmap', label: 'Market Cap Heatmap', shortLabel: 'Heatmap', icon: LayoutGrid },
+  { id: 'ict', label: 'ICT Liquidity & OTE Radar', shortLabel: 'ICT Radar', icon: Crosshair },
   { id: 'news', label: 'Breaking News', shortLabel: 'News', icon: Newspaper },
   { id: 'calendar', label: 'Macro Calendar', shortLabel: 'Calendar', icon: CalendarDays },
   { id: 'extract', label: 'Extract & Social Brief', shortLabel: 'Share', icon: Share2 },
@@ -45,6 +49,7 @@ export const BottomDock: React.FC<BottomDockProps> = ({
   onNavigate,
   themeMode,
   onToggleTheme,
+  onPrefetchRoute,
 }) => {
   const [expanded, setExpanded] = useState(false);
   const navRef = useRef<HTMLElement | null>(null);
@@ -69,7 +74,7 @@ export const BottomDock: React.FC<BottomDockProps> = ({
   );
 
   const openDock = useCallback(
-    (autoCollapseMs = 4500) => {
+    (autoCollapseMs = 6500) => {
       setExpanded(true);
       scheduleCollapse(autoCollapseMs);
     },
@@ -113,7 +118,7 @@ export const BottomDock: React.FC<BottomDockProps> = ({
     if (!container) return;
     const activeBtn = container.querySelector<HTMLButtonElement>(`[data-route-id="${activeRoute}"]`);
     if (activeBtn) {
-      activeBtn.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
+      activeBtn.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
     }
   }, [activeRoute, expanded]);
 
@@ -124,46 +129,41 @@ export const BottomDock: React.FC<BottomDockProps> = ({
   return (
     <nav
       ref={navRef}
-      aria-label="Bottom Dock Navigation"
-      onMouseEnter={() => {
-        clearTimers();
-        setExpanded(true);
-      }}
-      onMouseLeave={() => scheduleCollapse(260)}
-      className="fixed bottom-3 sm:bottom-5 left-1/2 -translate-x-1/2 z-40 pb-safe pointer-events-none flex justify-center max-w-[calc(100vw-1rem)]"
+      aria-label="Left Side Dock Navigation"
+      className="fixed left-2 sm:left-3 top-1/2 -translate-y-1/2 z-40 pointer-events-none flex items-center max-h-[calc(100dvh-2rem)]"
     >
       <AnimatePresence mode="wait" initial={false}>
         {!expanded ? (
           <motion.button
-            key="dock-collapsed-fab"
+            key="side-dock-pill"
             data-testid="bottom-dock-trigger"
             type="button"
             aria-expanded="false"
-            aria-label={`Quick terminal navigation (${activeItem.shortLabel})`}
-            title={activeItem.label}
-            initial={{ opacity: 0, scale: 0.88, y: 8 }}
-            animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.88, y: 6 }}
+            aria-label={`Open side navigation (${activeItem.shortLabel})`}
+            title={`Open navigation (${activeItem.label})`}
+            initial={{ opacity: 0, scale: 0.9, x: -8 }}
+            animate={{ opacity: 1, scale: 1, x: 0 }}
+            exit={{ opacity: 0, scale: 0.9, x: -8 }}
             transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
             whileTap={{ scale: 0.94 }}
-            onClick={() => openDock(4500)}
-            onTouchStart={() => openDock(4500)}
-            onFocus={() => setExpanded(true)}
-            className="pointer-events-auto liquid-glass-strong w-12 h-12 rounded-2xl flex items-center justify-center shadow-xl hover:scale-[1.04] active:scale-[0.96] transition-transform focus:outline-none text-[#1C1C1E] dark:text-white"
+            onClick={() => openDock(6500)}
+            className="pointer-events-auto liquid-glass-strong w-7 h-14 sm:w-8 sm:h-16 rounded-full flex flex-col items-center justify-center gap-0.5 shadow-xl hover:scale-105 active:scale-95 transition-transform focus:outline-none text-[#1C1C1E] dark:text-white border border-black/10 dark:border-white/20"
           >
-            <ActiveIcon className="w-5 h-5 shrink-0" />
+            <ActiveIcon className="w-3.5 h-3.5 shrink-0" />
+            <ChevronRight className="w-3 h-3 opacity-70 shrink-0" />
           </motion.button>
         ) : (
           <motion.div
-            key="dock-expanded-bar"
+            key="side-dock-expanded"
             data-testid="bottom-dock-bar"
-            initial={{ opacity: 0, scale: 0.92, y: 12 }}
-            animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.92, y: 10 }}
+            initial={{ opacity: 0, scale: 0.92, x: -14 }}
+            animate={{ opacity: 1, scale: 1, x: 0 }}
+            exit={{ opacity: 0, scale: 0.92, x: -12 }}
             transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
             ref={dockScrollRef}
-            onTouchStart={() => openDock(4500)}
-            className="pointer-events-auto w-full sm:w-auto overflow-x-auto no-scrollbar rounded-2xl p-1.5 sm:p-2 flex items-center justify-start sm:justify-center gap-1 sm:gap-1.5 liquid-glass-strong shadow-2xl"
+            onMouseEnter={clearTimers}
+            onMouseLeave={() => scheduleCollapse(2500)}
+            className="pointer-events-auto w-[172px] sm:w-[186px] max-h-[calc(100dvh-2.5rem)] overflow-y-auto no-scrollbar rounded-2xl p-2 flex flex-col items-stretch justify-start gap-1 liquid-glass-strong shadow-[0_14px_38px_rgba(0,0,0,0.22),0_0_24px_rgba(56,189,248,0.18)] dark:shadow-[0_18px_46px_rgba(0,0,0,0.72),0_0_28px_rgba(251,191,36,0.20)] border border-black/10 dark:border-white/20"
           >
             {DOCK_ITEMS.map((item) => {
               const Icon = item.icon;
@@ -173,79 +173,92 @@ export const BottomDock: React.FC<BottomDockProps> = ({
                   key={item.id}
                   data-route-id={item.id}
                   type="button"
-                  whileTap={{ scale: 0.9 }}
+                  whileTap={{ scale: 0.96 }}
+                  onMouseEnter={() => onPrefetchRoute?.(item.id)}
+                  onFocus={() => onPrefetchRoute?.(item.id)}
                   onClick={() => {
                     onNavigate(item.id);
-                    scheduleCollapse(360);
+                    scheduleCollapse(260);
                   }}
                   aria-label={item.label}
                   title={item.label}
-                  className={`relative group shrink-0 flex items-center justify-center w-11 h-11 rounded-xl transition-colors sm:hover:-translate-y-0.5 focus:outline-none ${
+                  className={`relative group shrink-0 flex items-center gap-2.5 px-3 py-2 rounded-xl transition-all sm:hover:translate-x-0.5 focus:outline-none ${
                     isActive
-                      ? 'text-[#1C1C1E] dark:text-white'
-                      : 'text-[#4A4D57] dark:text-[#B4B8C4] hover:text-[#1C1C1E] dark:hover:text-white'
+                      ? 'text-[#0B172A] dark:text-white'
+                      : 'text-[#1E293B] dark:text-[#F1F5F9] hover:text-[#005BB8] dark:hover:text-white'
                   }`}
                 >
                   {isActive && (
                     <motion.span
                       layoutId="dock-active-tab-pill"
                       transition={{ type: 'spring', stiffness: 460, damping: 30 }}
-                      className="absolute inset-0 rounded-xl bg-white/90 dark:bg-white/18 border border-black/10 dark:border-white/20 shadow-sm"
+                      className="absolute inset-0 rounded-xl bg-white/95 dark:bg-white/20 border border-[#38BDF8]/55 dark:border-[#FBBF24]/55 shadow-[0_0_18px_rgba(56,189,248,0.45),0_0_8px_rgba(255,255,255,0.8)] dark:shadow-[0_0_20px_rgba(251,191,36,0.42),0_0_8px_rgba(255,255,255,0.24)]"
                     />
                   )}
                   <motion.span
-                    animate={
-                      isActive ? { scale: [1, 1.18, 1], y: [0, -1, 0] } : { scale: 1, y: 0 }
-                    }
-                    transition={{ duration: 0.26 }}
-                    className="relative z-10 inline-flex items-center justify-center"
+                    animate={isActive ? { scale: [1, 1.14, 1] } : { scale: 1 }}
+                    transition={{ duration: 0.24 }}
+                    className={`relative z-10 inline-flex items-center justify-center shrink-0 ${
+                      isActive
+                        ? 'text-[#0066CC] dark:text-[#FDE68A] drop-shadow-[0_0_8px_rgba(56,189,248,0.75)] dark:drop-shadow-[0_0_8px_rgba(251,191,36,0.85)]'
+                        : 'drop-shadow-[0_0_6px_rgba(255,255,255,0.7)] dark:drop-shadow-[0_0_6px_rgba(255,255,255,0.35)]'
+                    }`}
                   >
-                    <Icon className="w-5 h-5" />
+                    <Icon className="w-4 h-4" />
                   </motion.span>
-                  <span className="hidden lg:group-hover:block absolute -top-9 px-2.5 py-1 rounded-md bg-[#1C1C1E] dark:bg-black/95 text-white text-[10px] font-semibold pointer-events-none whitespace-nowrap border border-white/10 shadow-lg">
-                    {item.label}
+                  <span
+                    className={`relative z-10 text-xs font-extrabold tracking-tight truncate transition-all ${
+                      isActive
+                        ? '[text-shadow:0_0_10px_rgba(255,255,255,0.98),0_0_18px_rgba(56,189,248,0.78)] dark:[text-shadow:0_0_10px_rgba(255,255,255,0.95),0_0_20px_rgba(251,191,36,0.85)]'
+                        : '[text-shadow:0_0_8px_rgba(255,255,255,0.95),0_0_14px_rgba(56,189,248,0.48)] dark:[text-shadow:0_0_8px_rgba(255,255,255,0.55),0_0_14px_rgba(251,191,36,0.45)] group-hover:[text-shadow:0_0_10px_rgba(255,255,255,1),0_0_18px_rgba(56,189,248,0.75)] dark:group-hover:[text-shadow:0_0_10px_rgba(255,255,255,0.9),0_0_18px_rgba(251,191,36,0.75)]'
+                    }`}
+                  >
+                    {item.shortLabel}
                   </span>
                 </motion.button>
               );
             })}
 
-            <div className="h-6 w-px bg-black/10 dark:bg-white/15 mx-0.5 shrink-0" />
+            <div className="w-full h-px bg-black/10 dark:bg-white/15 my-0.5 shrink-0" />
 
             <motion.button
               type="button"
-              whileTap={{ scale: 0.9 }}
+              whileTap={{ scale: 0.96 }}
               onClick={() => {
                 onToggleTheme();
-                scheduleCollapse(2400);
+                scheduleCollapse(3000);
               }}
               aria-label={`Cycle theme (${activeThemeMeta.label})`}
               title={`Theme: ${activeThemeMeta.label} (click to cycle)`}
-              className="hidden sm:flex relative group shrink-0 items-center justify-center w-11 h-11 rounded-xl text-[#6C6C70] dark:text-[#8E8E93] hover:bg-black/5 dark:hover:bg-white/10 hover:text-[#1C1C1E] dark:hover:text-white transition-colors hover:-translate-y-0.5"
+              className="relative group shrink-0 flex items-center gap-2.5 px-3 py-2 rounded-xl text-[#1E293B] dark:text-[#F1F5F9] hover:bg-black/5 dark:hover:bg-white/10 transition-colors"
             >
               {themeMode === 'obsidian' ? (
-                <Moon className="w-5 h-5" />
+                <Moon className="w-4 h-4 shrink-0 text-[#FBBF24] drop-shadow-[0_0_8px_rgba(251,191,36,0.65)]" />
               ) : themeMode === 'parchment' ? (
-                <Gem className="w-5 h-5" />
+                <Gem className="w-4 h-4 shrink-0 text-[#C2410C] drop-shadow-[0_0_8px_rgba(251,146,60,0.55)]" />
               ) : (
-                <Sun className="w-5 h-5" />
+                <Sun className="w-4 h-4 shrink-0 text-[#0071E3] drop-shadow-[0_0_8px_rgba(56,189,248,0.65)]" />
               )}
-              <span className="hidden lg:group-hover:block absolute -top-9 px-2.5 py-1 rounded-md bg-[#1C1C1E] dark:bg-black/95 text-white text-[10px] font-semibold pointer-events-none whitespace-nowrap border border-white/10 shadow-lg">
-                {activeThemeMeta.label} · Cycle
+              <span className="text-xs font-bold truncate [text-shadow:0_0_8px_rgba(255,255,255,0.9),0_0_14px_rgba(56,189,248,0.45)] dark:[text-shadow:0_0_8px_rgba(255,255,255,0.55),0_0_14px_rgba(251,191,36,0.45)]">
+                {activeThemeMeta.shortLabel} Theme
               </span>
             </motion.button>
 
             <motion.button
               type="button"
-              whileTap={{ scale: 0.9 }}
+              whileTap={{ scale: 0.96 }}
               onClick={() => {
                 clearTimers();
                 setExpanded(false);
               }}
-              aria-label="Collapse floating dock"
-              title="Minimize dock"
-              className="shrink-0 flex items-center justify-center w-10 h-10 rounded-xl text-[#6C6C70] dark:text-[#9EB5C8] hover:bg-black/5 dark:hover:bg-white/10 hover:text-[#1C1C1E] dark:hover:text-white transition-colors"
+              aria-label="Hide side navigation dock"
+              title="Collapse dock"
+              className="shrink-0 flex items-center gap-2.5 px-3 py-1.5 rounded-xl text-[#4A4D57] dark:text-[#C7CBD6] hover:bg-black/5 dark:hover:bg-white/10 hover:text-[#1C1C1E] dark:hover:text-white transition-colors"
             >
-              <X className="w-4 h-4" />
+              <X className="w-4 h-4 shrink-0" />
+              <span className="text-[11px] font-bold truncate [text-shadow:0_0_6px_rgba(255,255,255,0.85)] dark:[text-shadow:0_0_8px_rgba(255,255,255,0.45)]">
+                Hide Dock
+              </span>
             </motion.button>
           </motion.div>
         )}
@@ -253,4 +266,3 @@ export const BottomDock: React.FC<BottomDockProps> = ({
     </nav>
   );
 };
-

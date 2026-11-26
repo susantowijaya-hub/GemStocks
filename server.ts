@@ -219,9 +219,16 @@ async function startServer() {
   });
 
   // Live Macroeconomic Calendar
-  app.get('/api/calendar/events', async (_req: Request, res: Response) => {
+  app.get('/api/calendar/events', async (req: Request, res: Response) => {
     try {
-      const cal = await fetchLiveCalendar();
+      const range =
+        typeof req.query.range === 'string'
+          ? (req.query.range as 'this_week' | 'next_week' | 'this_month' | 'next_month' | 'custom')
+          : undefined;
+      const from = typeof req.query.from === 'string' ? req.query.from : undefined;
+      const to = typeof req.query.to === 'string' ? req.query.to : undefined;
+      const force = req.query.refresh === '1' || req.query.force === '1';
+      const cal = await fetchLiveCalendar({ range, from, to, force });
       res.json(cal);
     } catch (err) {
       console.error('Failed to fetch live calendar:', err);
@@ -698,6 +705,23 @@ async function startServer() {
   const distDir = path.resolve(__dirname, 'dist');
 
   if (isProd && fs.existsSync(distDir)) {
+    app.use((req: Request, res: Response, next) => {
+      if (req.method !== 'GET' || req.path.startsWith('/api/')) return next();
+      const acceptEnc = String(req.headers['accept-encoding'] || '');
+      if (!acceptEnc.includes('br')) return next();
+
+      const relPath = req.path === '/' ? '/index.html' : req.path;
+      const safePath = path.normalize(relPath).replace(/^(\.\.[/\\])+/, '');
+      const fullPath = path.join(distDir, safePath);
+      const brPath = `${fullPath}.br`;
+      if (fullPath.startsWith(distDir) && fs.existsSync(brPath) && fs.statSync(brPath).isFile()) {
+        res.setHeader('Content-Encoding', 'br');
+        res.setHeader('Vary', 'Accept-Encoding');
+        res.type(fullPath);
+        return res.sendFile(brPath);
+      }
+      return next();
+    });
     app.use(express.static(distDir, { maxAge: '1h' }));
     app.get('*', (req: Request, res: Response) => {
       if (req.path.startsWith('/api/')) {

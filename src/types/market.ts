@@ -1,4 +1,4 @@
-export type AppRoute = 'dashboard' | 'watchlist' | 'portfolio' | 'stocks' | 'heatmap' | 'news' | 'calendar' | 'extract';
+export type AppRoute = 'dashboard' | 'watchlist' | 'portfolio' | 'stocks' | 'heatmap' | 'news' | 'calendar' | 'ict' | 'extract';
 
 export type ThemeMode = 'obsidian' | 'arctic' | 'parchment';
 
@@ -8,6 +8,7 @@ export interface CandlePoint {
   h: number;
   l: number;
   c: number;
+  v?: number;
 }
 
 export type Timeframe =
@@ -62,6 +63,105 @@ export interface IctSignalAnalysis {
   currencyPrefix?: string;
   unitSuffix?: string;
   evaluatedAt: number;
+  htfBias?: 'Bullish' | 'Bearish' | 'Ranging';
+  killzone?: string;
+  invalidationNote?: string;
+  liquidityTarget?: string;
+  fvgZone?: string;
+  obZone?: string;
+  oteZone?: string;
+  precisionScore?: number;
+  scoreBreakdown?: {
+    sweep: number;
+    displacementMss: number;
+    imbalanceFvgOb: number;
+    oteFib: number;
+    htfConfluence: number;
+  };
+  atrPct?: number;
+  volatilityThresholdPct?: number;
+  volatilityMaxPct?: number;
+  volatilityStatus?: 'in-range' | 'too-low' | 'too-high' | 'warming';
+  volatilityPassed?: boolean;
+  atrSource?: '15m' | 'scaled' | 'warming';
+  executionStatus?: 'active' | 'standby' | 'invalidated' | 'missed';
+  projectedLevelsSummary?: string;
+  assetClassLabel?: 'Crypto (BTC/USD)' | 'Commodities (XAU/USD)' | 'G10 FX';
+  invalidationTrigger?: string;
+  sessionLabel?: string;
+  htfBiasDetail?: string;
+  sweepMssStatus?: string;
+  stopLossReason?: string;
+  tp1?: string;
+  tp2?: string;
+  tp3?: string;
+  tp1Label?: string;
+  tp2Label?: string;
+  tp3Label?: string;
+  pyramidNote?: string;
+  asianHigh?: number;
+  asianLow?: number;
+  asianRangeAtrRatio?: number;
+  entryLowNum?: number;
+  entryHighNum?: number;
+  stopLossNum?: number;
+  tp1Num?: number;
+  tp2Num?: number;
+  tp3Num?: number;
+  isClosedCandleConfirmed?: boolean;
+  candleStageLabel?: 'Confirmed Close' | 'Forming Preview';
+  newsBlackoutActive?: boolean;
+  newsBlackoutReason?: string;
+}
+
+export interface SdCandleVolumeSignal {
+  assetId: string;
+  symbol: string;
+  name: string;
+  assetClassLabel: 'Crypto (BTC/USD)' | 'Commodities (XAU/USD)' | 'G10 FX';
+  direction: IctDirection;
+  confidence: number;
+  timeframe: Timeframe;
+  currentPrice: number;
+  decimals: number;
+  currencyPrefix?: string;
+  unitSuffix?: string;
+  evaluatedAt: number;
+  zoneBias: 'Demand' | 'Supply' | 'Mid-Range';
+  zoneStatus: 'Fresh' | 'Tested 1x' | 'Mid-Range';
+  demandZone: string;
+  supplyZone: string;
+  candlePattern: string;
+  candleTone: 'bull' | 'bear' | 'neutral';
+  candleDetail: string;
+  volumeRatio: number;
+  volumeState: 'Expansion' | 'Above Avg' | 'Normal' | 'Dry / Low';
+  volumeSource: 'Bar Volume (OHLCV)' | 'Relative Volume' | 'Tick-Range Effort';
+  entryZone: string;
+  stopLoss: string;
+  tp1: string;
+  tp2: string;
+  riskReward: string;
+  atr15mPct: number;
+  volatilityMinPct: number;
+  volatilityMaxPct: number;
+  volatilityStatus: 'in-range' | 'too-low' | 'too-high' | 'warming';
+  volatilityPassed: boolean;
+  atrSource?: '15m' | 'scaled' | 'warming';
+  executionStatus?: 'active' | 'standby' | 'invalidated' | 'missed';
+  projectedLevelsSummary?: string;
+  invalidationTrigger: string;
+  actionSummary: string;
+  triggers: string[];
+  entryLowNum?: number;
+  entryHighNum?: number;
+  stopLossNum?: number;
+  tp1Num?: number;
+  tp2Num?: number;
+  isClosedCandleConfirmed?: boolean;
+  candleStageLabel?: 'Confirmed Close' | 'Forming Preview';
+  newsBlackoutActive?: boolean;
+  newsBlackoutReason?: string;
 }
 
 export type WatchlistCategory =
@@ -150,13 +250,30 @@ export interface EditorialInsight {
   summary: string;
 }
 
+export type EconomicCalendarCurrency =
+  | 'USD'
+  | 'EUR'
+  | 'GBP'
+  | 'JPY'
+  | 'AUD'
+  | 'CAD'
+  | 'CHF'
+  | 'NZD'
+  | 'CNY'
+  | 'IDR';
+
+export type EconomicCalendarImpact = 'HIGH' | 'MED' | 'LOW' | 'HOLIDAY';
+
+export type CalendarRangePreset = 'this_week' | 'next_week' | 'this_month' | 'next_month' | 'custom';
+
 export interface EconomicEvent {
   id: string;
   timeWib: string;
   isoDate?: string;
+  dateGroupLabel?: string;
   day: 'today' | 'tomorrow' | 'week';
-  currency: 'USD' | 'IDR' | 'CNY' | 'EUR' | 'JPY';
-  impact: 'HIGH' | 'MED';
+  currency: EconomicCalendarCurrency;
+  impact: EconomicCalendarImpact;
   title: string;
   description: string;
   actual: string;
@@ -231,6 +348,24 @@ export interface CalendarCatalyst {
   description: string;
 }
 
+export type StockExecutionAction = 'BUY' | 'SELL' | 'WAIT';
+
+export interface StockTradePlan {
+  action: StockExecutionAction;
+  conviction: number; // 0..100
+  strategyTag: string;
+  entryPrice: number;
+  entryZoneLabel: string;
+  takeProfit1: number;
+  takeProfit2: number;
+  stopLoss: number;
+  riskReward: string;
+  demandZoneLabel: string;
+  supplyZoneLabel: string;
+  bandarFlowBias: string;
+  executionNote: string;
+}
+
 export interface StockMover {
   symbol: string;
   name: string;
@@ -252,6 +387,7 @@ export interface StockMover {
   foreignFlowSide?: 'BUY' | 'SELL';
   foreignSourceLabel?: string;
   bandarmology?: BandarmologyAnalysis;
+  tradePlan?: StockTradePlan;
 }
 
 export interface StocksMoversBucket {
@@ -456,13 +592,15 @@ export interface PriceAlertItem {
   triggeredAt: number;
   read: boolean;
   alertKind?: 'volatility' | 'ict' | 'bandarmology';
-  ictAction?: 'BUY' | 'SELL';
+  ictStrategy?: 'ict' | 'sdcv';
+  ictAction?: 'BUY' | 'SELL' | 'WAIT';
   ictSetup?: string;
   entryZone?: string;
   stopLoss?: string;
   targetPrice?: string;
   ictTimeframe?: Timeframe;
   confidence?: number;
+  outcomeStatus?: 'pending' | 'win' | 'be' | 'loss';
   bandarFromPhase?: BandarmologyPhase;
   bandarToPhase?: BandarmologyPhase;
   bandarScore?: number;
@@ -501,6 +639,35 @@ export interface IndexSessionBrief {
   keyLevels: string;
 }
 
+export interface UnifiedCatalystDriver {
+  id: string;
+  kind: 'FLOW' | 'WIRE' | 'MACRO';
+  tag: string;
+  title: string;
+  implication: string;
+  tone: 'bull' | 'bear' | 'neutral';
+  routeTarget: AppRoute;
+}
+
+export interface UnifiedMarketSynthesis {
+  regimeTag:
+    | 'Risk-On Expansion'
+    | 'Selective Rotation'
+    | 'Macro Event Caution'
+    | 'Defensive De-Risking';
+  convictionPct: number;
+  executiveThesis: string;
+  catalysts: UnifiedCatalystDriver[];
+  scenarios: {
+    horizonLabel: string;
+    bullTrigger: string;
+    bullTarget: string;
+    baseCase: string;
+    bearTrigger: string;
+    bearTarget: string;
+  };
+}
+
 export interface MarketIntelligenceResponse {
   updatedAt: string;
   headline: string;
@@ -529,6 +696,7 @@ export interface MarketIntelligenceResponse {
   forwardPrediction: string;
   sessionConditionAndTrigger?: string;
   oneSentenceSummary?: string;
+  unifiedSynthesis?: UnifiedMarketSynthesis;
   indexSessions: IndexSessionBrief[];
   aiRefined: boolean;
 }
@@ -717,6 +885,40 @@ export interface RiskRegimeInfo {
   driver: string;
   sectors: RiskRegimeSectorBreakdown[];
 }
+
+export interface OverallMarketFearGreed {
+  score: number;
+  zone: FearGreedZone;
+  shortLabel: string;
+  history7d: number[];
+  delta1d: number;
+  greedCount: number;
+  neutralCount: number;
+  fearCount: number;
+  totalAssets: number;
+  driver: string;
+  sectors: Array<{
+    id: string;
+    label: string;
+    score: number;
+    zone: FearGreedZone;
+  }>;
+}
+
+export interface UnifiedMarketPulse {
+  compositeScore: number; // 0..100 composite sentiment
+  stanceLabel: RiskRegimeStatus;
+  polarity: 'risk-on' | 'neutral' | 'risk-off';
+  fearGreedScore: number; // 0..100 blended volatility + cross-asset Fear & Greed
+  fearGreedZone: FearGreedZone;
+  driver: string;
+  riskRegime: RiskRegimeInfo;
+  volatilityFearGreed: VolatilityFearGreedInfo;
+  overallFearGreed: OverallMarketFearGreed;
+  activeSignal: MarketSignalInfo;
+  activeFearGreed: FearGreedInfo;
+}
+
 
 
 

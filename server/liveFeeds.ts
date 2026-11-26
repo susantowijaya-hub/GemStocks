@@ -44,6 +44,7 @@ export interface CandlePoint {
   h: number;
   l: number;
   c: number;
+  v?: number;
 }
 
 export interface LiveChartResponse {
@@ -78,9 +79,10 @@ export interface LiveCalendarItem {
   id: string;
   timeWib: string;
   isoDate: string;
+  dateGroupLabel?: string;
   day: 'today' | 'tomorrow' | 'week';
-  currency: 'USD' | 'IDR' | 'CNY' | 'EUR' | 'JPY';
-  impact: 'HIGH' | 'MED';
+  currency: 'USD' | 'EUR' | 'GBP' | 'JPY' | 'AUD' | 'CAD' | 'CHF' | 'NZD' | 'CNY' | 'IDR';
+  impact: 'HIGH' | 'MED' | 'LOW' | 'HOLIDAY';
   title: string;
   description: string;
   actual: string;
@@ -134,6 +136,24 @@ export interface BandarmologyAnalysis {
   summary: string;
 }
 
+export type StockExecutionAction = 'BUY' | 'SELL' | 'WAIT';
+
+export interface StockTradePlan {
+  action: StockExecutionAction;
+  conviction: number;
+  strategyTag: string;
+  entryPrice: number;
+  entryZoneLabel: string;
+  takeProfit1: number;
+  takeProfit2: number;
+  stopLoss: number;
+  riskReward: string;
+  demandZoneLabel: string;
+  supplyZoneLabel: string;
+  bandarFlowBias: string;
+  executionNote: string;
+}
+
 export interface StockMover {
   symbol: string;
   name: string;
@@ -155,6 +175,7 @@ export interface StockMover {
   foreignFlowSide?: 'BUY' | 'SELL';
   foreignSourceLabel?: string;
   bandarmology?: BandarmologyAnalysis;
+  tradePlan?: StockTradePlan;
 }
 
 export interface StocksMoversBucket {
@@ -228,6 +249,7 @@ const newsCache: { entry: CacheEntry<{ stories: LiveNewsItem[]; updatedAt: strin
   entry: null,
 };
 const calendarCache: { entry: CacheEntry<LiveCalendarResponse> | null } = { entry: null };
+const calendarRangeCache = new Map<string, CacheEntry<LiveCalendarResponse>>();
 const stocksMoversCache: { entry: CacheEntry<StocksMoversResponse> | null } = { entry: null };
 const heatmapCache: { entry: CacheEntry<MarketHeatmapResponse> | null } = { entry: null };
 
@@ -2117,6 +2139,7 @@ export async function fetchLiveChart(
       const rawOpens = quoteObj?.open ?? [];
       const rawHighs = quoteObj?.high ?? [];
       const rawLows = quoteObj?.low ?? [];
+      const rawVolumes = quoteObj?.volume ?? [];
       const rawTimestamps = item?.timestamp ?? [];
       let points: number[] = [];
       let timestamps: number[] = [];
@@ -2133,6 +2156,8 @@ export async function fetchLiveChart(
           const o = typeof rawO === 'number' && Number.isFinite(rawO) ? Number(rawO.toFixed(cfg.decimals)) : prevC;
           const rawH = rawHighs[i];
           const rawL = rawLows[i];
+          const rawV = rawVolumes[i];
+          const v = typeof rawV === 'number' && Number.isFinite(rawV) && rawV > 0 ? rawV : undefined;
           const h = typeof rawH === 'number' && Number.isFinite(rawH)
             ? Number(Math.max(rawH, o, c).toFixed(cfg.decimals))
             : Number(Math.max(o, c).toFixed(cfg.decimals));
@@ -2142,7 +2167,7 @@ export async function fetchLiveChart(
 
           points.push(c);
           timestamps.push(tsMs);
-          candles.push({ t: tsMs, o, h, l, c });
+          candles.push(v !== undefined ? { t: tsMs, o, h, l, c, v } : { t: tsMs, o, h, l, c });
         }
       }
 
@@ -2156,12 +2181,14 @@ export async function fetchLiveChart(
         for (let i = 0; i < candles.length; i += step) {
           const chunk = candles.slice(i, i + step);
           if (chunk.length === 0) continue;
+          const volSum = chunk.reduce((acc, x) => acc + (typeof x.v === 'number' ? x.v : 0), 0);
           aggCandles.push({
             t: chunk[chunk.length - 1].t,
             o: Number(chunk[0].o.toFixed(cfg.decimals)),
             h: Number(Math.max(...chunk.map((x) => x.h)).toFixed(cfg.decimals)),
             l: Number(Math.min(...chunk.map((x) => x.l)).toFixed(cfg.decimals)),
             c: Number(chunk[chunk.length - 1].c.toFixed(cfg.decimals)),
+            ...(volSum > 0 ? { v: volSum } : {}),
           });
         }
         candles = aggCandles;
@@ -2833,17 +2860,24 @@ function classifyDay(d: Date): 'today' | 'tomorrow' | 'week' {
   return 'week';
 }
 
+function isUnpublishedActual(actual?: string | null): boolean {
+  if (!actual) return true;
+  const trimmed = actual.trim();
+  return !trimmed || /^(pending|—|-|n\/a)$/i.test(trimmed);
+}
+
 function computeDeviation(actual?: string, forecast?: string): {
   label: string;
   type: 'beat' | 'miss' | 'neutral';
 } {
-  if (!actual || !actual.trim() || actual === 'Pending') {
-    return { label: 'Upcoming', type: 'neutral' };
+  if (isUnpublishedActual(actual)) {
+    return { label: '-', type: 'neutral' };
   }
-  if (!forecast || !forecast.trim() || forecast === '—') {
+  const cleanActual = actual!.trim();
+  if (!forecast || !forecast.trim() || forecast === '—' || forecast === '-') {
     return { label: 'Released', type: 'neutral' };
   }
-  const numActual = parseFloat(actual.replace(/[^0-9.-]/g, ''));
+  const numActual = parseFloat(cleanActual.replace(/[^0-9.-]/g, ''));
   const numForecast = parseFloat(forecast.replace(/[^0-9.-]/g, ''));
   if (!Number.isFinite(numActual) || !Number.isFinite(numForecast)) {
     return { label: 'Reported', type: 'neutral' };
@@ -2866,10 +2900,9 @@ async function fetchCalendarViaGemini(): Promise<LiveCalendarItem[]> {
 
   const todayWib = getWibDateKey(new Date());
   const prompt =
-    `Today is ${todayWib} (Asia/Jakarta UTC+7). Search the web for the actual macroeconomic calendar releases for this week (including US Retail Sales, Industrial Production, Jobless Claims, CPI/PPI, Fed speeches, Bank Indonesia BI-Rate, Japan GDP/Trade, Eurozone CPI/PMI, and China data). ` +
+    `Today is ${todayWib} (Asia/Jakarta UTC+7). Search the web for the upcoming macroeconomic calendar schedule for this week (including US Retail Sales, Industrial Production, Jobless Claims, CPI/PPI, Fed speeches, Bank Indonesia BI-Rate, Japan GDP/Trade, Eurozone CPI/PMI, and China data). ` +
     `Return ONLY a raw JSON array of up to 12 events (no markdown fences) where each object has: ` +
-    `{"title":"...", "currency":"USD|IDR|CNY|EUR|JPY", "impact":"HIGH|MED", "isoDate":"YYYY-MM-DDTHH:mm:ss+07:00", "description":"...", "actual":"...", "forecast":"...", "previous":"..."}. ` +
-    `Use "Pending" for actual if the release time in WIB has not happened yet.`;
+    `{"title":"...", "currency":"USD|IDR|CNY|EUR|JPY", "impact":"HIGH|MED", "isoDate":"YYYY-MM-DDTHH:mm:ss+07:00", "description":"...", "forecast":"...", "previous":"..."}.`;
 
   const res = await ai.models.generateContent({
     model: 'gemini-4-hydrogen',
@@ -2890,7 +2923,6 @@ async function fetchCalendarViaGemini(): Promise<LiveCalendarItem[]> {
     impact?: string;
     isoDate?: string;
     description?: string;
-    actual?: string;
     forecast?: string;
     previous?: string;
   }>;
@@ -2905,25 +2937,24 @@ async function fetchCalendarViaGemini(): Promise<LiveCalendarItem[]> {
         ? (ev.currency as LiveCalendarItem['currency'])
         : 'USD';
       const impact: 'HIGH' | 'MED' = ev.impact === 'HIGH' ? 'HIGH' : 'MED';
-      const actual = ev.actual?.trim() || 'Pending';
       const forecast = ev.forecast?.trim() || '—';
       const previous = ev.previous?.trim() || '—';
-      const dev = computeDeviation(actual, forecast);
 
       return {
         id: `cal-ai-${idx}-${validDate.getTime()}`,
         timeWib: formatWibTimeLabel(validDate),
         isoDate: validDate.toISOString(),
+        dateGroupLabel: formatWibDateGroup(validDate),
         day: classifyDay(validDate),
         currency: curr,
         impact,
         title: String(ev.title),
         description: String(ev.description || 'Official Macroeconomic Release'),
-        actual,
+        actual: '-',
         forecast,
         previous,
-        deviationLabel: dev.label,
-        deviationType: dev.type,
+        deviationLabel: '-',
+        deviationType: 'neutral' as const,
       };
     });
 }
@@ -2931,12 +2962,9 @@ async function fetchCalendarViaGemini(): Promise<LiveCalendarItem[]> {
 function formatTvMetric(
   val: number | null | undefined,
   unit?: string,
-  scale?: string,
-  isActual = false,
-  isFuture = false
+  scale?: string
 ): string {
   if (val === null || val === undefined || !Number.isFinite(val)) {
-    if (isActual && isFuture) return 'Pending';
     return '—';
   }
   const absStr =
@@ -2954,291 +2982,794 @@ function formatTvMetric(
   return `${sign}${absStr}${sc}${unit ? ` ${unit}` : ''}`;
 }
 
-function computeTvDeviation(
-  actual: number | null | undefined,
-  forecast: number | null | undefined,
-  unit?: string,
-  scale?: string,
-  isFuture = false
-): { label: string; type: 'beat' | 'miss' | 'neutral' } {
-  if (actual === null || actual === undefined || !Number.isFinite(actual)) {
-    return { label: isFuture ? 'Upcoming' : 'Pending', type: 'neutral' };
-  }
-  if (forecast === null || forecast === undefined || !Number.isFinite(forecast)) {
-    return { label: 'Released', type: 'neutral' };
-  }
-  const diff = actual - forecast;
-  if (Math.abs(diff) < 1e-6) {
-    return { label: 'In-line', type: 'neutral' };
-  }
-  const mag =
-    Math.abs(diff) >= 100
-      ? Math.abs(diff).toFixed(1).replace(/\.0$/, '')
-      : Number(Math.abs(diff).toFixed(2)).toString();
-  const suffix = unit === '%' ? '%' : scale || '';
-  return diff > 0
-    ? { label: `Beat (+${mag}${suffix})`, type: 'beat' }
-    : { label: `Miss (-${mag}${suffix})`, type: 'miss' };
+const FF_ALLOWED_CURRENCIES = new Set<LiveCalendarItem['currency']>([
+  'USD',
+  'EUR',
+  'GBP',
+  'JPY',
+  'AUD',
+  'CAD',
+  'CHF',
+  'NZD',
+  'CNY',
+]);
+
+let ffLastFetchAttemptAt = 0;
+let ffLastWarmSnapshot: LiveCalendarItem[] = [];
+
+function formatWibDateGroup(d: Date): string {
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Jakarta',
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+  }).format(d);
 }
 
-export async function fetchLiveCalendar(): Promise<LiveCalendarResponse> {
-  const now = Date.now();
-  if (calendarCache.entry) {
-    if (calendarCache.entry.expiresAt > now) {
-      return calendarCache.entry.data;
-    }
-    if (now - calendarCache.entry.expiresAt < 900_000) {
-      void fetchLiveCalendarFresh().catch(() => null);
-      return calendarCache.entry.data;
-    }
-  }
-  return fetchLiveCalendarFresh();
+function formatWibClockOnly(d: Date): string {
+  return `${new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Jakarta',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(d)} WIB`;
 }
 
-async function fetchLiveCalendarFresh(): Promise<LiveCalendarResponse> {
-  const now = Date.now();
-  const calStart = Date.now();
-  return coalesceInFlight('live-calendar', calendarCache.entry?.data, async () => {
+function mapFfImpact(rawImpact?: string): LiveCalendarItem['impact'] {
+  const norm = (rawImpact || '').trim().toLowerCase();
+  if (norm === 'high') return 'HIGH';
+  if (norm === 'medium' || norm === 'med') return 'MED';
+  if (norm === 'holiday') return 'HOLIDAY';
+  return 'LOW';
+}
 
-  let events: LiveCalendarItem[] = [];
-  let source = 'Live Macro Feed';
-
-  // Primary source: TradingView Live Economic Calendar API
-  try {
-    const fromIso = new Date(now - 36 * 3600_000).toISOString();
-    const toIso = new Date(now + 6 * 86400_000).toISOString();
-    const tvUrl = `https://economic-calendar.tradingview.com/events?from=${encodeURIComponent(
-      fromIso
-    )}&to=${encodeURIComponent(toIso)}&countries=US,ID,JP,EU,CN`;
-
-    const res = await fetch(tvUrl, {
-      headers: {
-        ...UA_HEADERS,
-        Origin: 'https://www.tradingview.com',
-        Referer: 'https://www.tradingview.com/',
-      },
-      signal: AbortSignal.timeout(9000),
-    });
-
-    if (res.ok) {
-      const json = (await res.json()) as {
-        status?: string;
-        result?: Array<{
-          id?: string;
-          title?: string;
-          country?: string;
-          currency?: string;
-          period?: string;
-          source?: string;
-          comment?: string;
-          actual?: number | null;
-          forecast?: number | null;
-          previous?: number | null;
-          unit?: string;
-          scale?: string;
-          importance?: number;
-          date?: string;
-        }>;
-      };
-
-      const countryCurrencyMap: Record<string, LiveCalendarItem['currency']> = {
-        US: 'USD',
-        ID: 'IDR',
-        CN: 'CNY',
-        EU: 'EUR',
-        JP: 'JPY',
-      };
-      const allowedCurrencies = new Set<LiveCalendarItem['currency']>([
-        'USD',
-        'IDR',
-        'CNY',
-        'EUR',
-        'JPY',
-      ]);
-
-      const rawList = (json.result ?? [])
-        .filter((ev) => ev.title && ev.date && typeof ev.importance === 'number' && ev.importance >= 0)
-        .sort((a, b) => Date.parse(a.date!) - Date.parse(b.date!));
-
-      // Keep all High-impact, Indonesian (IDR), and Today/Tomorrow events first, capped at 36 rows
-      const mappedAll: LiveCalendarItem[] = rawList.map((ev, idx) => {
-        const d = new Date(ev.date!);
-        const isFuture = d.getTime() > now;
-        const currCandidate = String(ev.currency || '') as LiveCalendarItem['currency'];
-        const curr = allowedCurrencies.has(currCandidate)
-          ? currCandidate
-          : countryCurrencyMap[String(ev.country || '')] || 'USD';
-        const impact: 'HIGH' | 'MED' = ev.importance === 1 ? 'HIGH' : 'MED';
-        const actual = formatTvMetric(ev.actual, ev.unit, ev.scale, true, isFuture);
-        const forecast = formatTvMetric(ev.forecast, ev.unit, ev.scale, false, isFuture);
-        const previous = formatTvMetric(ev.previous, ev.unit, ev.scale, false, isFuture);
-        const dev = computeTvDeviation(ev.actual, ev.forecast, ev.unit, ev.scale, isFuture);
-        const cleanComment = (ev.comment || '').replace(/\s+/g, ' ').trim();
-        const shortComment =
-          cleanComment.length > 105 ? `${cleanComment.slice(0, 102).trim()}…` : cleanComment;
-        const descParts = [ev.source, ev.period, shortComment].filter(Boolean);
-
-        return {
-          id: `tv-${ev.id || idx}-${d.getTime()}`,
-          timeWib: formatWibTimeLabel(d),
-          isoDate: d.toISOString(),
-          day: classifyDay(d),
-          currency: curr,
-          impact,
-          title: String(ev.title),
-          description: descParts.join(' · ') || `${curr} Macroeconomic Release`,
-          actual,
-          forecast,
-          previous,
-          deviationLabel: dev.label,
-          deviationType: dev.type,
-        };
-      });
-
-      const isRelevantMacroRelease = (title: string, impact: 'HIGH' | 'MED') => {
-        if (impact === 'HIGH') return true;
-        return /(gdp|cpi|ppi|pce|pmi|retail|sales|trade|export|import|industrial|manufacturing|unemployment|jobless|payrolls|employment|confidence|sentiment|inflation|rate|minutes|housing|building|orders|inventories|money supply|m2|foreign exchange|fx reserves|balance|current account)/i.test(
-          title
-        );
-      };
-
-      const priority = mappedAll.filter(
-        (e) =>
-          e.impact === 'HIGH' ||
-          e.currency === 'IDR' ||
-          ((e.day === 'today' || e.day === 'tomorrow' || e.day === 'week') &&
-            isRelevantMacroRelease(e.title, e.impact))
-      );
-      events = (priority.length >= 16 ? priority : mappedAll).slice(0, 44);
-      if (events.length > 0) {
-        source = 'TradingView Live Macroeconomic Calendar';
-      }
-    }
-  } catch {
-    // fallback below
-  }
-
-  // Secondary fallback: ForexFactory weekly JSON feed
-  if (events.length === 0) {
-    try {
-      const res = await fetch('https://nfs.faireconomy.media/ff_calendar_thisweek.json', {
-        headers: UA_HEADERS,
-        signal: AbortSignal.timeout(8000),
-      });
-
-      if (res.ok) {
-        const contentType = res.headers.get('content-type') || '';
-        if (contentType.includes('json')) {
-          const raw = (await res.json()) as Array<{
-            title?: string;
-            country?: string;
-            date?: string;
-            impact?: string;
-            actual?: string;
-            forecast?: string;
-            previous?: string;
-          }>;
-          const allowed = new Set(['USD', 'IDR', 'CNY', 'EUR', 'JPY']);
-          events = raw
-            .filter(
-              (item) =>
-                item.title &&
-                item.date &&
-                (item.impact === 'High' || item.impact === 'Medium')
-            )
-            .map((item, idx) => {
-              const d = new Date(item.date!);
-              const curr = allowed.has(String(item.country))
-                ? (item.country as LiveCalendarItem['currency'])
-                : 'USD';
-              const actual = item.actual?.trim() || (d.getTime() > now ? 'Pending' : '—');
-              const forecast = item.forecast?.trim() || '—';
-              const previous = item.previous?.trim() || '—';
-              const dev = computeDeviation(actual, forecast);
-
-              return {
-                id: `ff-${idx}-${d.getTime()}`,
-                timeWib: formatWibTimeLabel(d),
-                isoDate: d.toISOString(),
-                day: classifyDay(d),
-                currency: curr,
-                impact: item.impact === 'High' ? 'HIGH' : 'MED',
-                title: String(item.title),
-                description: `${item.country || 'Global'} Macroeconomic Release`,
-                actual,
-                forecast,
-                previous,
-                deviationLabel: dev.label,
-                deviationType: dev.type,
-              };
-            });
-          source = 'ForexFactory Weekly Macro Feed';
-        }
-      }
-    } catch {
-      // fallback below
-    }
-  }
-
-  // Tertiary fallback: Gemini + Google Search Grounding
-  if (events.length === 0) {
-    try {
-      events = await fetchCalendarViaGemini();
-      if (events.length > 0) {
-        source = 'Google Search Grounded Macro Calendar';
-      }
-    } catch {
-      // keep empty -> client falls back safely
-    }
-  }
-
-  // Find next upcoming HIGH impact event (or next MED event) for live countdown
-  const futureEvents = events
-    .filter((e) => Date.parse(e.isoDate) > now)
-    .sort((a, b) => Date.parse(a.isoDate) - Date.parse(b.isoDate));
-  const upcomingCatalyst =
-    futureEvents.find((e) => e.impact === 'HIGH') ?? futureEvents[0] ?? null;
-
-  const nextCatalyst = upcomingCatalyst
-    ? {
-        title: upcomingCatalyst.title,
-        currency: upcomingCatalyst.currency,
-        timeWib: upcomingCatalyst.timeWib,
-        targetEpochMs: Date.parse(upcomingCatalyst.isoDate),
-        description: upcomingCatalyst.description,
-      }
-    : null;
-
-  const payload: LiveCalendarResponse = {
-    events,
-    nextCatalyst,
-    source,
-    updatedAt: new Date().toISOString(),
+function parseFfXmlFallback(xml: string): LiveCalendarItem[] {
+  const items: LiveCalendarItem[] = [];
+  const blocks = xml.match(/<event>[\s\S]*?<\/event>/gi) ?? [];
+  const readTag = (block: string, tag: string): string => {
+    const m = block.match(new RegExp(`<${tag}>(?:<!\\[CDATA\\[)?([\\s\\S]*?)(?:\\]\\]>)?<\\/${tag}>`, 'i'));
+    return m ? m[1].trim() : '';
   };
 
-  const calLatency = Date.now() - calStart;
-  if (events.length > 0) {
-    calendarCache.entry = { data: payload, expiresAt: now + 1800_000 };
-    const isFailoverCal = source.includes('ForexFactory') || source.includes('Google Search');
-    updateProviderMetric('news_cal', {
-      status: isFailoverCal ? 'failover' : 'live',
-      activeSource: isFailoverCal ? `RSS + ${source}` : 'RSS + TradingView Cal',
-      latencyMs: calLatency,
-      lastSuccessAt: Date.now(),
-      isCachedFallback: false,
-      fallbackReason: isFailoverCal ? `Calendar fell back to ${source}` : undefined,
+  blocks.forEach((block, idx) => {
+    const title = readTag(block, 'title');
+    const country = readTag(block, 'country').toUpperCase();
+    const dateStr = readTag(block, 'date'); // MM-DD-YYYY (US Eastern)
+    const timeStr = readTag(block, 'time'); // e.g. 9:45pm or All Day
+    const impactStr = readTag(block, 'impact');
+    const rawActual = readTag(block, 'actual');
+    const forecast = readTag(block, 'forecast') || '—';
+    const previous = readTag(block, 'previous') || '—';
+
+    if (!title || !dateStr || !FF_ALLOWED_CURRENCIES.has(country as LiveCalendarItem['currency'])) {
+      return;
+    }
+
+    const dm = dateStr.match(/^(\d{2})-(\d{2})-(\d{4})$/);
+    if (!dm) return;
+    let hours = 0;
+    let mins = 0;
+    const isAllDay = !timeStr || /all day|tentative/i.test(timeStr);
+    if (!isAllDay) {
+      const tm = timeStr.match(/^(\d{1,2}):(\d{2})(am|pm)$/i);
+      if (tm) {
+        hours = Number(tm[1]) % 12;
+        if (tm[3].toLowerCase() === 'pm') hours += 12;
+        mins = Number(tm[2]);
+      }
+    }
+    const isoRaw = `${dm[3]}-${dm[1]}-${dm[2]}T${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}:00Z`;
+    const d = new Date(isoRaw);
+    if (!Number.isFinite(d.getTime())) return;
+
+    const impact = mapFfImpact(impactStr);
+    const actual = isUnpublishedActual(rawActual) ? '-' : rawActual.trim();
+    const dev = computeDeviation(actual, forecast);
+
+    items.push({
+      id: `ff-xml-${idx}-${d.getTime()}`,
+      timeWib: impact === 'HOLIDAY' || isAllDay ? 'All Day' : formatWibClockOnly(d),
+      isoDate: d.toISOString(),
+      dateGroupLabel: formatWibDateGroup(d),
+      day: classifyDay(d),
+      currency: country as LiveCalendarItem['currency'],
+      impact,
+      title,
+      description: `${country} · ${impact === 'HIGH' ? 'High Impact' : impact === 'MED' ? 'Medium Impact' : impact === 'HOLIDAY' ? 'Bank Holiday' : 'Low Impact'}`,
+      actual,
+      forecast,
+      previous,
+      deviationLabel: dev.label,
+      deviationType: dev.type,
     });
-  } else if (calendarCache.entry?.data) {
-    updateProviderMetric('news_cal', {
-      status: 'cached',
-      activeSource: 'Cached Macro Calendar Snapshot',
-      latencyMs: calLatency,
-      isCachedFallback: true,
-      fallbackReason: 'Macro calendar upstream failed; serving cached schedule',
-    });
-    return calendarCache.entry.data;
+  });
+
+  return items;
+}
+
+export type CalendarRangePreset =
+  | 'this_week'
+  | 'next_week'
+  | 'this_month'
+  | 'next_month'
+  | 'custom';
+
+export interface CalendarFetchOptions {
+  range?: CalendarRangePreset;
+  from?: string;
+  to?: string;
+  force?: boolean;
+}
+
+function wibDayStartEpoch(year: number, monthIndex0: number, dayOfMonth: number): number {
+  return Date.UTC(year, monthIndex0, dayOfMonth, 0, 0, 0, 0) - 7 * 3600_000;
+}
+
+function resolveCalendarWindowMs(options?: CalendarFetchOptions): {
+  preset: CalendarRangePreset;
+  startMs: number;
+  endMs: number;
+  cacheKey: string;
+} {
+  const preset: CalendarRangePreset =
+    options?.range === 'next_week' ||
+    options?.range === 'this_month' ||
+    options?.range === 'next_month' ||
+    options?.range === 'custom'
+      ? options.range
+      : 'this_week';
+
+  const wibNow = new Date(Date.now() + 7 * 3600_000);
+  const y = wibNow.getUTCFullYear();
+  const m = wibNow.getUTCMonth();
+  const d = wibNow.getUTCDate();
+  const dow = wibNow.getUTCDay(); // 0=Sun..6=Sat
+
+  if (preset === 'next_week') {
+    const startMs = wibDayStartEpoch(y, m, d - dow + 7);
+    const endMs = wibDayStartEpoch(y, m, d - dow + 14) - 1;
+    return { preset, startMs, endMs, cacheKey: `next_week:${getWibDateKey(new Date(startMs))}` };
   }
-  return payload;
+
+  if (preset === 'this_month') {
+    const startMs = wibDayStartEpoch(y, m, 1);
+    const endMs = wibDayStartEpoch(y, m + 1, 1) - 1;
+    return { preset, startMs, endMs, cacheKey: `this_month:${y}-${String(m + 1).padStart(2, '0')}` };
+  }
+
+  if (preset === 'next_month') {
+    const startMs = wibDayStartEpoch(y, m + 1, 1);
+    const endMs = wibDayStartEpoch(y, m + 2, 1) - 1;
+    return { preset, startMs, endMs, cacheKey: `next_month:${y}-${String(m + 2).padStart(2, '0')}` };
+  }
+
+  if (preset === 'custom') {
+    const parseDate = (s?: string): number | null => {
+      if (!s) return null;
+      const match = s.trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+      if (!match) return null;
+      return wibDayStartEpoch(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+    };
+    const fromParsed = parseDate(options?.from);
+    const toParsed = parseDate(options?.to);
+    const defaultStart = wibDayStartEpoch(y, m, d - dow);
+    const startMs = fromParsed ?? defaultStart;
+    const rawEndStart = toParsed ?? fromParsed ?? (defaultStart + 6 * 86400_000);
+    const orderedStart = Math.min(startMs, rawEndStart);
+    const orderedEnd = Math.max(startMs, rawEndStart) + 86400_000 - 1;
+    const fromKey = getWibDateKey(new Date(orderedStart));
+    const toKey = getWibDateKey(new Date(orderedEnd));
+    return { preset, startMs: orderedStart, endMs: orderedEnd, cacheKey: `custom:${fromKey}:${toKey}` };
+  }
+
+  // this_week (Sun–Sat in WIB)
+  const startMs = wibDayStartEpoch(y, m, d - dow);
+  const endMs = wibDayStartEpoch(y, m, d - dow + 7) - 1;
+  return { preset: 'this_week', startMs, endMs, cacheKey: 'this_week' };
+}
+
+function normalizeCalendarActuals(items: LiveCalendarItem[]): LiveCalendarItem[] {
+  return items.map((ev) => {
+    if (isUnpublishedActual(ev.actual)) {
+      return {
+        ...ev,
+        actual: '-',
+        deviationLabel: '-',
+        deviationType: 'neutral',
+      };
+    }
+    const cleanActual = ev.actual.trim();
+    const dev = computeDeviation(cleanActual, ev.forecast);
+    return {
+      ...ev,
+      actual: cleanActual,
+      deviationLabel: dev.label,
+      deviationType: dev.type,
+    };
+  });
+}
+
+type TvCalendarItem = LiveCalendarItem & {
+  countryCode?: string;
+  indicatorText?: string;
+};
+
+function parseCalendarNumber(raw?: string | null): number | null {
+  if (!raw) return null;
+  const cleaned = String(raw).trim();
+  if (!cleaned || cleaned === '-' || cleaned === '—') return null;
+  const m = cleaned.match(/-?\d+(?:\.\d+)?/);
+  if (!m) return null;
+  const n = parseFloat(m[0]);
+  return Number.isFinite(n) ? n : null;
+}
+
+const CAL_SYNONYMS: Record<string, string[]> = {
+  inflation: ['cpi', 'prices'],
+  cpi: ['inflation', 'prices'],
+  sppi: ['services', 'ppi', 'producer'],
+  gdp: ['growth', 'rate', 'gdp'],
+  ifo: ['ifo'],
+  pmi: ['pmi', 'purchasing'],
+  retail: ['retail', 'sales'],
+  realized: ['distributive', 'cbi', 'retail'],
+  distributive: ['realized', 'cbi', 'retail'],
+  unemployment: ['jobless', 'claims', 'unemployment'],
+  claims: ['jobless', 'unemployment', 'claims'],
+  adp: ['adp', 'employment'],
+  cb: ['conference', 'board', 'consumer', 'confidence'],
+  confidence: ['confidence', 'sentiment'],
+  bulletin: ['api', 'crude', 'oil', 'stock', 'inventories'],
+  inventories: ['stock', 'stocks', 'crude', 'oil'],
+  trimmed: ['trimmed', 'mean'],
+  core: ['core'],
+  house: ['home', 'hpi', 'house'],
+  home: ['house', 'hpi', 'home'],
+  hpi: ['house', 'home', 'price'],
+  case: ['case', 'shiller', 'hpi'],
+  shiller: ['case', 'shiller', 'hpi', 'home'],
+  cs: ['case', 'shiller', 'hpi', 'home'],
+  composite: ['case', 'shiller', 'hpi', 'home'],
+  richmond: ['richmond', 'manufacturing'],
+  construction: ['construction', 'work'],
+};
+
+function tokenizeRawCalendarWords(raw: string): Set<string> {
+  const words = raw
+    .toLowerCase()
+    .replace(/q\/q/g, ' qoq ')
+    .replace(/m\/m/g, ' mom ')
+    .replace(/y\/y/g, ' yoy ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter((w) => w.length >= 2 && !['the', 'and', 'for', 'final', 'prelim', 'flash', 'rev', 'nsa', 'sa', 'us', 'eu', 'uk', 's&p', 'global'].includes(w));
+  return new Set(words);
+}
+
+function tokenizeCalendarTitle(raw: string): Set<string> {
+  const rawSet = tokenizeRawCalendarWords(raw);
+  const out = new Set<string>(rawSet);
+  for (const w of rawSet) {
+    const syns = CAL_SYNONYMS[w];
+    if (syns) {
+      for (const s of syns) out.add(s);
+    }
+  }
+  return out;
+}
+
+function enrichEventsWithTradingViewActuals(
+  ffEvents: LiveCalendarItem[],
+  tvEvents: TvCalendarItem[],
+  nowMs: number
+): LiveCalendarItem[] {
+  if (tvEvents.length === 0) return ffEvents;
+
+  const releasedTv = tvEvents.filter((tv) => {
+    if (isUnpublishedActual(tv.actual)) return false;
+    const tvMs = Date.parse(tv.isoDate);
+    return Number.isFinite(tvMs) && tvMs <= nowMs + 5 * 60_000;
+  });
+  if (releasedTv.length === 0) return ffEvents;
+
+  return ffEvents.map((ffEv) => {
+    // Only stamp released actuals onto events whose scheduled release has occurred (+5m tolerance)
+    const ffMs = Date.parse(ffEv.isoDate);
+    if (!Number.isFinite(ffMs) || ffMs > nowMs + 5 * 60_000) return ffEv;
+    if (ffEv.impact === 'HOLIDAY' || /speaks|testifies|press conference|bank holiday|daylight/i.test(ffEv.title)) {
+      return ffEv;
+    }
+
+    const ffRawTokens = tokenizeRawCalendarWords(ffEv.title);
+    const ffTokens = tokenizeCalendarTitle(ffEv.title);
+    const ffFcstNum = parseCalendarNumber(ffEv.forecast);
+    const ffPrevNum = parseCalendarNumber(ffEv.previous);
+    const ffDayKey = getWibDateKey(new Date(ffMs));
+    const ffHasPct = ffEv.forecast.includes('%') || ffEv.previous.includes('%');
+    const ffExpectsDollar =
+      /[$€¥]|budget|balance|supply|deficit|surplus/i.test(ffEv.title) ||
+      ffEv.forecast.includes('$') ||
+      ffEv.previous.includes('$');
+    const ffLower = ffEv.title.toLowerCase();
+    const expectedCountry =
+      ffLower.includes('german') ? 'DE' :
+      ffLower.includes('french') ? 'FR' :
+      ffLower.includes('italian') ? 'IT' :
+      ffLower.includes('spanish') ? 'ES' : null;
+    const ffPeriod = ffTokens.has('qoq')
+      ? 'qoq'
+      : ffTokens.has('mom')
+        ? 'mom'
+        : ffTokens.has('yoy')
+          ? 'yoy'
+          : null;
+
+    let bestMatch: TvCalendarItem | null = null;
+    let bestScore = -1;
+
+    for (const tv of releasedTv) {
+      if (tv.currency !== ffEv.currency) continue;
+      if (expectedCountry && tv.countryCode && tv.countryCode !== expectedCountry) continue;
+      if (!ffExpectsDollar && tv.actual.includes('$')) continue;
+
+      const tvMs = Date.parse(tv.isoDate);
+      if (!Number.isFinite(tvMs)) continue;
+
+      const diffMin = Math.abs(ffMs - tvMs) / 60_000;
+      const sameDayAllDay = ffEv.timeWib === 'All Day' && getWibDateKey(new Date(tvMs)) === ffDayKey;
+      if (!sameDayAllDay && diffMin > 15) continue;
+
+      const tvText = `${tv.title} ${tv.indicatorText ?? ''}`;
+      const tvLower = tvText.toLowerCase();
+      if (ffLower.includes('core') && !tvLower.includes('core') && !tvLower.includes('trimmed')) continue;
+      if (ffLower.includes('trimmed') && !tvLower.includes('trimmed')) continue;
+
+      const tvRawTokens = tokenizeRawCalendarWords(tvText);
+      const tvTokens = tokenizeCalendarTitle(tvText);
+      let overlap = 0;
+      for (const tok of ffTokens) {
+        if (tvTokens.has(tok)) overlap += 1;
+      }
+      if (overlap < 1) continue;
+
+      let exactOverlap = 0;
+      for (const tok of ffRawTokens) {
+        if (tvRawTokens.has(tok)) exactOverlap += 1;
+      }
+
+      const tvHasPct = tv.actual.includes('%') || tv.forecast.includes('%') || tv.previous.includes('%');
+      const hasNumericRef = ffFcstNum !== null || ffPrevNum !== null;
+      const unitBonus = !hasNumericRef ? 0.5 : ffHasPct === tvHasPct ? 1.5 : -3.5;
+
+      let numericBonus = 0;
+      const tvFcstNum = parseCalendarNumber(tv.forecast);
+      const tvPrevNum = parseCalendarNumber(tv.previous);
+      if (ffFcstNum !== null && tvFcstNum !== null) {
+        if (Math.abs(ffFcstNum - tvFcstNum) <= Math.max(0.15, Math.abs(ffFcstNum) * 0.08)) {
+          numericBonus += 4.5;
+        }
+      }
+      if (ffPrevNum !== null && tvPrevNum !== null) {
+        if (Math.abs(ffPrevNum - tvPrevNum) <= Math.max(0.2, Math.abs(ffPrevNum) * 0.12)) {
+          numericBonus += 3.5;
+        }
+      }
+
+      const timeBonus = diffMin <= 2 ? 3.5 : diffMin <= 10 ? 2.2 : 0.8;
+      const tvPeriod = tvTokens.has('qoq')
+        ? 'qoq'
+        : tvTokens.has('mom')
+          ? 'mom'
+          : tvTokens.has('yoy')
+            ? 'yoy'
+            : null;
+      let periodBonus = 0;
+      if (ffPeriod && tvPeriod) {
+        periodBonus = ffPeriod === tvPeriod ? 3.0 : -5.0;
+      }
+
+      let qualifierBonus = 0;
+      if (!ffLower.includes('core') && !ffLower.includes('trimmed')) {
+        if (tvLower.includes('trimmed') || tvLower.includes('core')) {
+          qualifierBonus -= 4.0;
+        }
+      }
+
+      const score = overlap * 2.0 + exactOverlap * 1.4 + periodBonus + qualifierBonus + numericBonus + timeBonus + unitBonus;
+      if (score > bestScore) {
+        bestScore = score;
+        bestMatch = tv;
+      }
+    }
+
+    if (!bestMatch || bestScore < 4.5) return ffEv;
+
+    const cleanActual = bestMatch.actual.trim();
+    const resolvedForecast =
+      ffEv.forecast && ffEv.forecast !== '—' ? ffEv.forecast : bestMatch.forecast;
+    const resolvedPrevious =
+      ffEv.previous && ffEv.previous !== '—' ? ffEv.previous : bestMatch.previous;
+    const dev = computeDeviation(cleanActual, resolvedForecast);
+
+    return {
+      ...ffEv,
+      actual: cleanActual,
+      forecast: resolvedForecast || '—',
+      previous: resolvedPrevious || '—',
+      deviationLabel: dev.label,
+      deviationType: dev.type,
+    };
+  });
+}
+
+async function fetchTradingViewCalendarWindow(
+  startMs: number,
+  endMs: number
+): Promise<TvCalendarItem[]> {
+  const fromIso = new Date(startMs).toISOString();
+  const toIso = new Date(endMs).toISOString();
+  const tvUrl = `https://economic-calendar.tradingview.com/events?from=${encodeURIComponent(
+    fromIso
+  )}&to=${encodeURIComponent(toIso)}&countries=US,EU,DE,FR,IT,ES,GB,JP,AU,CA,CH,NZ,CN`;
+
+  const res = await fetch(tvUrl, {
+    headers: {
+      ...UA_HEADERS,
+      Origin: 'https://www.tradingview.com',
+      Referer: 'https://www.tradingview.com/',
+    },
+    signal: AbortSignal.timeout(9000),
+  });
+  if (!res.ok) return [];
+
+  const json = (await res.json()) as {
+    result?: Array<{
+      id?: string;
+      title?: string;
+      indicator?: string;
+      country?: string;
+      currency?: string;
+      actual?: number | null;
+      forecast?: number | null;
+      previous?: number | null;
+      unit?: string;
+      scale?: string;
+      importance?: number;
+      date?: string;
+    }>;
+  };
+
+  const countryCurrencyMap: Record<string, LiveCalendarItem['currency']> = {
+    US: 'USD',
+    EU: 'EUR',
+    DE: 'EUR',
+    FR: 'EUR',
+    IT: 'EUR',
+    ES: 'EUR',
+    GB: 'GBP',
+    JP: 'JPY',
+    AU: 'AUD',
+    CA: 'CAD',
+    CH: 'CHF',
+    NZ: 'NZD',
+    CN: 'CNY',
+  };
+
+  return (json.result ?? [])
+    .filter((ev) => ev.title && ev.date && typeof ev.importance === 'number' && ev.importance >= -1)
+    .sort((a, b) => Date.parse(a.date!) - Date.parse(b.date!))
+    .slice(0, 600)
+    .map((ev, idx) => {
+      const d = new Date(ev.date!);
+      const countryCode = String(ev.country || '').toUpperCase();
+      const currCand = String(ev.currency || '').toUpperCase() as LiveCalendarItem['currency'];
+      const curr = FF_ALLOWED_CURRENCIES.has(currCand)
+        ? currCand
+        : countryCurrencyMap[countryCode] || 'USD';
+      const impact: LiveCalendarItem['impact'] =
+        ev.importance === 1 ? 'HIGH' : ev.importance === 0 ? 'MED' : 'LOW';
+      const actualRaw = formatTvMetric(ev.actual, ev.unit, ev.scale);
+      const actual = isUnpublishedActual(actualRaw) ? '-' : actualRaw;
+      const forecast = formatTvMetric(ev.forecast, ev.unit, ev.scale);
+      const previous = formatTvMetric(ev.previous, ev.unit, ev.scale);
+      const dev = computeDeviation(actual, forecast);
+
+      return {
+        id: `tv-ff-${ev.id || idx}-${d.getTime()}`,
+        timeWib: formatWibClockOnly(d),
+        isoDate: d.toISOString(),
+        dateGroupLabel: formatWibDateGroup(d),
+        day: classifyDay(d),
+        currency: curr,
+        impact,
+        title: String(ev.title),
+        indicatorText: ev.indicator ? String(ev.indicator) : '',
+        countryCode,
+        description: `${curr} · ${impact === 'HIGH' ? 'High Impact' : impact === 'MED' ? 'Medium Impact' : 'Low Impact'}`,
+        actual,
+        forecast,
+        previous,
+        deviationLabel: dev.label,
+        deviationType: dev.type,
+      };
+    });
+}
+
+export async function fetchLiveCalendar(options?: CalendarFetchOptions): Promise<LiveCalendarResponse> {
+  const win = resolveCalendarWindowMs(options);
+  const now = Date.now();
+  if (!options?.force) {
+    if (win.preset === 'this_week' && calendarCache.entry) {
+      if (calendarCache.entry.expiresAt > now) {
+        return calendarCache.entry.data;
+      }
+      if (now - calendarCache.entry.expiresAt < 900_000) {
+        void fetchLiveCalendarFresh(options).catch(() => null);
+        return calendarCache.entry.data;
+      }
+    } else if (win.preset !== 'this_week') {
+      const cachedRange = calendarRangeCache.get(win.cacheKey);
+      if (cachedRange && cachedRange.expiresAt > now) {
+        return cachedRange.data;
+      }
+    }
+  }
+  return fetchLiveCalendarFresh(options);
+}
+
+async function fetchLiveCalendarFresh(options?: CalendarFetchOptions): Promise<LiveCalendarResponse> {
+  const now = Date.now();
+  const calStart = Date.now();
+  const win = resolveCalendarWindowMs(options);
+  const fallbackEntry =
+    win.preset === 'this_week'
+      ? calendarCache.entry?.data
+      : calendarRangeCache.get(win.cacheKey)?.data;
+
+  return coalesceInFlight(`live-calendar:${win.cacheKey}`, fallbackEntry, async () => {
+    let events: LiveCalendarItem[] = [];
+    let source = 'ForexFactory Weekly Macro Calendar';
+
+    // Always try fetching ForexFactory this-week JSON/XML (with 4-min upstream guard) AND TradingView actuals concurrently
+    const includesThisWeek =
+      win.preset === 'this_week' ||
+      win.preset === 'this_month' ||
+      win.preset === 'custom';
+
+    const canQueryFairEconomy =
+      includesThisWeek && (now - ffLastFetchAttemptAt > 240_000 || ffLastWarmSnapshot.length === 0);
+
+    const tvWindowPromise = fetchTradingViewCalendarWindow(
+      win.startMs - 12 * 3600_000,
+      win.endMs + 12 * 3600_000
+    ).catch((): TvCalendarItem[] => []);
+
+    if (canQueryFairEconomy) {
+      ffLastFetchAttemptAt = now;
+      try {
+        const res = await fetch('https://nfs.faireconomy.media/ff_calendar_thisweek.json', {
+          headers: UA_HEADERS,
+          signal: AbortSignal.timeout(8000),
+        });
+
+        if (res.ok) {
+          const contentType = res.headers.get('content-type') || '';
+          const bodyText = await res.text();
+          if (contentType.includes('json') || bodyText.trim().startsWith('[')) {
+            const raw = JSON.parse(bodyText) as Array<{
+              title?: string;
+              country?: string;
+              date?: string;
+              impact?: string;
+              actual?: string;
+              forecast?: string;
+              previous?: string;
+            }>;
+
+            const parsedFf = raw
+              .filter(
+                (item) =>
+                  item.title &&
+                  item.date &&
+                  FF_ALLOWED_CURRENCIES.has(String(item.country || '').toUpperCase() as LiveCalendarItem['currency'])
+              )
+              .map((item, idx) => {
+                const d = new Date(item.date!);
+                const curr = String(item.country || 'USD').toUpperCase() as LiveCalendarItem['currency'];
+                const impact = mapFfImpact(item.impact);
+                const rawActual = item.actual?.trim() ?? '';
+                const actual = isUnpublishedActual(rawActual) ? '-' : rawActual;
+                const forecast = item.forecast?.trim() || '—';
+                const previous = item.previous?.trim() || '—';
+                const dev = computeDeviation(actual, forecast);
+
+                return {
+                  id: `ff-${idx}-${d.getTime()}-${curr}`,
+                  timeWib: impact === 'HOLIDAY' ? 'All Day' : formatWibClockOnly(d),
+                  isoDate: d.toISOString(),
+                  dateGroupLabel: formatWibDateGroup(d),
+                  day: classifyDay(d),
+                  currency: curr,
+                  impact,
+                  title: String(item.title),
+                  description: `${curr} · ${
+                    impact === 'HIGH'
+                      ? 'High Impact'
+                      : impact === 'MED'
+                        ? 'Medium Impact'
+                        : impact === 'HOLIDAY'
+                          ? 'Bank Holiday'
+                          : 'Low Impact'
+                  }`,
+                  actual,
+                  forecast,
+                  previous,
+                  deviationLabel: dev.label,
+                  deviationType: dev.type,
+                };
+              })
+              .sort((a, b) => Date.parse(a.isoDate) - Date.parse(b.isoDate));
+
+            if (parsedFf.length > 0) {
+              ffLastWarmSnapshot = parsedFf;
+              if (win.preset === 'this_week') {
+                events = parsedFf;
+                source = 'ForexFactory Weekly Calendar';
+              }
+            }
+          }
+        }
+      } catch {
+        // try XML fallback below
+      }
+
+      if (ffLastWarmSnapshot.length === 0) {
+        try {
+          const xmlRes = await fetch('https://nfs.faireconomy.media/ff_calendar_thisweek.xml', {
+            headers: UA_HEADERS,
+            signal: AbortSignal.timeout(8000),
+          });
+          if (xmlRes.ok) {
+            const xml = await xmlRes.text();
+            if (xml.includes('<weeklyevents>')) {
+              const parsedXml = parseFfXmlFallback(xml);
+              if (parsedXml.length > 0) {
+                ffLastWarmSnapshot = parsedXml.sort((a, b) => Date.parse(a.isoDate) - Date.parse(b.isoDate));
+                if (win.preset === 'this_week') {
+                  events = ffLastWarmSnapshot;
+                  source = 'ForexFactory Weekly Calendar (XML)';
+                }
+              }
+            }
+          }
+        } catch {
+          // ignore XML failure
+        }
+      }
+    }
+
+    // Reuse warm ForexFactory snapshot for this_week if rate-limited between refreshes
+    if (win.preset === 'this_week' && events.length === 0 && ffLastWarmSnapshot.length > 0) {
+      events = normalizeCalendarActuals(ffLastWarmSnapshot).map((ev) => {
+        const d = new Date(ev.isoDate);
+        return {
+          ...ev,
+          day: classifyDay(d),
+          dateGroupLabel: formatWibDateGroup(d),
+        };
+      });
+      source = 'ForexFactory Weekly Calendar (Warm)';
+    }
+
+    const tvEvents = await tvWindowPromise;
+
+    if (win.preset === 'this_week') {
+      if (events.length > 0 && tvEvents.length > 0) {
+        // Enrich canonical ForexFactory schedule with live released actual prints from TradingView
+        events = enrichEventsWithTradingViewActuals(events, tvEvents, now);
+        source = 'ForexFactory + Live Release Feed';
+      } else if (events.length === 0 && tvEvents.length > 0) {
+        events = tvEvents.filter((ev) => {
+          const t = Date.parse(ev.isoDate);
+          return t >= win.startMs && t <= win.endMs;
+        });
+        source = 'Macro FX Calendar Fallback';
+      }
+    } else if (tvEvents.length > 0) {
+      // Extended ranges (next_week, this_month, next_month, custom)
+      const ffInWindow = normalizeCalendarActuals(ffLastWarmSnapshot).filter((ev) => {
+        const t = Date.parse(ev.isoDate);
+        return t >= win.startMs && t <= win.endMs;
+      });
+      const enrichedFf = enrichEventsWithTradingViewActuals(ffInWindow, tvEvents, now);
+      const seenTitlesByDay = new Set(
+        enrichedFf.map((ev) => `${ev.currency}:${getWibDateKey(new Date(ev.isoDate))}:${ev.title.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 10)}`)
+      );
+      const merged: LiveCalendarItem[] = [...enrichedFf];
+      for (const tv of tvEvents) {
+        const t = Date.parse(tv.isoDate);
+        if (t < win.startMs || t > win.endMs) continue;
+        const tvKey = `${tv.currency}:${getWibDateKey(new Date(t))}:${tv.title.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 10)}`;
+        if (!seenTitlesByDay.has(tvKey)) {
+          seenTitlesByDay.add(tvKey);
+          const safeTv = t > now + 5 * 60_000 ? { ...tv, actual: '-', deviationLabel: '-', deviationType: 'neutral' as const } : tv;
+          merged.push(safeTv);
+        }
+      }
+      events = merged.sort((a, b) => Date.parse(a.isoDate) - Date.parse(b.isoDate));
+      source = ffInWindow.length > 0 ? 'ForexFactory + Extended Macro Schedule' : 'Extended Macro FX Schedule';
+    }
+
+    if (win.preset === 'this_week' && events.length === 0) {
+      try {
+        events = await fetchCalendarViaGemini();
+        if (events.length > 0) {
+          source = 'Google Search Grounded Macro Calendar';
+        }
+      } catch {
+        // keep empty -> client falls back safely
+      }
+    }
+
+    // Preserve actual released values while strictly converting any unreleased/'Pending' entries to '-'
+    events = normalizeCalendarActuals(events);
+
+    const futureEvents = events
+      .filter((e) => Date.parse(e.isoDate) > now && e.impact !== 'HOLIDAY')
+      .sort((a, b) => Date.parse(a.isoDate) - Date.parse(b.isoDate));
+    const upcomingCatalyst =
+      futureEvents.find((e) => e.impact === 'HIGH') ??
+      futureEvents.find((e) => e.impact === 'MED') ??
+      futureEvents[0] ??
+      null;
+
+    const nextCatalyst = upcomingCatalyst
+      ? {
+          title: upcomingCatalyst.title,
+          currency: upcomingCatalyst.currency,
+          timeWib: upcomingCatalyst.timeWib,
+          targetEpochMs: Date.parse(upcomingCatalyst.isoDate),
+          description: upcomingCatalyst.description,
+        }
+      : null;
+
+    const payload: LiveCalendarResponse = {
+      events,
+      nextCatalyst,
+      source,
+      updatedAt: new Date().toISOString(),
+    };
+
+    const calLatency = Date.now() - calStart;
+    if (events.length > 0) {
+      const ttl = win.preset === 'this_week' ? 90_000 : 180_000;
+      const entry = { data: payload, expiresAt: now + ttl };
+      if (win.preset === 'this_week') {
+        calendarCache.entry = entry;
+      } else {
+        calendarRangeCache.set(win.cacheKey, entry);
+      }
+      const isFailoverCal = !source.includes('ForexFactory');
+      updateProviderMetric('news_cal', {
+        status: isFailoverCal ? 'failover' : 'live',
+        activeSource: `RSS + ${source}`,
+        latencyMs: calLatency,
+        lastSuccessAt: Date.now(),
+        isCachedFallback: false,
+        fallbackReason: isFailoverCal ? `Calendar fell back to ${source}` : undefined,
+      });
+    } else if (fallbackEntry) {
+      updateProviderMetric('news_cal', {
+        status: 'cached',
+        activeSource: 'Cached ForexFactory Calendar Snapshot',
+        latencyMs: calLatency,
+        isCachedFallback: true,
+        fallbackReason: 'Macro calendar upstream failed; serving cached schedule',
+      });
+      return fallbackEntry;
+    }
+    return payload;
   });
 }
 
@@ -4029,51 +4560,320 @@ function computeIdxBandarmologyFromBars(params: {
   };
 }
 
-async function fetchIdxBandarmologyMap(
-  idxTickerList: Array<{
+const equityFlowAndTradePlanCache = new Map<
+  string,
+  { data: { bandarmology: BandarmologyAnalysis; tradePlan: StockTradePlan }; expiresAt: number }
+>();
+
+function snapStockTickServer(rawPrice: number, currency: 'USD' | 'IDR'): number {
+  if (!Number.isFinite(rawPrice) || rawPrice <= 0) return 0;
+  if (currency === 'USD') return Number(rawPrice.toFixed(2));
+  const step =
+    rawPrice < 200 ? 1 : rawPrice < 500 ? 2 : rawPrice < 2000 ? 5 : rawPrice < 5000 ? 10 : 25;
+  return Math.max(50, Math.round(rawPrice / step) * step);
+}
+
+function fmtStockLevelServer(price: number, currency: 'USD' | 'IDR'): string {
+  const snapped = snapStockTickServer(price, currency);
+  if (currency === 'IDR') return `Rp ${snapped.toLocaleString('en-US')}`;
+  return `$${snapped.toFixed(2)}`;
+}
+
+function computeEquityTradePlanFromBars(params: {
+  symbol: string;
+  currency: 'USD' | 'IDR';
+  closes: number[];
+  highs: number[];
+  lows: number[];
+  opens: number[];
+  volumes: number[];
+  currentPrice: number;
+  prevClose: number;
+  dayHigh: number;
+  dayLow: number;
+  bandar: BandarmologyAnalysis;
+  foreignNetAmount?: number;
+  foreignFlowSide?: 'BUY' | 'SELL';
+}): StockTradePlan {
+  const {
+    currency,
+    closes,
+    highs,
+    lows,
+    opens,
+    currentPrice,
+    prevClose,
+    dayHigh,
+    dayLow,
+    bandar,
+    foreignNetAmount,
+    foreignFlowSide,
+  } = params;
+
+  const price = currentPrice > 0 ? currentPrice : closes[closes.length - 1] || prevClose || 100;
+  const n = Math.min(closes.length, highs.length, lows.length);
+
+  // 14-day ATR + 20D range
+  let atrSum = 0;
+  let atrCount = 0;
+  for (let i = Math.max(1, n - 14); i < n; i++) {
+    const tr = Math.max(
+      highs[i] - lows[i],
+      Math.abs(highs[i] - closes[i - 1]),
+      Math.abs(lows[i] - closes[i - 1])
+    );
+    if (Number.isFinite(tr) && tr > 0) {
+      atrSum += tr;
+      atrCount += 1;
+    }
+  }
+  const daySpan = Math.max(Math.abs(dayHigh - dayLow), price * 0.014);
+  const atr = atrCount > 0 ? Math.max(atrSum / atrCount, price * 0.01) : daySpan * 1.15;
+
+  // Identify technical Supply & Demand base zones from 20D displacement pivots
+  const histHigh = n > 0 ? Math.max(...highs, dayHigh, price) : Math.max(dayHigh, price * 1.03);
+  const histLow = n > 0 ? Math.min(...lows, dayLow, price) : Math.min(dayLow, price * 0.97);
+
+  let demandLow = histLow;
+  let demandHigh = Math.min(price * 0.996, histLow + atr * 0.65);
+  let supplyHigh = histHigh;
+  let supplyLow = Math.max(price * 1.004, histHigh - atr * 0.65);
+
+  // Scan Rally-Base-Rally / Drop-Base-Rally demand origins
+  for (let i = Math.max(1, n - 18); i < n - 1; i++) {
+    const dispUp = closes[i + 1] - closes[i];
+    if (dispUp >= atr * 0.6 && lows[i] <= price * 1.015) {
+      const zLow = lows[i];
+      const zHigh = Math.max(opens[i] ?? closes[i], closes[i]);
+      if (zHigh < price * 1.01 && zLow > demandLow) {
+        demandLow = zLow;
+        demandHigh = Math.max(zLow + atr * 0.28, Math.min(zHigh, zLow + atr * 0.75));
+      }
+    }
+    const dispDown = closes[i] - closes[i + 1];
+    if (dispDown >= atr * 0.6 && highs[i] >= price * 0.985) {
+      const zHigh = highs[i];
+      const zLow = Math.min(opens[i] ?? closes[i], closes[i]);
+      if (zLow > price * 0.99 && zHigh < supplyHigh) {
+        supplyHigh = zHigh;
+        supplyLow = Math.min(zHigh - atr * 0.28, Math.max(zLow, zHigh - atr * 0.75));
+      }
+    }
+  }
+
+  // Enforce clean ordering Demand < Supply with viable spread
+  if (demandHigh >= supplyLow - atr * 0.6) {
+    demandLow = Math.min(dayLow, price - atr * 1.1);
+    demandHigh = price - atr * 0.35;
+    supplyLow = price + atr * 0.45;
+    supplyHigh = Math.max(dayHigh, price + atr * 1.25);
+  }
+
+  const snappedDemLow = snapStockTickServer(demandLow, currency);
+  const snappedDemHigh = snapStockTickServer(Math.max(demandHigh, demandLow + atr * 0.25), currency);
+  const snappedSupLow = snapStockTickServer(supplyLow, currency);
+  const snappedSupHigh = snapStockTickServer(Math.max(supplyHigh, supplyLow + atr * 0.25), currency);
+
+  const zoneSpan = Math.max(atr * 0.8, snappedSupLow - snappedDemHigh);
+  const posInSd = (price - snappedDemHigh) / Math.max(1e-6, zoneSpan); // <=0.35 near demand, >=0.65 near supply
+  const chgPct = prevClose > 0 ? ((price - prevClose) / prevClose) * 100 : 0;
+  const effectiveForeignSide =
+    foreignFlowSide ??
+    (typeof foreignNetAmount === 'number'
+      ? foreignNetAmount > 0
+        ? 'BUY'
+        : foreignNetAmount < 0
+          ? 'SELL'
+          : undefined
+      : bandar.foreignBias === 'Net Buy'
+        ? 'BUY'
+        : bandar.foreignBias === 'Net Sell'
+          ? 'SELL'
+          : undefined);
+
+  // Multi-pillar fusion score (-100 .. +100): Bandarmology (45%) + Flow (25%) + Supply/Demand Location (30%)
+  const bandarPts = (bandar.score / 100) * 45;
+  const flowPts =
+    (effectiveForeignSide === 'BUY' ? 14 : effectiveForeignSide === 'SELL' ? -14 : 0) +
+    ((bandar.accumulationPressure - 50) / 50) * 11;
+  const sdLocationPts =
+    posInSd <= 0.32 ? 22 : posInSd >= 0.72 ? -22 : (0.5 - posInSd) * 18;
+  const tapeConfirm =
+    bandar.volumeRatio >= 1.15 && Math.abs(chgPct) >= 0.5
+      ? chgPct > 0
+        ? 10
+        : -10
+      : 0;
+
+  const netScore = bandarPts + flowPts + sdLocationPts + tapeConfirm;
+  const bullishBias = netScore >= 12 || (bandar.score >= 18 && effectiveForeignSide !== 'SELL');
+  const bearishBias = netScore <= -12 || (bandar.score <= -18 && effectiveForeignSide !== 'BUY');
+
+  let action: StockExecutionAction = 'WAIT';
+  let entryPrice = price;
+  let stopLoss = snappedDemLow;
+  let takeProfit1 = snappedSupLow;
+  let takeProfit2 = snappedSupHigh;
+  let strategyTag = 'Zone Equilibrium Watch';
+  let executionNote = '';
+
+  const roomToSupply = (snappedSupLow - price) / Math.max(1e-6, price - (snappedDemLow - atr * 0.25));
+  const roomToDemand = (price - snappedDemHigh) / Math.max(1e-6, snappedSupHigh + atr * 0.25 - price);
+
+  if (bullishBias && (posInSd <= 0.62 || (bandar.volumeRatio >= 1.25 && roomToSupply >= 1.15))) {
+    action = 'BUY';
+    const isInDemand = price <= snappedDemHigh * 1.008;
+    entryPrice = snapStockTickServer(
+      isInDemand ? price : Math.min(price, snappedDemHigh + atr * 0.3),
+      currency
+    );
+    const rawSl = Math.min(snappedDemLow - atr * 0.22, entryPrice * 0.978);
+    stopLoss = snapStockTickServer(rawSl, currency);
+    if (stopLoss >= entryPrice) stopLoss = snapStockTickServer(entryPrice * 0.975, currency);
+
+    const risk = Math.max(currency === 'IDR' ? 10 : 0.25, entryPrice - stopLoss);
+    takeProfit1 = snapStockTickServer(Math.max(snappedSupLow, entryPrice + risk * 1.6), currency);
+    takeProfit2 = snapStockTickServer(Math.max(snappedSupHigh, takeProfit1 + risk * 0.9), currency);
+    strategyTag = isInDemand ? 'Acc + Demand Reclaim' : 'Flow Breakout Continuation';
+    executionNote = `EXECUTE BUY @ ${fmtStockLevelServer(entryPrice, currency)} · Target ${fmtStockLevelServer(takeProfit1, currency)} / ${fmtStockLevelServer(takeProfit2, currency)} · Cut loss if close < ${fmtStockLevelServer(stopLoss, currency)}`;
+  } else if (bearishBias && (posInSd >= 0.38 || (bandar.volumeRatio >= 1.25 && roomToDemand >= 1.15))) {
+    action = 'SELL';
+    const isInSupply = price >= snappedSupLow * 0.992;
+    entryPrice = snapStockTickServer(
+      isInSupply ? price : Math.max(price, snappedSupLow - atr * 0.3),
+      currency
+    );
+    const rawSl = Math.max(snappedSupHigh + atr * 0.22, entryPrice * 1.022);
+    stopLoss = snapStockTickServer(rawSl, currency);
+    if (stopLoss <= entryPrice) stopLoss = snapStockTickServer(entryPrice * 1.025, currency);
+
+    const risk = Math.max(currency === 'IDR' ? 10 : 0.25, stopLoss - entryPrice);
+    takeProfit1 = snapStockTickServer(Math.max(currency === 'IDR' ? 50 : 1, Math.min(snappedDemHigh, entryPrice - risk * 1.6)), currency);
+    takeProfit2 = snapStockTickServer(Math.max(currency === 'IDR' ? 50 : 1, Math.min(snappedDemLow, takeProfit1 - risk * 0.9)), currency);
+    strategyTag = isInSupply ? 'Dist + Supply Rejection' : 'Flow Breakdown Continuation';
+    executionNote = `EXECUTE SELL / TP @ ${fmtStockLevelServer(entryPrice, currency)} · Downside ${fmtStockLevelServer(takeProfit1, currency)} / ${fmtStockLevelServer(takeProfit2, currency)} · Invalid > ${fmtStockLevelServer(stopLoss, currency)}`;
+  } else {
+    action = 'WAIT';
+    const leanBull = netScore >= 0;
+    if (leanBull) {
+      entryPrice = snapStockTickServer((snappedDemLow + snappedDemHigh) / 2, currency);
+      stopLoss = snapStockTickServer(Math.min(snappedDemLow - atr * 0.25, entryPrice * 0.975), currency);
+      const risk = Math.max(currency === 'IDR' ? 10 : 0.25, entryPrice - stopLoss);
+      takeProfit1 = snapStockTickServer(Math.max(snappedSupLow, entryPrice + risk * 1.8), currency);
+      takeProfit2 = snapStockTickServer(Math.max(snappedSupHigh, takeProfit1 + risk), currency);
+      strategyTag = posInSd > 0.62 ? 'Wait Demand Pullback' : 'Await Flow Confirmation';
+      executionNote = `WAIT: Do not chase mid-range. Place Buy Limit in Demand ${fmtStockLevelServer(snappedDemLow, currency)}–${fmtStockLevelServer(snappedDemHigh, currency)} with SL ${fmtStockLevelServer(stopLoss, currency)}.`;
+    } else {
+      entryPrice = snapStockTickServer((snappedSupLow + snappedSupHigh) / 2, currency);
+      stopLoss = snapStockTickServer(Math.max(snappedSupHigh + atr * 0.25, entryPrice * 1.025), currency);
+      const risk = Math.max(currency === 'IDR' ? 10 : 0.25, stopLoss - entryPrice);
+      takeProfit1 = snapStockTickServer(Math.max(currency === 'IDR' ? 50 : 1, Math.min(snappedDemHigh, entryPrice - risk * 1.8)), currency);
+      takeProfit2 = snapStockTickServer(Math.max(currency === 'IDR' ? 50 : 1, Math.min(snappedDemLow, takeProfit1 - risk)), currency);
+      strategyTag = posInSd < 0.38 ? 'Wait Supply Bounce' : 'Await Distribution Break';
+      executionNote = `WAIT: Hold entries. Watch Supply ${fmtStockLevelServer(snappedSupLow, currency)}–${fmtStockLevelServer(snappedSupHigh, currency)} for Sell/Trim with SL ${fmtStockLevelServer(stopLoss, currency)}.`;
+    }
+  }
+
+  const riskAbs = Math.max(1e-6, Math.abs(entryPrice - stopLoss));
+  const rewardAbs = Math.abs(takeProfit1 - entryPrice);
+  const rr = Math.max(1.1, rewardAbs / riskAbs);
+  const conviction = Math.round(Math.max(38, Math.min(94, 48 + Math.abs(netScore) * 0.62)));
+
+  const entryZoneLow = action === 'SELL' ? entryPrice : snapStockTickServer(entryPrice - atr * 0.12, currency);
+  const entryZoneHigh = action === 'BUY' ? entryPrice : snapStockTickServer(entryPrice + atr * 0.12, currency);
+
+  return {
+    action,
+    conviction,
+    strategyTag,
+    entryPrice,
+    entryZoneLabel:
+      entryZoneLow === entryZoneHigh
+        ? fmtStockLevelServer(entryPrice, currency)
+        : `${fmtStockLevelServer(Math.min(entryZoneLow, entryZoneHigh), currency)} – ${fmtStockLevelServer(Math.max(entryZoneLow, entryZoneHigh), currency)}`,
+    takeProfit1,
+    takeProfit2,
+    stopLoss,
+    riskReward: `1:${rr.toFixed(1)}`,
+    demandZoneLabel: `${fmtStockLevelServer(snappedDemLow, currency)} – ${fmtStockLevelServer(snappedDemHigh, currency)}`,
+    supplyZoneLabel: `${fmtStockLevelServer(snappedSupLow, currency)} – ${fmtStockLevelServer(snappedSupHigh, currency)}`,
+    bandarFlowBias: `${bandar.phase} · ${bandar.volumeRatio.toFixed(1)}x Vol · ${bandar.foreignBias}`,
+    executionNote,
+  };
+}
+
+async function fetchEquityBandarmologyAndZonesMap(
+  tickerList: Array<{
     symbol: string;
-    price?: number;
-    prevClose?: number;
+    market: 'US' | 'ID';
+    price: number;
+    prevClose: number;
+    dayHigh: number;
+    dayLow: number;
     foreignNetAmount?: number;
+    foreignFlowSide?: 'BUY' | 'SELL';
   }>
-): Promise<Map<string, BandarmologyAnalysis>> {
-  const out = new Map<string, BandarmologyAnalysis>();
+): Promise<Map<string, { bandarmology: BandarmologyAnalysis; tradePlan: StockTradePlan }>> {
+  const out = new Map<string, { bandarmology: BandarmologyAnalysis; tradePlan: StockTradePlan }>();
   const now = Date.now();
-  const idxOpen = getServerSessionInfo('BBCA.JK', new Date(now)).isOpen;
-  const ttl = idxOpen ? 90_000 : 600_000;
 
   const uniqueMap = new Map<
     string,
-    { symbol: string; yahooSymbol: string; price?: number; prevClose?: number; foreignNetAmount?: number }
+    {
+      cacheKey: string;
+      symbol: string;
+      yahooSymbol: string;
+      market: 'US' | 'ID';
+      currency: 'USD' | 'IDR';
+      price: number;
+      prevClose: number;
+      dayHigh: number;
+      dayLow: number;
+      foreignNetAmount?: number;
+      foreignFlowSide?: 'BUY' | 'SELL';
+      ttl: number;
+    }
   >();
-  for (const item of idxTickerList) {
+
+  for (const item of tickerList) {
     const clean = item.symbol.trim().toUpperCase().replace(/\.JK$/i, '');
     if (!clean) continue;
-    const cached = idxBandarmologyCache.get(clean);
+    const cacheKey = `${item.market}:${clean}`;
+    const cached = equityFlowAndTradePlanCache.get(cacheKey);
     if (cached && cached.expiresAt > now) {
-      out.set(clean, cached.data);
+      out.set(cacheKey, cached.data);
       continue;
     }
-    if (!uniqueMap.has(clean)) {
-      uniqueMap.set(clean, {
+    if (!uniqueMap.has(cacheKey)) {
+      const yahooSymbol = item.market === 'ID' ? `${clean}.JK` : clean.replace(/\./g, '-');
+      const isOpen = getServerSessionInfo(item.market === 'ID' ? `${clean}.JK` : clean, new Date(now)).isOpen;
+      uniqueMap.set(cacheKey, {
+        cacheKey,
         symbol: clean,
-        yahooSymbol: `${clean}.JK`,
+        yahooSymbol,
+        market: item.market,
+        currency: item.market === 'ID' ? 'IDR' : 'USD',
         price: item.price,
         prevClose: item.prevClose,
-        foreignNetAmount: item.foreignNetAmount ?? latestIdxForeignFlowMap.get(clean),
+        dayHigh: item.dayHigh,
+        dayLow: item.dayLow,
+        foreignNetAmount:
+          item.foreignNetAmount ?? (item.market === 'ID' ? latestIdxForeignFlowMap.get(clean) : undefined),
+        foreignFlowSide: item.foreignFlowSide,
+        ttl: isOpen ? 90_000 : 600_000,
       });
     }
   }
 
-  const queue = Array.from(uniqueMap.values()).slice(0, 36);
-  const concurrency = 6;
+  const queue = Array.from(uniqueMap.values()).slice(0, 64);
+  const concurrency = 8;
   let cursor = 0;
 
   const worker = async () => {
     while (cursor < queue.length) {
       const target = queue[cursor++];
       try {
-        const json = await fetchYahooChartJson(target.yahooSymbol, '1mo', '1d', 5000);
+        const json = await fetchYahooChartJson(target.yahooSymbol, '1mo', '1d', 4500);
         const item = json?.chart?.result?.[0];
         const q = item?.indicators?.quote?.[0];
         const rawC = q?.close ?? [];
@@ -4099,7 +4899,7 @@ async function fetchIdxBandarmologyMap(
           }
         }
 
-        const analysis = computeIdxBandarmologyFromBars({
+        const bandarmology = computeIdxBandarmologyFromBars({
           symbol: target.symbol,
           closes,
           highs,
@@ -4111,13 +4911,31 @@ async function fetchIdxBandarmologyMap(
           foreignNetAmount: target.foreignNetAmount,
         });
 
-        out.set(target.symbol, analysis);
-        idxBandarmologyCache.set(target.symbol, {
-          data: analysis,
-          expiresAt: Date.now() + ttl,
+        const tradePlan = computeEquityTradePlanFromBars({
+          symbol: target.symbol,
+          currency: target.currency,
+          closes,
+          highs,
+          lows,
+          opens,
+          volumes,
+          currentPrice: target.price,
+          prevClose: target.prevClose,
+          dayHigh: target.dayHigh,
+          dayLow: target.dayLow,
+          bandar: bandarmology,
+          foreignNetAmount: target.foreignNetAmount,
+          foreignFlowSide: target.foreignFlowSide,
+        });
+
+        const bundle = { bandarmology, tradePlan };
+        out.set(target.cacheKey, bundle);
+        equityFlowAndTradePlanCache.set(target.cacheKey, {
+          data: bundle,
+          expiresAt: Date.now() + target.ttl,
         });
       } catch {
-        // fallback handled if needed
+        // fallback handled client-side if needed
       }
     }
   };
@@ -4125,6 +4943,33 @@ async function fetchIdxBandarmologyMap(
   await Promise.all(
     Array.from({ length: Math.min(concurrency, Math.max(1, queue.length)) }, () => worker())
   );
+  return out;
+}
+
+async function fetchIdxBandarmologyMap(
+  idxTickerList: Array<{
+    symbol: string;
+    price?: number;
+    prevClose?: number;
+    foreignNetAmount?: number;
+  }>
+): Promise<Map<string, BandarmologyAnalysis>> {
+  const mapped = await fetchEquityBandarmologyAndZonesMap(
+    idxTickerList.map((item) => ({
+      symbol: item.symbol,
+      market: 'ID' as const,
+      price: item.price ?? 0,
+      prevClose: item.prevClose ?? item.price ?? 0,
+      dayHigh: item.price ?? 0,
+      dayLow: item.price ?? 0,
+      foreignNetAmount: item.foreignNetAmount,
+    }))
+  );
+  const out = new Map<string, BandarmologyAnalysis>();
+  for (const [key, val] of mapped.entries()) {
+    const clean = key.replace(/^ID:/, '');
+    out.set(clean, val.bandarmology);
+  }
   return out;
 }
 
@@ -4445,28 +5290,45 @@ async function fetchTopStockMoversFresh(): Promise<StocksMoversResponse> {
     ...idxLosersRaw.map(stripInternal),
   ];
 
-  const idxAllForBandar = [
-    ...idxImpactRaw,
-    ...idxGainersRaw,
-    ...idxLosersRaw,
-    ...finalForeignBuy,
-    ...finalForeignSell,
+  const allForStrategy = [
+    ...usImpactRaw.map((m) => ({ ...m, market: 'US' as const })),
+    ...usGainersRaw.map((m) => ({ ...m, market: 'US' as const })),
+    ...usLosersRaw.map((m) => ({ ...m, market: 'US' as const })),
+    ...idxImpactRaw.map((m) => ({ ...m, market: 'ID' as const })),
+    ...idxGainersRaw.map((m) => ({ ...m, market: 'ID' as const })),
+    ...idxLosersRaw.map((m) => ({ ...m, market: 'ID' as const })),
+    ...finalForeignBuy.map((m) => ({ ...m, market: 'ID' as const })),
+    ...finalForeignSell.map((m) => ({ ...m, market: 'ID' as const })),
   ].map((m) => ({
     symbol: m.symbol,
+    market: m.market,
     price: m.price,
     prevClose: m.prevClose,
-    foreignNetAmount: 'foreignNetAmount' in m ? m.foreignNetAmount : latestIdxForeignFlowMap.get(m.symbol),
+    dayHigh: m.dayHigh,
+    dayLow: m.dayLow,
+    foreignNetAmount:
+      'foreignNetAmount' in m && typeof m.foreignNetAmount === 'number'
+        ? m.foreignNetAmount
+        : m.market === 'ID'
+          ? latestIdxForeignFlowMap.get(m.symbol)
+          : undefined,
+    foreignFlowSide: 'foreignFlowSide' in m ? m.foreignFlowSide : undefined,
   }));
 
-  const [enriched, bandarMap] = await Promise.all([
+  const [enriched, strategyMap] = await Promise.all([
     enrichSparklinesForMovers(combinedMovers),
-    fetchIdxBandarmologyMap(idxAllForBandar),
+    fetchEquityBandarmologyAndZonesMap(allForStrategy),
   ]);
 
-  const attachBandar = (m: StockMover): StockMover =>
-    m.market === 'ID' && bandarMap.has(m.symbol)
-      ? { ...m, bandarmology: bandarMap.get(m.symbol) }
-      : m;
+  const attachStrategy = (m: StockMover): StockMover => {
+    const entry = strategyMap.get(`${m.market}:${m.symbol}`);
+    if (!entry) return m;
+    return {
+      ...m,
+      bandarmology: entry.bandarmology,
+      tradePlan: entry.tradePlan,
+    };
+  };
 
   const u0 = usImpactRaw.length;
   const u1 = u0 + usGainersRaw.length;
@@ -4476,16 +5338,16 @@ async function fetchTopStockMoversFresh(): Promise<StocksMoversResponse> {
 
   const payload: StocksMoversResponse = {
     us: {
-      impact: enriched.slice(0, u0),
-      gainers: enriched.slice(u0, u1),
-      losers: enriched.slice(u1, u2),
+      impact: enriched.slice(0, u0).map(attachStrategy),
+      gainers: enriched.slice(u0, u1).map(attachStrategy),
+      losers: enriched.slice(u1, u2).map(attachStrategy),
     },
     indonesia: {
-      impact: enriched.slice(u2, i0).map(attachBandar),
-      gainers: enriched.slice(i0, i1).map(attachBandar),
-      losers: enriched.slice(i1).map(attachBandar),
-      foreignBuy: finalForeignBuy.map(attachBandar),
-      foreignSell: finalForeignSell.map(attachBandar),
+      impact: enriched.slice(u2, i0).map(attachStrategy),
+      gainers: enriched.slice(i0, i1).map(attachStrategy),
+      losers: enriched.slice(i1).map(attachStrategy),
+      foreignBuy: finalForeignBuy.map(attachStrategy),
+      foreignSell: finalForeignSell.map(attachStrategy),
     },
     updatedAt: new Date().toISOString(),
   };
@@ -4932,6 +5794,7 @@ export interface SymbolDetailResponse {
   sessionProgressRatio: number;
   updatedAtEpoch: number;
   bandarmology?: BandarmologyAnalysis;
+  tradePlan?: StockTradePlan;
 }
 
 export async function fetchSymbolDetail(
@@ -5139,16 +6002,23 @@ export async function fetchSymbolDetail(
   const openFormatted = formatStatNumber(firstOpen, decimals, prefix);
 
   let bandarmology: BandarmologyAnalysis | undefined;
-  if (isIdr && !isIndex && sym.endsWith('.JK')) {
-    const bMap = await fetchIdxBandarmologyMap([
+  let tradePlan: StockTradePlan | undefined;
+  if (!isIndex) {
+    const marketCode: 'US' | 'ID' = isIdr || sym.endsWith('.JK') ? 'ID' : 'US';
+    const stratMap = await fetchEquityBandarmologyAndZonesMap([
       {
         symbol: cleanSym,
+        market: marketCode,
         price: Number(price.toFixed(decimals)),
         prevClose: Number(prevClose.toFixed(decimals)),
-        foreignNetAmount: latestIdxForeignFlowMap.get(cleanSym),
+        dayHigh: Number(dayHighNum.toFixed(decimals)),
+        dayLow: Number(dayLowNum.toFixed(decimals)),
+        foreignNetAmount: marketCode === 'ID' ? latestIdxForeignFlowMap.get(cleanSym) : undefined,
       },
     ]);
-    bandarmology = bMap.get(cleanSym);
+    const strat = stratMap.get(`${marketCode}:${cleanSym}`);
+    bandarmology = strat?.bandarmology;
+    tradePlan = strat?.tradePlan;
   }
 
   return {
@@ -5200,6 +6070,7 @@ export async function fetchSymbolDetail(
     sessionProgressRatio: sessionInfo.progressRatio,
     updatedAtEpoch: Number(meta.regularMarketTime || Math.floor(now / 1000)) * 1000,
     bandarmology,
+    tradePlan,
   };
 }
 
@@ -5739,14 +6610,14 @@ export async function fetchDailyMarketSummary(): Promise<DailyMarketSummaryPaylo
       return ev.day === 'today';
     })
     .sort((a, b) => {
-      const scoreA = (a.impact === 'HIGH' ? 2 : 1) + (a.actual !== 'Pending' ? 2 : 0);
-      const scoreB = (b.impact === 'HIGH' ? 2 : 1) + (b.actual !== 'Pending' ? 2 : 0);
+      const scoreA = (a.impact === 'HIGH' ? 2 : 1) + (!isUnpublishedActual(a.actual) ? 2 : 0);
+      const scoreB = (b.impact === 'HIGH' ? 2 : 1) + (!isUnpublishedActual(b.actual) ? 2 : 0);
       return scoreB - scoreA;
     });
 
   const selectedCal = (recentCal.length > 0 ? recentCal : calEvents).slice(0, 3);
   for (const ev of selectedCal) {
-    const hasActual = ev.actual && ev.actual !== 'Pending' && ev.actual !== '—';
+    const hasActual = !isUnpublishedActual(ev.actual);
     highlights.push({
       id: `sum-ev-${ev.id}`,
       category: 'event',
@@ -5842,6 +6713,32 @@ export interface MarketIntelligencePayload {
   forwardPrediction: string;
   sessionConditionAndTrigger?: string;
   oneSentenceSummary?: string;
+  unifiedSynthesis?: {
+    regimeTag:
+      | 'Risk-On Expansion'
+      | 'Selective Rotation'
+      | 'Macro Event Caution'
+      | 'Defensive De-Risking';
+    convictionPct: number;
+    executiveThesis: string;
+    catalysts: Array<{
+      id: string;
+      kind: 'FLOW' | 'WIRE' | 'MACRO';
+      tag: string;
+      title: string;
+      implication: string;
+      tone: 'bull' | 'bear' | 'neutral';
+      routeTarget: 'stocks' | 'news' | 'calendar';
+    }>;
+    scenarios: {
+      horizonLabel: string;
+      bullTrigger: string;
+      bullTarget: string;
+      baseCase: string;
+      bearTrigger: string;
+      bearTarget: string;
+    };
+  };
   indexSessions: IndexSessionBrief[];
   aiRefined: boolean;
 }
@@ -5994,7 +6891,7 @@ function resolveIndexPhase(assetId: string, nowDate: Date): SessionPhaseKey {
 }
 
 function buildMacroImplicationText(ev: LiveCalendarItem): string {
-  const hasActual = ev.actual && ev.actual !== 'Pending' && ev.actual !== '—';
+  const hasActual = !isUnpublishedActual(ev.actual);
   const currScope =
     ev.currency === 'USD'
       ? 'US Treasury yields, DXY, and global risk appetite'
@@ -6314,7 +7211,17 @@ async function fetchMarketIntelligenceFresh(): Promise<MarketIntelligencePayload
     }
   }
 
-  const dataReleaseImplications = events.slice(0, 6).map((ev) => ({
+  const marketMovingEvents = events.filter(
+    (ev): ev is LiveCalendarItem & { impact: 'HIGH' | 'MED' } =>
+      ev.impact === 'HIGH' || ev.impact === 'MED'
+  );
+  const upcomingMacroEvents = marketMovingEvents
+    .filter((ev) => Date.parse(ev.isoDate) >= now - 6 * 3600_000)
+    .sort((a, b) => Date.parse(a.isoDate) - Date.parse(b.isoDate));
+  const selectedMacroEvents = (upcomingMacroEvents.length > 0 ? upcomingMacroEvents : marketMovingEvents)
+    .slice(0, 6);
+
+  const dataReleaseImplications = selectedMacroEvents.map((ev) => ({
     currency: ev.currency,
     impact: ev.impact,
     title: ev.title,
@@ -6410,7 +7317,7 @@ async function fetchMarketIntelligenceFresh(): Promise<MarketIntelligencePayload
   }
   if (topEvent) {
     triggerDrivers.push(
-      topEvent.actual && topEvent.actual !== 'Pending' && topEvent.actual !== '—'
+      !isUnpublishedActual(topEvent.actual)
         ? `${topEvent.currency} ${topEvent.title} (${topEvent.actual} vs ${topEvent.forecast})`
         : `${topEvent.currency} ${topEvent.title} (${topEvent.timeWib})`
     );
@@ -6556,6 +7463,104 @@ ${JSON.stringify(digestInput)}`,
     }
   }
 
+  // Unified Cross-Source Signal Fusion (replaces 4 fragmented intelligence panels with ONE survival synthesis entity)
+  const totalSignals = Math.max(1, bullCount + bearCount + neutralCount);
+  const equityFlowVector = ((bullCount - bearCount) / totalSignals) * 100;
+  const wireToneVector =
+    rumorAndCatalystThemes.reduce(
+      (acc, r) => acc + (r.tone === 'bull' ? 1 : r.tone === 'bear' ? -1 : 0),
+      0
+    ) * (100 / Math.max(1, rumorAndCatalystThemes.length));
+  const upcomingHighMacro = selectedMacroEvents.find(
+    (ev) => ev.impact === 'HIGH' && Date.parse(ev.isoDate) > now && Date.parse(ev.isoDate) - now < 24 * 3600_000
+  );
+  const macroPressureVector = -macroTighteningScore * 22;
+  const alignedAgreement = Math.round(
+    Math.min(
+      95,
+      Math.max(
+        42,
+        54 +
+          (Math.abs(equityFlowVector * 0.5 + wireToneVector * 0.3 + macroPressureVector * 0.2) *
+            0.42)
+      )
+    )
+  );
+
+  const regimeTag: NonNullable<MarketIntelligencePayload['unifiedSynthesis']>['regimeTag'] =
+    upcomingHighMacro && Math.abs(equityFlowVector) < 22
+      ? 'Macro Event Caution'
+      : compositeSentiment === 'Bullish'
+        ? 'Risk-On Expansion'
+        : compositeSentiment === 'Bearish'
+          ? 'Defensive De-Risking'
+          : 'Selective Rotation';
+
+  const unifiedCatalysts: NonNullable<MarketIntelligencePayload['unifiedSynthesis']>['catalysts'] = [];
+  // 1. Primary Equities & Flow attribution catalyst
+  unifiedCatalysts.push({
+    id: 'cat-flow-global',
+    kind: 'FLOW',
+    tag: idxBuyTop ? `Equities & Foreign Flow` : 'Cap-Weighted Flow',
+    title:
+      usTop3.length > 0
+        ? `US Led by ${usTop3.slice(0, 2).map((s) => `${s.symbol} (${s.changePercent >= 0 ? '+' : ''}${s.changePercent.toFixed(2)}%)`).join(', ')}${idxTop3[0] ? ` · IDX ${idxTop3[0].symbol} (${idxTop3[0].changePercent >= 0 ? '+' : ''}${idxTop3[0].changePercent.toFixed(2)}%)` : ''}`
+        : 'Global Equity Breadth & Cross-Border Flow',
+    implication: stocksAndFlowSummary,
+    tone: equityFlowVector >= 10 ? 'bull' : equityFlowVector <= -10 ? 'bear' : 'neutral',
+    routeTarget: 'stocks',
+  });
+
+  // 2. Top Macro Release catalysts (ForexFactory High/Med)
+  for (const ev of selectedMacroEvents.slice(0, 2)) {
+    unifiedCatalysts.push({
+      id: `cat-macro-${ev.id}`,
+      kind: 'MACRO',
+      tag: `${ev.currency} · ${ev.timeWib} · ${ev.impact === 'HIGH' ? 'High' : 'Med'}`,
+      title: `${ev.title}${ev.forecast && ev.forecast !== '—' ? ` (Fcst ${ev.forecast} / Prev ${ev.previous})` : ''}`,
+      implication: buildMacroImplicationText(ev),
+      tone: ev.deviationType === 'beat' ? 'bull' : ev.deviationType === 'miss' ? 'bear' : 'neutral',
+      routeTarget: 'calendar',
+    });
+  }
+
+  // 3. Top Headline / Rumor narrative cues
+  for (const [idx, theme] of rumorAndCatalystThemes.slice(0, 2).entries()) {
+    unifiedCatalysts.push({
+      id: `cat-wire-${idx}`,
+      kind: 'WIRE',
+      tag: theme.tag,
+      title: theme.theme,
+      implication:
+        theme.tone === 'bull'
+          ? 'Reinforces risk appetite and upside breadth into active session liquidity.'
+          : theme.tone === 'bear'
+            ? 'Adds defensive hedging demand and caps multiple expansion until yields stabilize.'
+            : 'Monitor follow-through volume for confirmation across index heavyweights.',
+      tone: theme.tone,
+      routeTarget: 'news',
+    });
+  }
+
+  const nextMacroLabel = selectedMacroEvents[0]
+    ? `${selectedMacroEvents[0].currency} ${selectedMacroEvents[0].title} (${selectedMacroEvents[0].timeWib})`
+    : 'upcoming Tier-1 macro prints';
+
+  const unifiedSynthesis: NonNullable<MarketIntelligencePayload['unifiedSynthesis']> = {
+    regimeTag,
+    convictionPct: alignedAgreement,
+    executiveThesis: `${oneSentenceSummary} ${sessionConditionAndTrigger}`,
+    catalysts: unifiedCatalysts.slice(0, 5),
+    scenarios: {
+      horizonLabel: upcomingHighMacro ? `Event Window · ${upcomingHighMacro.timeWib}` : 'Next 24h Session Window',
+      bullTrigger: `US 10Y holds below ${us10y?.support ?? '4.900%'} & S&P 500 sustains above ${spx?.open ?? spx?.support ?? 'pivot'}`,
+      bullTarget: `Rotates toward SPX ${spx?.resistance ?? 'R1'}, IHSG ${ihsg?.resistance ?? 'R1'}, and risk-beta (${btc?.resistance ?? 'BTC R1'})`,
+      baseCase: `Two-way range dispersion around DXY ${dxy?.price.toFixed(2) ?? 'spot'} and Gold $${gold?.price.toLocaleString('en-US', { maximumFractionDigits: 0 }) ?? 'spot'} ahead of ${nextMacroLabel}`,
+      bearTrigger: `DXY breaks ${dxy?.resistance ?? 'resistance'} or SPX fails S1 ${spx?.support ?? 'support'} on hawkish surprise`,
+      bearTarget: `Defensives & bullion bid toward Gold ${gold?.resistance ?? 'R1'} as equities test lower liquidity shelves`,
+    },
+  };
+
   const result: MarketIntelligencePayload = {
     updatedAt: new Date(now).toISOString(),
     headline: finalHeadline,
@@ -6570,6 +7575,7 @@ ${JSON.stringify(digestInput)}`,
     forwardPrediction,
     sessionConditionAndTrigger,
     oneSentenceSummary,
+    unifiedSynthesis,
     indexSessions,
     aiRefined,
   };

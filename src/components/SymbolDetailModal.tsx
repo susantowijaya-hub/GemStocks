@@ -1,12 +1,18 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowDown, ArrowUp, Clock, Loader2, TrendingUp, X } from 'lucide-react';
+import { ArrowDown, ArrowUp, Clock, Loader2, ShieldAlert, Target, TrendingUp, X } from 'lucide-react';
 import {
   BandarmologyAnalysis,
   CandlePoint,
   MarketAsset,
+  StockTradePlan,
   Timeframe,
 } from '../types/market';
-import { computeFearGreedIndex, parseFormattedMarketNumber } from '../utils/marketSignals';
+import {
+  computeFearGreedIndex,
+  computeStockTradeStrategy,
+  formatStockCurrencyValue,
+  parseFormattedMarketNumber,
+} from '../utils/marketSignals';
 import { GoogleFinanceDeltaPill } from './GoogleFinanceMiniChart';
 import { InteractiveChart } from './InteractiveChart';
 import { BandarmologyBadge, FearGreedMeter } from './MarketUiPrimitives';
@@ -69,6 +75,7 @@ interface SymbolDetailData {
   sessionProgressRatio: number;
   updatedAtEpoch: number;
   bandarmology?: BandarmologyAnalysis;
+  tradePlan?: StockTradePlan;
 }
 
 interface SymbolDetailModalProps {
@@ -251,6 +258,39 @@ export const SymbolDetailModal: React.FC<SymbolDetailModalProps> = ({
       w52Pct: detail.w52Pct,
       assetId: detail.yahooSymbol || detail.symbol,
       category: detail.isIndex ? 'indices' : 'stocks',
+    });
+  }, [detail]);
+
+  const detailTradePlan = useMemo<StockTradePlan | null>(() => {
+    if (!detail || detail.isIndex) return null;
+    if (
+      detail.tradePlan &&
+      detail.tradePlan.entryPrice > 0 &&
+      detail.tradePlan.stopLoss > 0 &&
+      detail.tradePlan.takeProfit1 > 0 &&
+      detail.tradePlan.takeProfit2 > 0
+    ) {
+      return detail.tradePlan;
+    }
+    const dayHighNum = parseFormattedMarketNumber(detail.dayHigh);
+    const dayLowNum = parseFormattedMarketNumber(detail.dayLow);
+    return computeStockTradeStrategy({
+      symbol: detail.symbol,
+      name: detail.name,
+      market: detail.currency === 'IDR' ? 'ID' : 'US',
+      exchange: detail.exchange,
+      currency: detail.currency,
+      price: detail.price,
+      prevClose: detail.prevClose,
+      changeValue: detail.changeValue,
+      changePercent: detail.changePercent,
+      dayHigh: Number.isFinite(dayHighNum) ? dayHighNum : detail.price * 1.01,
+      dayLow: Number.isFinite(dayLowNum) ? dayLowNum : detail.price * 0.99,
+      volume: detail.volume,
+      volumeRaw: parseFormattedMarketNumber(detail.volume) || 0,
+      marketState: detail.marketSessionOpen ? 'REGULAR' : 'CLOSED',
+      sparklinePoints: detail.chart1D.slice(-16),
+      bandarmology: detail.bandarmology,
     });
   }, [detail]);
 
@@ -497,7 +537,7 @@ export const SymbolDetailModal: React.FC<SymbolDetailModalProps> = ({
                 </div>
               </div>
 
-              {/* Technical Line & Candlestick OHLC Chart (Unified with Index Terminal) */}
+              {/* Technical Line, Candlestick OHLC Chart & Integrated Key Statistics */}
               <InteractiveChart
                 asset={chartAsset}
                 timeframe={timeframe}
@@ -507,34 +547,6 @@ export const SymbolDetailModal: React.FC<SymbolDetailModalProps> = ({
                 forceGranularIntraday
                 hideTimeframeTabs
               />
-
-              {/* Key Statistics Grid */}
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 rounded-2xl liquid-glass-inset p-4 text-xs">
-                <div>
-                  <span className="text-[#6C6C70] dark:text-[#8E8E93]">Open</span>
-                  <p className="font-mono font-bold text-[#1C1C1E] dark:text-white mt-0.5">
-                    {detail.open}
-                  </p>
-                </div>
-                <div>
-                  <span className="text-[#6C6C70] dark:text-[#8E8E93]">Day High</span>
-                  <p className="font-mono font-bold text-[#16803C] dark:text-[#30D158] mt-0.5">
-                    {detail.dayHigh}
-                  </p>
-                </div>
-                <div>
-                  <span className="text-[#6C6C70] dark:text-[#8E8E93]">Day Low</span>
-                  <p className="font-mono font-bold text-[#D7261C] dark:text-[#FF453A] mt-0.5">
-                    {detail.dayLow}
-                  </p>
-                </div>
-                <div>
-                  <span className="text-[#6C6C70] dark:text-[#8E8E93]">Volume</span>
-                  <p className="font-mono font-bold text-[#1C1C1E] dark:text-white mt-0.5">
-                    {detail.volume}
-                  </p>
-                </div>
-              </div>
 
               {/* Per-Instrument Fear & Greed Gauge */}
               {detailFearGreed && (
@@ -546,7 +558,111 @@ export const SymbolDetailModal: React.FC<SymbolDetailModalProps> = ({
                 />
               )}
 
-              {/* IDX Bandarmology Accumulation / Distribution Position */}
+              {/* Execution Trade Plan: Bandarmology + Flow + Supply/Demand */}
+              {detailTradePlan && (
+                <div
+                  data-testid="modal-trade-plan-card"
+                  className="rounded-2xl liquid-glass-inset p-4 flex flex-col gap-3 text-xs"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <span className="text-[11px] font-bold uppercase tracking-wider text-[#6C6C70] dark:text-[#9EB5C8]">
+                        Execution Trade Plan (Bandarmology + Flow + Supply/Demand)
+                      </span>
+                      <p className="text-[11px] font-semibold text-[#1C1C1E] dark:text-white mt-0.5">
+                        {detailTradePlan.strategyTag} · {detailTradePlan.bandarFlowBias}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span
+                        className={`inline-flex items-center px-2.5 py-1 rounded-lg border text-xs font-extrabold font-mono tabular-nums ${
+                          detailTradePlan.action === 'BUY'
+                            ? 'bg-[#16A34A]/18 text-[#0B5D2A] dark:text-[#4ADE80] border-[#16A34A]/45'
+                            : detailTradePlan.action === 'SELL'
+                              ? 'bg-[#DC2626]/18 text-[#B91C1C] dark:text-[#FF6B63] border-[#DC2626]/45'
+                              : 'bg-[#D97706]/18 text-[#9A5A0A] dark:text-[#FBBF24] border-[#D97706]/45'
+                        }`}
+                      >
+                        {detailTradePlan.action} · {detailTradePlan.conviction}%
+                      </span>
+                      <span className="px-2 py-1 rounded-lg bg-black/[0.04] dark:bg-white/[0.06] font-mono font-bold tabular-nums text-[#1C1C1E] dark:text-white">
+                        R:R {detailTradePlan.riskReward}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 pt-2 border-t border-black/8 dark:border-white/10 font-mono tabular-nums">
+                    <div>
+                      <span className="text-[10px] font-sans font-bold uppercase text-[#6C6C70] dark:text-[#9EB5C8] block">
+                        1. {detailTradePlan.action === 'WAIT' ? 'Wait Entry' : `Execute ${detailTradePlan.action}`}
+                      </span>
+                      <span className="font-extrabold text-sm text-[#1C1C1E] dark:text-white block mt-0.5">
+                        {formatStockCurrencyValue(detailTradePlan.entryPrice, detail.currency)}
+                      </span>
+                      <span className="text-[10px] text-[#6C6C70] dark:text-[#9EB5C8] block truncate">
+                        Zone {detailTradePlan.entryZoneLabel}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-[10px] font-sans font-bold uppercase text-[#6C6C70] dark:text-[#9EB5C8] flex items-center gap-1">
+                        <ShieldAlert className="w-3 h-3 text-[#DC2626] dark:text-[#FF6B63]" />
+                        2. Stop Loss (SL)
+                      </span>
+                      <span className="font-extrabold text-sm text-[#C41C16] dark:text-[#FF6B63] block mt-0.5">
+                        {formatStockCurrencyValue(detailTradePlan.stopLoss, detail.currency)}
+                      </span>
+                      <span className="text-[10px] text-[#6C6C70] dark:text-[#9EB5C8] block truncate">
+                        Hard Invalidation
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-[10px] font-sans font-bold uppercase text-[#6C6C70] dark:text-[#9EB5C8] flex items-center gap-1">
+                        <Target className="w-3 h-3 text-[#16A34A] dark:text-[#4ADE80]" />
+                        3. Take Profit 1
+                      </span>
+                      <span className="font-extrabold text-sm text-[#0F7033] dark:text-[#4ADE80] block mt-0.5">
+                        {formatStockCurrencyValue(detailTradePlan.takeProfit1, detail.currency)}
+                      </span>
+                      <span className="text-[10px] text-[#6C6C70] dark:text-[#9EB5C8] block truncate">
+                        Secure 50% + BE
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-[10px] font-sans font-bold uppercase text-[#6C6C70] dark:text-[#9EB5C8] flex items-center gap-1">
+                        <Target className="w-3 h-3 text-[#16A34A] dark:text-[#4ADE80]" />
+                        4. Take Profit 2
+                      </span>
+                      <span className="font-extrabold text-sm text-[#0F7033] dark:text-[#4ADE80] block mt-0.5">
+                        {formatStockCurrencyValue(detailTradePlan.takeProfit2, detail.currency)}
+                      </span>
+                      <span className="text-[10px] text-[#6C6C70] dark:text-[#9EB5C8] block truncate">
+                        Full Extension Target
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[10.5px] font-mono tabular-nums pt-2 border-t border-black/8 dark:border-white/10">
+                    <div>
+                      <span className="font-sans font-bold text-[#0F7033] dark:text-[#4ADE80] mr-1.5">
+                        Demand Zone:
+                      </span>
+                      <span className="text-[#1C1C1E] dark:text-white">{detailTradePlan.demandZoneLabel}</span>
+                    </div>
+                    <div>
+                      <span className="font-sans font-bold text-[#C41C16] dark:text-[#FF6B63] mr-1.5">
+                        Supply Zone:
+                      </span>
+                      <span className="text-[#1C1C1E] dark:text-white">{detailTradePlan.supplyZoneLabel}</span>
+                    </div>
+                  </div>
+
+                  <p className="text-[11px] text-[#4A4D57] dark:text-[#C7CBD6] leading-relaxed">
+                    {detailTradePlan.executionNote}
+                  </p>
+                </div>
+              )}
+
+              {/* Bandarmology & Institutional Flow Position */}
               {detail.bandarmology && (
                 <div
                   data-testid="modal-bandarmology-card"
@@ -555,7 +671,7 @@ export const SymbolDetailModal: React.FC<SymbolDetailModalProps> = ({
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div>
                       <span className="text-[11px] font-bold uppercase tracking-wider text-[#6C6C70] dark:text-[#9EB5C8]">
-                        IDX Bandarmology Position
+                        {detail.currency === 'IDR' ? 'IDX Bandarmology Position' : 'Institutional Flow Position'}
                       </span>
                       <p className="text-[11px] text-[#4A4D57] dark:text-[#C7CBD6] mt-0.5">
                         {detail.bandarmology.summary}
@@ -582,7 +698,7 @@ export const SymbolDetailModal: React.FC<SymbolDetailModalProps> = ({
                     </div>
                     <div>
                       <span className="text-[10px] text-[#6C6C70] dark:text-[#9EB5C8]">
-                        Foreign Flow Bias
+                        Flow Bias
                       </span>
                       <p className="font-mono font-bold text-[#1C1C1E] dark:text-white mt-0.5">
                         {detail.bandarmology.foreignBias}

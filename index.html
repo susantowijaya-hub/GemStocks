@@ -111,16 +111,36 @@
         gap: 12px;
       }
       .boot-card {
+        position: relative;
+        overflow: hidden;
         height: 82px;
         border-radius: 16px;
         background: rgba(255, 255, 255, 0.05);
         border: 1px solid rgba(255, 255, 255, 0.08);
       }
       .boot-main {
+        position: relative;
+        overflow: hidden;
         height: 360px;
         border-radius: 20px;
         background: rgba(255, 255, 255, 0.04);
         border: 1px solid rgba(255, 255, 255, 0.08);
+      }
+      .boot-card::after,
+      .boot-main::after {
+        content: '';
+        position: absolute;
+        inset: 0;
+        transform: translateX(-100%);
+        background: linear-gradient(
+          90deg,
+          transparent 0%,
+          rgba(251, 191, 36, 0.12) 45%,
+          rgba(255, 255, 255, 0.14) 55%,
+          transparent 100%
+        );
+        animation: boot-shimmer 1.6s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+        will-change: transform;
       }
       html.arctic .boot-card,
       html.arctic .boot-main,
@@ -128,6 +148,31 @@
       html.parchment .boot-main {
         background: rgba(255, 255, 255, 0.58);
         border-color: rgba(15, 23, 42, 0.08);
+      }
+      html.arctic .boot-card::after,
+      html.arctic .boot-main::after,
+      html.parchment .boot-card::after,
+      html.parchment .boot-main::after {
+        background: linear-gradient(
+          90deg,
+          transparent 0%,
+          rgba(255, 255, 255, 0.65) 50%,
+          transparent 100%
+        );
+      }
+      @keyframes boot-shimmer {
+        0% {
+          transform: translateX(-100%);
+        }
+        100% {
+          transform: translateX(100%);
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .boot-card::after,
+        .boot-main::after {
+          animation: none;
+        }
       }
     </style>
   </head>

@@ -5,6 +5,7 @@ import {
   Bell,
   BellRing,
   CheckCheck,
+  Clock,
   Trash2,
   TrendingDown,
   TrendingUp,
@@ -60,11 +61,12 @@ export const PriceAlertToastStack: React.FC<{
       <AnimatePresence initial={false}>
         {toasts.map((toast) => {
           const isIct = toast.alertKind === 'ict';
+          const isIctWait = isIct && toast.ictAction === 'WAIT';
           const isBandar = toast.alertKind === 'bandarmology';
           const isBandarUpgrade =
             isBandar && toast.bandarToPhase === 'Strong Accumulation';
           const isSurge = isIct
-            ? toast.ictAction !== 'SELL'
+            ? toast.ictAction === 'BUY'
             : isBandar
               ? isBandarUpgrade
               : toast.direction === 'surge';
@@ -82,7 +84,7 @@ export const PriceAlertToastStack: React.FC<{
             >
               <span
                 className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 border ${
-                  isBandar && !isBandarUpgrade
+                  (isBandar && !isBandarUpgrade) || isIctWait
                     ? 'bg-[#D97706]/16 border-[#D97706]/35 text-[#9A5A0A] dark:text-[#FBBF24]'
                     : isSurge
                       ? 'bg-[#22C55E]/16 border-[#22C55E]/35 text-[#0F7033] dark:text-[#4ADE80]'
@@ -91,6 +93,8 @@ export const PriceAlertToastStack: React.FC<{
               >
                 {isBandar ? (
                   <Activity className="w-4 h-4" />
+                ) : isIctWait ? (
+                  <Clock className="w-4 h-4" />
                 ) : isSurge ? (
                   <TrendingUp className="w-4 h-4" />
                 ) : (
@@ -111,22 +115,24 @@ export const PriceAlertToastStack: React.FC<{
                             ? 'bg-[#16A34A]/18 text-[#0F7033] dark:text-[#4ADE80]'
                             : 'bg-[#D97706]/18 text-[#9A5A0A] dark:text-[#FBBF24]'
                           : isIct
-                            ? isSurge
-                              ? 'bg-[#16A34A]/18 text-[#0F7033] dark:text-[#4ADE80]'
-                              : 'bg-[#DC2626]/18 text-[#C41C16] dark:text-[#FF6B63]'
+                            ? isIctWait
+                              ? 'bg-[#D97706]/18 text-[#9A5A0A] dark:text-[#FBBF24]'
+                              : isSurge
+                                ? 'bg-[#16A34A]/18 text-[#0F7033] dark:text-[#4ADE80]'
+                                : 'bg-[#DC2626]/18 text-[#C41C16] dark:text-[#FF6B63]'
                             : 'text-[#6C6C70] dark:text-[#B4B8C4]'
                       }`}
                     >
                       {isBandar
                         ? 'IDX Bandar'
                         : isIct
-                          ? `ICT ${toast.ictAction ?? 'BUY'}`
+                          ? `${toast.ictStrategy === 'sdcv' ? 'S&D' : 'ICT'} ${toast.ictAction ?? 'WAIT'}`
                           : '5m Alert'}
                     </span>
                   </div>
                   <span
                     className={`font-mono font-extrabold text-xs tabular-nums ${
-                      isBandar && !isBandarUpgrade
+                      (isBandar && !isBandarUpgrade) || isIctWait
                         ? 'text-[#9A5A0A] dark:text-[#FBBF24]'
                         : isSurge
                           ? 'text-[#0F7033] dark:text-[#4ADE80]'
@@ -136,7 +142,7 @@ export const PriceAlertToastStack: React.FC<{
                     {isBandar
                       ? `Score ${(toast.bandarScore ?? 0) >= 0 ? '+' : ''}${toast.bandarScore ?? 0}`
                       : isIct
-                        ? `${toast.confidence ?? 72}%`
+                        ? `${toast.confidence ?? 45}%`
                         : toast.movePercent > 0
                           ? `+${toast.movePercent.toFixed(2)}%`
                           : `${toast.movePercent.toFixed(2)}%`}
@@ -408,11 +414,12 @@ export const PriceAlertDrawer: React.FC<{
         <div className="divide-y divide-black/6 dark:divide-white/10 max-h-[260px] overflow-y-auto">
           {visibleAlerts.map((alert) => {
             const isIct = alert.alertKind === 'ict';
+            const isIctWait = isIct && alert.ictAction === 'WAIT';
             const isBandar = alert.alertKind === 'bandarmology';
             const isBandarUpgrade =
               isBandar && alert.bandarToPhase === 'Strong Accumulation';
             const isSurge = isIct
-              ? alert.ictAction !== 'SELL'
+              ? alert.ictAction === 'BUY'
               : isBandar
                 ? isBandarUpgrade
                 : alert.direction === 'surge';
@@ -429,7 +436,7 @@ export const PriceAlertDrawer: React.FC<{
                 <div className="flex items-center gap-2.5 min-w-0">
                   <span
                     className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 ${
-                      isBandar && !isBandarUpgrade
+                      (isBandar && !isBandarUpgrade) || isIctWait
                         ? 'bg-[#D97706]/16 text-[#9A5A0A] dark:text-[#FBBF24]'
                         : isSurge
                           ? 'bg-[#22C55E]/16 text-[#0F7033] dark:text-[#4ADE80]'
@@ -438,6 +445,8 @@ export const PriceAlertDrawer: React.FC<{
                   >
                     {isBandar ? (
                       <Activity className="w-3.5 h-3.5" />
+                    ) : isIctWait ? (
+                      <Clock className="w-3.5 h-3.5" />
                     ) : isSurge ? (
                       <TrendingUp className="w-3.5 h-3.5" />
                     ) : (
@@ -462,12 +471,14 @@ export const PriceAlertDrawer: React.FC<{
                       ) : isIct ? (
                         <span
                           className={`text-[10px] font-extrabold uppercase px-1.5 py-0.5 rounded whitespace-nowrap ${
-                            isSurge
-                              ? 'bg-[#16A34A]/18 text-[#0B5D2A] dark:text-[#4ADE80]'
-                              : 'bg-[#DC2626]/18 text-[#B91C1C] dark:text-[#FF6B63]'
+                            isIctWait
+                              ? 'bg-[#D97706]/18 text-[#9A5A0A] dark:text-[#FBBF24]'
+                              : isSurge
+                                ? 'bg-[#16A34A]/18 text-[#0B5D2A] dark:text-[#4ADE80]'
+                                : 'bg-[#DC2626]/18 text-[#B91C1C] dark:text-[#FF6B63]'
                           }`}
                         >
-                          ICT {alert.ictAction ?? 'BUY'} · {alert.ictTimeframe ?? '15m'}
+                          {alert.ictStrategy === 'sdcv' ? 'S&D' : 'ICT'} {alert.ictAction ?? 'WAIT'} · {alert.ictTimeframe ?? '15m'}
                         </span>
                       ) : (
                         <span className="text-[11px] text-[#6C6C70] dark:text-[#B4B8C4] truncate">
@@ -514,7 +525,7 @@ export const PriceAlertDrawer: React.FC<{
                 <div className="text-right shrink-0">
                   <div
                     className={`text-xs font-extrabold font-mono tabular-nums ${
-                      isBandar && !isBandarUpgrade
+                      (isBandar && !isBandarUpgrade) || isIctWait
                         ? 'text-[#9A5A0A] dark:text-[#FBBF24]'
                         : isSurge
                           ? 'text-[#0F7033] dark:text-[#4ADE80]'
@@ -524,7 +535,7 @@ export const PriceAlertDrawer: React.FC<{
                     {isBandar
                       ? `Score ${(alert.bandarScore ?? 0) >= 0 ? '+' : ''}${alert.bandarScore ?? 0}`
                       : isIct
-                        ? `${alert.confidence ?? 72}% conf`
+                        ? `${alert.confidence ?? 45}% conf`
                         : alert.movePercent > 0
                           ? `+${alert.movePercent.toFixed(2)}%`
                           : `${alert.movePercent.toFixed(2)}%`}
