@@ -14,6 +14,7 @@ import {
   Megaphone,
   Moon,
   Newspaper,
+  RefreshCw,
   Search,
   Share2,
   Sun,
@@ -69,7 +70,7 @@ interface HeaderProps {
   serverDiagnostics: ServerFeedDiagnosticsResponse | null;
   clientTransport: ClientFeedTransportDiagnostics;
   feedsLive: boolean;
-  onRefreshAll: () => void;
+  onRefreshAll: () => void | Promise<void>;
   onRefreshDiagnostics: () => void;
   onPrefetchRoute?: (route: AppRoute) => void;
 }
@@ -182,6 +183,7 @@ export const Header: React.FC<HeaderProps> = ({
   const [searchResults, setSearchResults] = useState<StockSearchResult[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const [navAwake, setNavAwake] = useState(false);
+  const [isRefreshingAll, setIsRefreshingAll] = useState(false);
   const searchWrapRef = useRef<HTMLDivElement | null>(null);
   const themeMenuRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
@@ -512,23 +514,36 @@ export const Header: React.FC<HeaderProps> = ({
     onNavigate(route);
   };
 
+  const handleRefreshAllClick = async () => {
+    if (isRefreshingAll) return;
+    setIsRefreshingAll(true);
+    try {
+      await Promise.all([
+        Promise.resolve(onRefreshAll()),
+        new Promise((resolve) => window.setTimeout(resolve, 450)),
+      ]);
+    } finally {
+      setIsRefreshingAll(false);
+    }
+  };
+
   return (
     <header
       ref={headerRef}
       className="sticky top-0 z-40 pt-safe liquid-glass-strong !border-x-0 !border-t-0"
     >
       {/* Main Row: Mobile stays flex; Desktop uses CSS Grid to isolate Brand+Clock from Search+Actions */}
-      <div className="relative px-3 sm:px-4 lg:px-6 py-2 sm:py-2.5 lg:py-3 flex items-center justify-between gap-2 sm:gap-3 lg:grid lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center lg:gap-4">
+      <div className="relative px-3 sm:px-4 lg:px-6 py-2 sm:py-2.5 flex items-center justify-between gap-2 sm:gap-3 lg:grid lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center lg:gap-4">
         {/* Left Grid Track: Brand + Full Date/Time Clock */}
         <div className="flex items-center gap-2 sm:gap-3 min-w-0 lg:justify-self-start lg:overflow-hidden">
           <button
             type="button"
             onClick={() => handleNavClick('dashboard')}
-            className="flex items-center gap-1.5 sm:gap-2 text-left min-w-0 shrink lg:shrink-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#0071E3] rounded-lg"
+            className="flex items-center gap-1.5 sm:gap-2 text-left min-w-0 shrink lg:shrink-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#1D4ED8] dark:focus-visible:ring-[#2962FF] rounded-lg"
           >
-            <TrendingUp className="w-5 h-5 sm:w-6 sm:h-6 text-[#0F7033] dark:text-[#4ADE80] shrink-0" />
+            <TrendingUp className="w-5 h-5 sm:w-6 sm:h-6 text-[#0F7638] dark:text-[#26A69A] shrink-0" />
             <div className="flex flex-col sm:flex-row sm:items-baseline sm:gap-2.5 leading-tight min-w-0">
-              <span className="text-base sm:text-lg lg:text-xl font-extrabold tracking-tight text-[#1C1C1E] dark:text-white whitespace-nowrap">
+              <span className="text-base sm:text-lg lg:text-xl font-extrabold tracking-tight text-[#0A2540] dark:text-[#F0F3FA] whitespace-nowrap">
                 Stocks
               </span>
               <HeaderLiveClock />
@@ -536,8 +551,8 @@ export const Header: React.FC<HeaderProps> = ({
           </button>
         </div>
 
-        {/* Right Grid Track: Mobile-Safe Compact Icon Bar (PWA + Briefing + Search + Unified Live/Cached + Theme) */}
-        <div className="flex items-center gap-1 sm:gap-2 shrink-0 lg:justify-self-end" data-testid="header-actions-bar">
+        {/* Right Grid Track: Mobile-Safe Compact Bar (PWA + Briefing + Search + Refresh All + Live Diagnostics + Theme) */}
+        <div className="flex items-center gap-1 sm:gap-1.5 shrink-0 lg:justify-self-end" data-testid="header-actions-bar">
           <PWAInstallButton />
 
           {/* Icon-Only Morning Briefing Pack Pop-Up Trigger */}
@@ -696,6 +711,26 @@ export const Header: React.FC<HeaderProps> = ({
             )}
           </div>
 
+          {/* Manual Refresh All Market Feeds Button (Assets, News & Economic Calendar) */}
+          <button
+            type="button"
+            data-testid="header-refresh-all-btn"
+            onClick={() => void handleRefreshAllClick()}
+            disabled={isRefreshingAll}
+            aria-label="Refresh All feeds"
+            title="Refresh All (Assets, News & Economic Calendar)"
+            className="h-8 w-8 md:w-auto md:px-2.5 rounded-full liquid-glass-pill hover:border-[#1D4ED8]/60 dark:hover:border-[#2962FF]/70 flex items-center justify-center gap-1.5 text-[11px] sm:text-xs font-bold text-[#0A2540] dark:text-[#F0F3FA] transition-colors shrink-0 whitespace-nowrap disabled:opacity-75"
+          >
+            <RefreshCw
+              className={`w-3.5 h-3.5 shrink-0 ${
+                isRefreshingAll ? 'animate-spin text-[#1D4ED8] dark:text-[#3B82F6]' : ''
+              }`}
+            />
+            <span className="hidden md:inline">
+              {isRefreshingAll ? 'Refreshing...' : 'Refresh All'}
+            </span>
+          </button>
+
           {/* Unified Live Stream + Cached/Failover Diagnostics Badge & Drawer */}
           <FeedDiagnosticsBadge
             serverDiagnostics={serverDiagnostics}
@@ -708,7 +743,7 @@ export const Header: React.FC<HeaderProps> = ({
             onRefreshDiagnostics={onRefreshDiagnostics}
           />
 
-          {/* Theme Picker Popover (3 Surviving Synthesized Themes: Obsidian Amber, Arctic Cobalt, Warm Editorial) */}
+          {/* Theme Picker Popover (Desk Slate Pro, Institutional Daylight, Warm Editorial) */}
           <div ref={themeMenuRef} className="relative shrink-0">
             {(() => {
               const activeThemeMeta = getThemeMeta(themeMode);
@@ -815,16 +850,16 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
       </div>
 
-      {/* Desktop Row 2: Dedicated CSS Grid Centered Liquid Glass Top Menu (zero overlap with Brand & Date/Time Clock; hidden on mobile) */}
-      <div className="hidden lg:grid lg:grid-cols-[1fr_auto_1fr] lg:items-center px-6 pb-2.5">
+      {/* Desktop Row 2: Dedicated CSS Grid Centered Top Menu (zero overlap with Brand & Clock; hidden on mobile) */}
+      <div className="hidden lg:grid lg:grid-cols-[1fr_auto_1fr] lg:items-center px-6 pb-2">
         <nav
           aria-label="Primary Navigation"
           onMouseEnter={() => setNavAwake(true)}
           onMouseLeave={() => setNavAwake(false)}
-          className={`lg:col-start-2 lg:justify-self-center flex items-center gap-0.5 xl:gap-1 p-1 rounded-full max-w-full overflow-x-auto no-scrollbar liquid-glass-pill transition-all duration-500 ${
+          className={`lg:col-start-2 lg:justify-self-center flex items-center gap-0.5 xl:gap-1 p-1 rounded-xl max-w-full overflow-x-auto no-scrollbar liquid-glass-pill transition-all duration-300 ${
             navAwake
-              ? 'opacity-100 scale-100'
-              : 'opacity-75 hover:opacity-100 focus-within:opacity-100'
+              ? 'opacity-100'
+              : 'opacity-95 hover:opacity-100 focus-within:opacity-100'
           }`}
         >
           {NAV_TABS.map((tab) => {
@@ -837,15 +872,15 @@ export const Header: React.FC<HeaderProps> = ({
                 onMouseEnter={() => onPrefetchRoute?.(tab.id)}
                 onFocus={() => onPrefetchRoute?.(tab.id)}
                 onClick={() => handleNavClick(tab.id)}
-                className={`relative px-2.5 xl:px-3 py-1.5 rounded-full text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-all duration-150 active:scale-[0.92] focus:outline-none ${
+                className={`relative px-2.5 xl:px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors duration-150 focus:outline-none ${
                   isActive
                     ? 'text-white'
-                    : 'text-[#6C6C70] dark:text-[#AEAEB2] hover:text-[#1C1C1E] dark:hover:text-white'
+                    : 'text-[#425466] dark:text-[#9CA3AF] hover:text-[#0A2540] dark:hover:text-[#F0F3FA]'
                 }`}
               >
                 {isActive && (
                   <span
-                    className="absolute inset-0 rounded-full bg-[#0066CC] dark:bg-[#0066CC] shadow-[0_2px_10px_rgba(0,102,204,0.35)] transition-all duration-200"
+                    className="absolute inset-0 rounded-lg bg-[#1D4ED8] dark:bg-[#2962FF] parchment:bg-[#B4410E] transition-all duration-150"
                   />
                 )}
                 <span

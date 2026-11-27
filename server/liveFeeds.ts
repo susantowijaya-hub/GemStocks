@@ -159,6 +159,16 @@ export interface StockTradePlan {
   ema20Num?: number;
   ema50Num?: number;
   trendFilterLabel?: 'Uptrend (EMA20 > EMA50)' | 'Downtrend (EMA20 < EMA50)' | 'Neutral';
+  verdictLabel?:
+    | 'BUY NOW (ACCUMULATION)'
+    | 'BUY AT DEMAND'
+    | 'BREAKOUT BUY'
+    | 'WAIT PULLBACK'
+    | 'AVOID / SELL'
+    | 'WATCH';
+  scannerScore?: number;
+  buyReasons?: string[];
+  cautionNote?: string;
 }
 
 export interface StockMover {
@@ -4487,6 +4497,15 @@ function computeIdxBandarmologyFromBars(params: {
         ? ((lastClose - closes[n - 2]) / closes[n - 2]) * 100
         : 0;
 
+  // VSA Stealth Absorption: high volume soaking supply on flat/mild dip with firm close
+  const stealthAbsorption =
+    volumeRatio >= 1.2 && lastClv >= 0.15 && dayChgPct >= -1.8 && dayChgPct <= 1.2;
+  const absorptionBonus = stealthAbsorption ? 10 : 0;
+
+  // VSA "Guyur" Pump-Dump Trap: strong intraday pop + elevated volume but weak close (long upper wick)
+  const guyurTrap = dayChgPct >= 2.2 && volumeRatio >= 1.3 && lastClv <= -0.25;
+  const guyurPenalty = guyurTrap ? 14 : 0;
+
   // Absorption: high volume with tight negative/flat price OR clean positive CLV acceleration
   const volBoost = Math.min(1.65, Math.max(0.65, 0.75 + (volumeRatio - 0.85) * 0.48));
 
@@ -4512,7 +4531,13 @@ function computeIdxBandarmologyFromBars(params: {
     foreignBias = 'Net Sell';
   }
 
-  const rawScore = cmfComponent + accelComponent + priceVolumeComponent + foreignComponent;
+  const rawScore =
+    cmfComponent +
+    accelComponent +
+    priceVolumeComponent +
+    foreignComponent +
+    absorptionBonus -
+    guyurPenalty;
   const score = Math.round(Math.max(-100, Math.min(100, rawScore)));
   const accumulationPressure = Math.round(Math.max(4, Math.min(96, 50 + cmf20 * 35 + cmf5 * 22)));
 
@@ -4529,7 +4554,12 @@ function computeIdxBandarmologyFromBars(params: {
 
   const biasText =
     foreignBias === 'Balanced' ? 'Domestic flow balanced' : `Foreign ${foreignBias}`;
-  const summary = `${phase} · ${volumeRatio.toFixed(2)}x 20D vol, CMF ${(cmf20 * 100).toFixed(0)}%, ${biasText}.`;
+  const vsaNote = stealthAbsorption
+    ? ' · VSA absorption'
+    : guyurTrap
+      ? ' · Upper-wick supply'
+      : '';
+  const summary = `${phase} · ${volumeRatio.toFixed(2)}x 20D vol, CMF ${(cmf20 * 100).toFixed(0)}%, ${biasText}${vsaNote}.`;
 
   return {
     phase,
@@ -4713,7 +4743,10 @@ function computeEquityTradePlanFromBars(params: {
       : 0;
 
   const netScore = bandarPts + flowPts + sdLocationPts + trendPts + tapeConfirm;
+  const isOverextended = chgPct >= 8.5 || (posInSd >= 0.78 && chgPct >= 3.0);
+
   const bullishBias =
+    !isOverextended &&
     (netScore >= 14 || (bandar.score >= 22 && effectiveForeignSide !== 'SELL')) &&
     !(trendFilterLabel === 'Downtrend (EMA20 < EMA50)' && bandar.score < 32);
   const bearishBias =
@@ -4765,15 +4798,21 @@ function computeEquityTradePlanFromBars(params: {
     executionNote = `EXECUTE SELL / TP @ ${fmtStockLevelServer(entryPrice, currency)} · Downside ${fmtStockLevelServer(takeProfit1, currency)} / ${fmtStockLevelServer(takeProfit2, currency)} · Invalid > ${fmtStockLevelServer(stopLoss, currency)}`;
   } else {
     action = 'WAIT';
-    const leanBull = netScore >= 0;
+    const leanBull = netScore >= 0 || bandar.score >= 10 || effectiveForeignSide === 'BUY';
     if (leanBull) {
       entryPrice = snapStockTickServer((snappedDemLow + snappedDemHigh) / 2, currency);
       stopLoss = snapStockTickServer(Math.min(snappedDemLow - atr * 0.25, entryPrice * 0.975), currency);
       const risk = Math.max(currency === 'IDR' ? 10 : 0.25, entryPrice - stopLoss);
       takeProfit1 = snapStockTickServer(Math.max(snappedSupLow, entryPrice + risk * 1.8), currency);
       takeProfit2 = snapStockTickServer(Math.max(snappedSupHigh, takeProfit1 + risk), currency);
-      strategyTag = posInSd > 0.62 ? 'Wait Demand Pullback' : 'Await Flow Confirmation';
-      executionNote = `WAIT: Do not chase mid-range. Place Buy Limit in Demand ${fmtStockLevelServer(snappedDemLow, currency)}–${fmtStockLevelServer(snappedDemHigh, currency)} with SL ${fmtStockLevelServer(stopLoss, currency)}.`;
+      strategyTag = isOverextended
+        ? 'Extended · Wait Demand Pullback'
+        : posInSd > 0.62
+          ? 'Wait Demand Pullback'
+          : 'Await Flow Confirmation';
+      executionNote = isOverextended
+        ? `CHASE GUARD: Extended +${chgPct.toFixed(1)}% / near Supply. Wait pullback into Demand ${fmtStockLevelServer(snappedDemLow, currency)}–${fmtStockLevelServer(snappedDemHigh, currency)} with SL ${fmtStockLevelServer(stopLoss, currency)}.`
+        : `WAIT: Do not chase mid-range. Place Buy Limit in Demand ${fmtStockLevelServer(snappedDemLow, currency)}–${fmtStockLevelServer(snappedDemHigh, currency)} with SL ${fmtStockLevelServer(stopLoss, currency)}.`;
     } else {
       entryPrice = snapStockTickServer((snappedSupLow + snappedSupHigh) / 2, currency);
       stopLoss = snapStockTickServer(Math.max(snappedSupHigh + atr * 0.25, entryPrice * 1.025), currency);
@@ -4789,6 +4828,71 @@ function computeEquityTradePlanFromBars(params: {
   const rewardAbs = Math.abs(takeProfit1 - entryPrice);
   const rr = Math.max(1.1, rewardAbs / riskAbs);
   const conviction = Math.round(Math.max(38, Math.min(94, 48 + Math.abs(netScore) * 0.62)));
+
+  // Scanner score (0..100) specifically ranks Buy Readiness (Accumulation + Foreign Flow + Demand + Uptrend - Overextension)
+  const rawScanner =
+    50 +
+    bandar.score * 0.34 +
+    (effectiveForeignSide === 'BUY' ? 14 : effectiveForeignSide === 'SELL' ? -14 : 0) +
+    (posInSd <= 0.42 ? 12 : posInSd >= 0.75 ? -14 : 4) +
+    (trendFilterLabel === 'Uptrend (EMA20 > EMA50)'
+      ? 10
+      : trendFilterLabel === 'Downtrend (EMA20 < EMA50)'
+        ? -12
+        : 0) +
+    (bandar.volumeRatio >= 1.2 ? 6 : 0) -
+    (isOverextended ? 18 : 0);
+  const scannerScore = Math.round(Math.max(5, Math.min(98, rawScanner)));
+
+  let verdictLabel: StockTradePlan['verdictLabel'] = 'WATCH';
+  if (action === 'BUY') {
+    if (bandar.phase === 'Strong Accumulation' && (effectiveForeignSide === 'BUY' || posInSd <= 0.48)) {
+      verdictLabel = 'BUY NOW (ACCUMULATION)';
+    } else if (posInSd <= 0.45) {
+      verdictLabel = 'BUY AT DEMAND';
+    } else {
+      verdictLabel = 'BREAKOUT BUY';
+    }
+  } else if (action === 'WAIT' && (isOverextended || netScore >= 8 || bandar.score >= 12 || effectiveForeignSide === 'BUY')) {
+    verdictLabel = 'WAIT PULLBACK';
+  } else if (
+    action === 'SELL' ||
+    bandar.phase === 'Strong Distribution' ||
+    (bandar.score <= -20 && effectiveForeignSide === 'SELL')
+  ) {
+    verdictLabel = 'AVOID / SELL';
+  }
+
+  const buyReasons: string[] = [];
+  if (bandar.phase === 'Strong Accumulation' || bandar.phase === 'Early Accumulation') {
+    buyReasons.push(`${bandar.phase} (+${bandar.score})`);
+  }
+  if (effectiveForeignSide === 'BUY') {
+    buyReasons.push('Foreign Net Buy');
+  }
+  if (posInSd <= 0.48) {
+    buyReasons.push('Near Demand Zone');
+  }
+  if (trendFilterLabel === 'Uptrend (EMA20 > EMA50)') {
+    buyReasons.push('Uptrend (EMA20 > EMA50)');
+  }
+  if (bandar.volumeRatio >= 1.2) {
+    buyReasons.push(`${bandar.volumeRatio.toFixed(1)}x 20D Volume`);
+  }
+  if (buyReasons.length === 0) {
+    buyReasons.push(bandar.phase === 'Neutral' ? 'Consolidating Base' : bandar.phase);
+  }
+
+  let cautionNote: string | undefined;
+  if (isOverextended) {
+    cautionNote = `Extended (+${chgPct.toFixed(1)}% / Supply ceiling) — wait pullback to Demand.`;
+  } else if (bandar.summary.includes('Upper-wick supply')) {
+    cautionNote = 'Upper-wick supply / distribution risk on elevated volume.';
+  } else if (effectiveForeignSide === 'SELL') {
+    cautionNote = 'Foreign Net Sell outflow active — demand confirmation required.';
+  } else if (trendFilterLabel === 'Downtrend (EMA20 < EMA50)') {
+    cautionNote = 'Below EMA50 downtrend — treat bounces cautiously.';
+  }
 
   const entryZoneLow = action === 'SELL' ? entryPrice : snapStockTickServer(entryPrice - atr * 0.12, currency);
   const entryZoneHigh = action === 'BUY' ? entryPrice : snapStockTickServer(entryPrice + atr * 0.12, currency);
@@ -4817,6 +4921,10 @@ function computeEquityTradePlanFromBars(params: {
     ema20Num,
     ema50Num,
     trendFilterLabel,
+    verdictLabel,
+    scannerScore,
+    buyReasons: buyReasons.slice(0, 4),
+    cautionNote,
   };
 }
 

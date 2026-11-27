@@ -23,7 +23,7 @@ interface FeedDiagnosticsBadgeProps {
   isPulseActive: boolean;
   wsConnected: boolean;
   onTogglePulse: () => void;
-  onRefreshAll: () => void;
+  onRefreshAll: () => void | Promise<void>;
   onRefreshDiagnostics: () => void;
 }
 

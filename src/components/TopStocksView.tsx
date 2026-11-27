@@ -8,12 +8,15 @@ import {
   BarChart3,
   BellRing,
   Building2,
+  CheckCircle2,
   Clock,
   Compass,
   Flame,
   Globe2,
   Loader2,
   RefreshCw,
+  ShieldAlert,
+  Target,
   TrendingDown,
   TrendingUp,
 } from 'lucide-react';
@@ -25,13 +28,16 @@ import {
   StockExecutionAction,
   StockMover,
   StocksMoversBucket,
+  StockTradePlan,
 } from '../types/market';
 import { getAllMarketSessions, MarketSessionStatus } from '../utils/marketSessions';
 import {
+  buildIdxBuyScannerList,
   computeStockTradeStrategy,
   formatStockCurrencyValue,
   getStockFearGreed,
   getStockSignal,
+  IdxScannerCandidate,
 } from '../utils/marketSignals';
 import { GoogleFinanceDeltaPill, GoogleFinanceMiniChart } from './GoogleFinanceMiniChart';
 import {
@@ -93,6 +99,422 @@ function getActionBadgeClasses(action: StockExecutionAction): string {
     return 'bg-[#DC2626]/18 text-[#B91C1C] dark:bg-[#EF4444]/20 dark:text-[#FF6B63] border-[#DC2626]/45';
   }
   return 'bg-[#D97706]/18 text-[#9A5A0A] dark:bg-[#F59E0B]/20 dark:text-[#FBBF24] border-[#D97706]/45';
+}
+
+function getScannerVerdictBadgeClasses(verdict: NonNullable<StockTradePlan['verdictLabel']>): string {
+  if (verdict === 'BUY NOW (ACCUMULATION)' || verdict === 'BUY AT DEMAND' || verdict === 'BREAKOUT BUY') {
+    return 'bg-[#16A34A]/18 text-[#0B5D2A] dark:bg-[#22C55E]/20 dark:text-[#4ADE80] border-[#16A34A]/45';
+  }
+  if (verdict === 'AVOID / SELL') {
+    return 'bg-[#DC2626]/18 text-[#B91C1C] dark:bg-[#EF4444]/20 dark:text-[#FF6B63] border-[#DC2626]/45';
+  }
+  if (verdict === 'WAIT PULLBACK') {
+    return 'bg-[#D97706]/18 text-[#9A5A0A] dark:bg-[#F59E0B]/20 dark:text-[#FBBF24] border-[#D97706]/45';
+  }
+  return 'bg-black/[0.06] dark:bg-white/[0.08] text-[#4A4D57] dark:text-[#C7CBD6] border-black/10 dark:border-white/15';
+}
+
+type IdxScannerFilterMode = 'buy' | 'pullback' | 'all';
+
+function IdxBuyScannerSection({
+  candidates,
+  searchQuery = '',
+  loading = false,
+  onInspectSymbol,
+}: {
+  candidates: IdxScannerCandidate[];
+  searchQuery?: string;
+  loading?: boolean;
+  onInspectSymbol?: (yahooSymbol: string) => void;
+}) {
+  const [selectedTab, setSelectedTab] = useState<IdxScannerFilterMode | null>(null);
+  const [showAllRows, setShowAllRows] = useState(false);
+
+  const buyCandidates = useMemo(() => candidates.filter((c) => c.isBuyReady), [candidates]);
+  const pullbackCandidates = useMemo(() => candidates.filter((c) => c.isPullbackQueue), [candidates]);
+
+  const effectiveTab: IdxScannerFilterMode =
+    selectedTab ?? (buyCandidates.length > 0 ? 'buy' : 'all');
+
+  const filteredCandidates = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    const base =
+      effectiveTab === 'buy'
+        ? buyCandidates
+        : effectiveTab === 'pullback'
+          ? pullbackCandidates
+          : candidates;
+    if (!q) return base;
+    return base.filter(
+      (c) =>
+        c.stock.symbol.toLowerCase().includes(q) ||
+        c.stock.name.toLowerCase().includes(q)
+    );
+  }, [candidates, buyCandidates, pullbackCandidates, effectiveTab, searchQuery]);
+
+  const visibleCandidates = showAllRows
+    ? filteredCandidates
+    : filteredCandidates.slice(0, 8);
+
+  return (
+    <motion.section
+      data-testid="idx-buy-scanner"
+      initial={{ opacity: 0.85, y: 5 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+      className="rounded-2xl liquid-glass-card overflow-hidden"
+    >
+      <div className="px-4 sm:px-5 py-3.5 border-b border-black/8 dark:border-white/10 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <Target className="w-4 h-4 text-[#0F7033] dark:text-[#4ADE80] shrink-0" />
+            <h2 className="text-base sm:text-lg font-extrabold text-[#1C1C1E] dark:text-white">
+              IDX Smart-Money Buy Scanner
+            </h2>
+            <span
+              data-testid="idx-buy-ready-count"
+              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[10.5px] font-mono font-extrabold tabular-nums ${
+                buyCandidates.length > 0
+                  ? 'bg-[#16A34A]/18 text-[#0B5D2A] dark:bg-[#22C55E]/20 dark:text-[#4ADE80] border-[#16A34A]/45'
+                  : 'bg-[#D97706]/18 text-[#9A5A0A] dark:bg-[#F59E0B]/20 dark:text-[#FBBF24] border-[#D97706]/45'
+              }`}
+            >
+              <CheckCircle2 className="w-3 h-3 shrink-0" />
+              {buyCandidates.length} Can Buy Now
+            </span>
+          </div>
+          <p className="text-xs text-[#4A4D57] dark:text-[#9EB5C8] mt-0.5">
+            Ranks BEI equities by Bandarmology VSA Absorption, Foreign Net Flow (NBSA), Fresh Demand Zone &amp; EMA20/50 trend with Fraksi Harga chase protection.
+          </p>
+        </div>
+
+        <div
+          data-testid="idx-buy-scanner-tabs"
+          role="tablist"
+          aria-label="IDX scanner filter"
+          className="inline-flex flex-wrap rounded-xl liquid-glass-pill p-1 gap-1 self-start lg:self-auto"
+        >
+          {(
+            [
+              { id: 'buy', label: `Can Buy Now (${buyCandidates.length})` },
+              { id: 'pullback', label: `Pullback Queue (${pullbackCandidates.length})` },
+              { id: 'all', label: `All Screened IDX (${candidates.length})` },
+            ] as const
+          ).map((tab) => {
+            const active = effectiveTab === tab.id;
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                role="tab"
+                data-testid={`idx-scanner-tab-${tab.id}`}
+                aria-selected={active}
+                onClick={() => setSelectedTab(tab.id)}
+                className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold whitespace-nowrap transition-colors ${
+                  active
+                    ? tab.id === 'buy'
+                      ? 'bg-[#16803C] text-white shadow-sm'
+                      : tab.id === 'pullback'
+                        ? 'bg-[#B45309] text-white shadow-sm'
+                        : 'bg-[#1C1C1E] dark:bg-white text-white dark:text-[#111318] shadow-sm'
+                    : 'text-[#4A4D57] dark:text-[#C7CBD6] hover:text-[#1C1C1E] dark:hover:text-white'
+                }`}
+              >
+                {tab.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Executive Summary Banner */}
+      <div className="px-4 sm:px-5 py-2.5 bg-black/[0.025] dark:bg-white/[0.025] border-b border-black/6 dark:border-white/8 flex flex-wrap items-center justify-between gap-2 text-xs">
+        {buyCandidates.length > 0 ? (
+          <div className="flex flex-wrap items-center gap-1.5 min-w-0">
+            <span className="font-extrabold text-[#0B5D2A] dark:text-[#4ADE80] uppercase text-[10.5px] tracking-wider">
+              Top Buy Pick{buyCandidates.length > 1 ? 's' : ''}:
+            </span>
+            {buyCandidates.slice(0, 5).map((item) => (
+              <button
+                key={item.stock.symbol}
+                type="button"
+                onClick={() => onInspectSymbol?.(`${item.stock.symbol}.JK`)}
+                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-[#16A34A]/14 dark:bg-[#22C55E]/16 border border-[#16A34A]/35 text-[11px] font-mono font-extrabold text-[#0B5D2A] dark:text-[#4ADE80] hover:brightness-95 dark:hover:brightness-110 transition-all"
+              >
+                <span>{item.stock.symbol}</span>
+                <span className="opacity-80">{item.scannerScore}</span>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <span className="text-[11.5px] font-semibold text-[#9A5A0A] dark:text-[#FBBF24] flex items-center gap-1.5">
+            <ShieldAlert className="w-3.5 h-3.5 shrink-0" />
+            Zero IDX stocks meet immediate low-chase BUY criteria right now — inspect Pullback Queue or wait Demand retest.
+          </span>
+        )}
+        <span className="text-[10.5px] font-mono text-[#6C6C70] dark:text-[#9EB5C8] tabular-nums">
+          BEI Fraksi Harga · Click row for chart &amp; trade levels
+        </span>
+      </div>
+
+      {filteredCandidates.length === 0 ? (
+        loading ? (
+          <div className="p-6 flex items-center justify-center gap-2 text-xs text-[#6C6C70] dark:text-[#8E8E93]">
+            <Loader2 className="w-4 h-4 animate-spin text-[#0071E3] dark:text-[#0A84FF]" />
+            <span>Scanning IDX order flow &amp; Demand/Supply zones...</span>
+          </div>
+        ) : (
+          <div className="p-6 text-center text-xs text-[#6C6C70] dark:text-[#9EB5C8] flex flex-col items-center gap-2">
+            <span>
+              {effectiveTab === 'buy'
+                ? 'No IDX stocks cleared all immediate BUY criteria under current filters.'
+                : effectiveTab === 'pullback'
+                  ? 'No extended IDX accumulation stocks are queued for pullback right now.'
+                  : 'No IDX stocks matched your current search query.'}
+            </span>
+            {effectiveTab !== 'all' && candidates.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setSelectedTab('all')}
+                className="px-3 py-1 rounded-lg bg-[#0071E3] text-white text-xs font-bold"
+              >
+                View All {candidates.length} Screened IDX Stocks
+              </button>
+            )}
+          </div>
+        )
+      ) : (
+        <>
+          <div className="hidden md:block overflow-x-auto">
+            <table className="w-full text-left border-collapse">
+              <thead>
+                <tr className="border-b border-[#E5E5EA] dark:border-[#2C2C2E] text-[10.5px] font-bold uppercase tracking-wider text-[#6C6C70] dark:text-[#8E8E93]">
+                  <th className="py-2.5 pl-5 pr-2 w-12">Score</th>
+                  <th className="py-2.5 px-3">IDX Ticker</th>
+                  <th className="py-2.5 px-3">Scanner Verdict</th>
+                  <th className="py-2.5 px-3">Bandarmology &amp; Flow</th>
+                  <th className="py-2.5 px-3">Reasons / Guard</th>
+                  <th className="py-2.5 px-3">Entry · TP1 / TP2 · SL (IDR)</th>
+                  <th className="py-2.5 pl-3 pr-5 text-right">Last / Chg%</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[#E5E5EA]/70 dark:divide-[#2C2C2E]/60 text-xs">
+                {visibleCandidates.map((item) => {
+                  const { stock, plan, scannerScore, verdictLabel } = item;
+                  const verdictCls = getScannerVerdictBadgeClasses(verdictLabel);
+                  return (
+                    <tr
+                      key={`scanner-${stock.symbol}`}
+                      data-testid={`idx-scanner-row-${stock.symbol}`}
+                      onClick={() => onInspectSymbol?.(`${stock.symbol}.JK`)}
+                      className="hover:bg-[#E5E5EA]/35 dark:hover:bg-[#2C2C2E]/40 transition-colors cursor-pointer"
+                    >
+                      <td className="py-2.5 pl-5 pr-2">
+                        <div className="flex flex-col items-start gap-1">
+                          <span
+                            className={`font-mono font-black text-sm tabular-nums ${
+                              scannerScore >= 68
+                                ? 'text-[#0F7033] dark:text-[#4ADE80]'
+                                : scannerScore >= 50
+                                  ? 'text-[#005BB8] dark:text-[#FBBF24]'
+                                  : 'text-[#C41C16] dark:text-[#FF6B63]'
+                            }`}
+                          >
+                            {scannerScore}
+                          </span>
+                          <div className="w-10 h-1 rounded-full bg-black/10 dark:bg-white/10 overflow-hidden">
+                            <div
+                              style={{ width: `${scannerScore}%` }}
+                              className={`h-full rounded-full ${
+                                scannerScore >= 68
+                                  ? 'bg-[#16A34A]'
+                                  : scannerScore >= 50
+                                    ? 'bg-[#D97706]'
+                                    : 'bg-[#DC2626]'
+                              }`}
+                            />
+                          </div>
+                        </div>
+                      </td>
+                      <td className="py-2.5 px-3">
+                        <div className="font-extrabold text-sm text-[#1C1C1E] dark:text-white">
+                          {stock.symbol}
+                        </div>
+                        <div className="text-[10.5px] text-[#6C6C70] dark:text-[#8E8E93] truncate max-w-[160px]">
+                          {stock.name}
+                        </div>
+                      </td>
+                      <td className="py-2.5 px-3">
+                        <span
+                          className={`inline-flex items-center px-2 py-0.5 rounded-md border text-[10px] font-extrabold font-mono whitespace-nowrap ${verdictCls}`}
+                        >
+                          {verdictLabel}
+                        </span>
+                        <div className="text-[10px] font-mono text-[#6C6C70] dark:text-[#9EB5C8] mt-0.5 whitespace-nowrap">
+                          R:R {plan.riskReward} · Conv {plan.conviction}%
+                        </div>
+                      </td>
+                      <td className="py-2.5 px-3">
+                        <div className="flex flex-col items-start gap-0.5">
+                          <BandarmologyBadge bandarmology={stock.bandarmology} compact />
+                          <span className="text-[10px] font-mono text-[#6C6C70] dark:text-[#9EB5C8] whitespace-nowrap">
+                            {stock.foreignNetLabel
+                              ? `Foreign ${stock.foreignFlowSide ?? ''}: ${stock.foreignNetLabel}`
+                              : plan.trendFilterLabel ?? plan.bandarFlowBias}
+                          </span>
+                        </div>
+                      </td>
+                      <td className="py-2.5 px-3 max-w-[250px]">
+                        <div className="flex flex-wrap gap-1">
+                          {(plan.buyReasons ?? []).slice(0, 3).map((reason) => (
+                            <span
+                              key={reason}
+                              className="px-1.5 py-0.5 rounded bg-black/[0.045] dark:bg-white/[0.07] text-[10px] font-semibold text-[#1C1C1E] dark:text-[#E5E5EA] whitespace-nowrap"
+                            >
+                              {reason}
+                            </span>
+                          ))}
+                        </div>
+                        {plan.cautionNote && (
+                          <div className="text-[10px] font-semibold text-[#9A5A0A] dark:text-[#FBBF24] mt-1 truncate">
+                            {plan.cautionNote}
+                          </div>
+                        )}
+                      </td>
+                      <td className="py-2.5 px-3 font-mono tabular-nums text-[10.5px]">
+                        <div className="font-bold text-[#1C1C1E] dark:text-white whitespace-nowrap">
+                          {plan.action === 'BUY' ? 'Buy' : plan.action === 'SELL' ? 'Sell' : 'Limit'} {formatStockCurrencyValue(plan.entryPrice, 'IDR')}
+                        </div>
+                        <div className="flex items-center gap-2 whitespace-nowrap mt-0.5">
+                          <span className="text-[#0F7033] dark:text-[#4ADE80] font-semibold">
+                            TP {formatStockCurrencyValue(plan.takeProfit1, 'IDR')} / {formatStockCurrencyValue(plan.takeProfit2, 'IDR')}
+                          </span>
+                          <span className="text-[#C41C16] dark:text-[#FF6B63] font-semibold">
+                            SL {formatStockCurrencyValue(plan.stopLoss, 'IDR')}
+                          </span>
+                        </div>
+                      </td>
+                      <td className="py-2.5 pl-3 pr-5 text-right font-mono tabular-nums">
+                        <div className="font-bold text-sm text-[#1C1C1E] dark:text-white">
+                          {formatStockPrice(stock)}
+                        </div>
+                        <div className="mt-0.5 flex justify-end">
+                          <GoogleFinanceDeltaPill changePercent={stock.changePercent} compact />
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Mobile Card Layout */}
+          <div className="md:hidden divide-y divide-[#E5E5EA] dark:divide-[#2C2C2E]/70">
+            {visibleCandidates.map((item) => {
+              const { stock, plan, scannerScore, verdictLabel } = item;
+              const verdictCls = getScannerVerdictBadgeClasses(verdictLabel);
+              return (
+                <div
+                  key={`scanner-m-${stock.symbol}`}
+                  onClick={() => onInspectSymbol?.(`${stock.symbol}.JK`)}
+                  className="p-3.5 flex flex-col gap-2 cursor-pointer active:bg-[#E5E5EA]/40 dark:active:bg-[#2C2C2E]/40"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="text-sm font-extrabold text-[#1C1C1E] dark:text-white">
+                          {stock.symbol}
+                        </span>
+                        <span
+                          className={`inline-flex items-center px-1.5 py-0.5 rounded border text-[9.5px] font-extrabold font-mono ${verdictCls}`}
+                        >
+                          {verdictLabel}
+                        </span>
+                        <span className="text-[10.5px] font-mono font-black text-[#005BB8] dark:text-[#FBBF24] tabular-nums">
+                          Score {scannerScore}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-[#6C6C70] dark:text-[#8E8E93] truncate mt-0.5">
+                        {stock.name}
+                      </p>
+                    </div>
+                    <div className="text-right shrink-0">
+                      <div className="text-sm font-bold font-mono text-[#1C1C1E] dark:text-white tabular-nums">
+                        {formatStockPrice(stock)}
+                      </div>
+                      <div className="mt-0.5 flex justify-end">
+                        <GoogleFinanceDeltaPill changePercent={stock.changePercent} compact />
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <BandarmologyBadge bandarmology={stock.bandarmology} compact />
+                    {(plan.buyReasons ?? []).slice(0, 2).map((r) => (
+                      <span
+                        key={r}
+                        className="px-1.5 py-0.5 rounded bg-black/[0.045] dark:bg-white/[0.07] text-[10px] font-semibold text-[#1C1C1E] dark:text-[#E5E5EA]"
+                      >
+                        {r}
+                      </span>
+                    ))}
+                  </div>
+
+                  {plan.cautionNote && (
+                    <p className="text-[10.5px] font-semibold text-[#9A5A0A] dark:text-[#FBBF24]">
+                      {plan.cautionNote}
+                    </p>
+                  )}
+
+                  <div className="rounded-xl liquid-glass-inset px-3 py-2 grid grid-cols-3 gap-2 text-[10.5px] font-mono tabular-nums">
+                    <div>
+                      <span className="text-[#6C6C70] dark:text-[#9EB5C8] block text-[9.5px] font-sans uppercase">
+                        {plan.action === 'BUY' ? 'Entry' : 'Limit'}
+                      </span>
+                      <span className="font-bold text-[#1C1C1E] dark:text-white">
+                        {formatStockCurrencyValue(plan.entryPrice, 'IDR')}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-[#6C6C70] dark:text-[#9EB5C8] block text-[9.5px] font-sans uppercase">
+                        TP1
+                      </span>
+                      <span className="font-bold text-[#0F7033] dark:text-[#4ADE80]">
+                        {formatStockCurrencyValue(plan.takeProfit1, 'IDR')}
+                      </span>
+                    </div>
+                    <div className="text-right">
+                      <span className="text-[#6C6C70] dark:text-[#9EB5C8] block text-[9.5px] font-sans uppercase">
+                        SL · {plan.riskReward}
+                      </span>
+                      <span className="font-bold text-[#C41C16] dark:text-[#FF6B63]">
+                        {formatStockCurrencyValue(plan.stopLoss, 'IDR')}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {filteredCandidates.length > 8 && (
+            <div className="px-4 py-2.5 border-t border-black/8 dark:border-white/10 flex justify-center">
+              <button
+                type="button"
+                onClick={() => setShowAllRows((prev) => !prev)}
+                className="text-xs font-bold text-[#0071E3] dark:text-[#8AB4F8] hover:underline"
+              >
+                {showAllRows
+                  ? 'Show Top 8 Candidates'
+                  : `Show All ${filteredCandidates.length} Screened IDX Stocks`}
+              </button>
+            </div>
+          )}
+        </>
+      )}
+    </motion.section>
+  );
 }
 
 function SessionStatusCard({
@@ -647,6 +1069,11 @@ export const TopStocksView: React.FC<TopStocksViewProps> = ({
     return { acc, dist };
   }, [idxBucket.impact]);
 
+  const idxScannerCandidates = useMemo(
+    () => buildIdxBuyScannerList(idxBucket),
+    [idxBucket]
+  );
+
   const handleManualRefresh = () => {
     setIsRefreshing(true);
     onRefresh();
@@ -945,6 +1372,16 @@ export const TopStocksView: React.FC<TopStocksViewProps> = ({
           </div>
         )}
       </div>
+
+      {/* Indonesian IDX Smart-Money Buy Scanner */}
+      {showIdxSection && (
+        <IdxBuyScannerSection
+          candidates={idxScannerCandidates}
+          searchQuery={searchQuery}
+          loading={stocksLoading}
+          onInspectSymbol={onInspectSymbol}
+        />
+      )}
 
       {/* Tables */}
       {showUsSection && (

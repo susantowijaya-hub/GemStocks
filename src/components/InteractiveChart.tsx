@@ -98,13 +98,13 @@ function detectChartPalette() {
   if (typeof document === 'undefined') {
     return {
       isDark: true,
-      textColor: '#CBD5E1',
-      gridColor: 'rgba(148, 163, 184, 0.09)',
-      borderColor: 'rgba(148, 163, 184, 0.16)',
-      crosshairColor: 'rgba(251, 191, 36, 0.5)',
-      lineColor: '#38BDF8',
-      upColor: '#22C55E',
-      downColor: '#EF4444',
+      textColor: '#9CA3AF',
+      gridColor: 'rgba(255, 255, 255, 0.045)',
+      borderColor: '#2A2E39',
+      crosshairColor: 'rgba(41, 98, 255, 0.60)',
+      lineColor: '#2962FF',
+      upColor: '#26A69A',
+      downColor: '#EF5350',
     };
   }
   const cls = document.documentElement.classList;
@@ -113,36 +113,36 @@ function detectChartPalette() {
   if (isObsidian) {
     return {
       isDark: true,
-      textColor: '#B4C6DA',
-      gridColor: 'rgba(148, 163, 184, 0.09)',
-      borderColor: 'rgba(148, 163, 184, 0.16)',
-      crosshairColor: 'rgba(251, 191, 36, 0.55)',
-      lineColor: '#38BDF8',
-      upColor: '#22C55E',
-      downColor: '#EF4444',
+      textColor: '#9CA3AF',
+      gridColor: 'rgba(255, 255, 255, 0.045)',
+      borderColor: '#2A2E39',
+      crosshairColor: 'rgba(41, 98, 255, 0.60)',
+      lineColor: '#2962FF',
+      upColor: '#26A69A',
+      downColor: '#EF5350',
     };
   }
   if (isParchment) {
     return {
       isDark: false,
       textColor: '#4D473C',
-      gridColor: 'rgba(120, 95, 65, 0.10)',
-      borderColor: 'rgba(148, 132, 108, 0.25)',
-      crosshairColor: 'rgba(180, 65, 14, 0.5)',
+      gridColor: 'rgba(120, 95, 65, 0.09)',
+      borderColor: '#D8CFBC',
+      crosshairColor: 'rgba(180, 65, 14, 0.50)',
       lineColor: '#B4410E',
-      upColor: '#16A34A',
-      downColor: '#DC2626',
+      upColor: '#0F7638',
+      downColor: '#B91C1C',
     };
   }
   return {
     isDark: false,
-    textColor: '#454954',
-    gridColor: 'rgba(15, 23, 42, 0.08)',
-    borderColor: 'rgba(15, 23, 42, 0.14)',
-    crosshairColor: 'rgba(0, 102, 204, 0.5)',
-    lineColor: '#0066CC',
-    upColor: '#16A34A',
-    downColor: '#DC2626',
+    textColor: '#425466',
+    gridColor: 'rgba(10, 37, 64, 0.06)',
+    borderColor: '#DCE2EA',
+    crosshairColor: 'rgba(29, 78, 216, 0.55)',
+    lineColor: '#1D4ED8',
+    upColor: '#0F7638',
+    downColor: '#B91C1C',
   };
 }
 

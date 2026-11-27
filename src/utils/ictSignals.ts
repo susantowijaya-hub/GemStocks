@@ -7,18 +7,15 @@ import {
   IctRecommendedOrderType,
   IctSignalAnalysis,
   MarketAsset,
+  SignalBiasVerdict,
+  SignalClearanceGate,
   Timeframe,
 } from '../types/market';
 
-const ICT_FX_PAIR_IDS = new Set([
-  'EURUSD',
-  'GBPUSD',
-  'USDJPY',
-  'AUDUSD',
-  'USDCHF',
-  'USDCAD',
-  'NZDUSD',
-]);
+export interface MacroIctContext {
+  dxyBias?: 'Bullish' | 'Bearish' | 'Ranging';
+  dxyChangePct?: number;
+}
 
 const PURE_ICT_ASSET_IDS = new Set(['BTCUSD', 'XAUUSD']);
 
@@ -46,8 +43,7 @@ export const TF_DURATION_MS: Partial<Record<Timeframe, number>> = {
 
 export function isIctEligibleAsset(asset: MarketAsset): boolean {
   if (!asset || asset.isYield) return false;
-  if (PURE_ICT_ASSET_IDS.has(asset.id)) return true;
-  return ICT_FX_PAIR_IDS.has(asset.id);
+  return PURE_ICT_ASSET_IDS.has(asset.id);
 }
 
 export function formatPriceWithAsset(val: number, asset: MarketAsset): string {
@@ -120,13 +116,13 @@ export function computeSetupGrade(params: {
     inKillzone &&
     volatilityPassed &&
     !newsBlocked &&
-    confidence >= 80 &&
-    realRr >= 2.5 &&
+    confidence >= 78 &&
+    realRr >= 2.4 &&
     htfAligned
   ) {
     return { setupGrade: 'A+', isAPlusSetup: true };
   }
-  if (confidence >= 72 && realRr >= 2.0) {
+  if (confidence >= 70 && realRr >= 2.0) {
     return { setupGrade: 'A', isAPlusSetup: false };
   }
   return { setupGrade: 'B', isAPlusSetup: false };
@@ -137,15 +133,10 @@ export function resolveUsdExposure(
   direction: IctDirection
 ): 'LONG_USD' | 'SHORT_USD' | undefined {
   if (direction === 'NEUTRAL') return undefined;
-  const usdBase = assetId === 'USDJPY' || assetId === 'USDCHF' || assetId === 'USDCAD';
-  const usdQuote =
-    assetId === 'EURUSD' ||
-    assetId === 'GBPUSD' ||
-    assetId === 'AUDUSD' ||
-    assetId === 'NZDUSD' ||
-    assetId === 'XAUUSD';
-  if (usdBase) return direction === 'BUY' ? 'LONG_USD' : 'SHORT_USD';
-  if (usdQuote) return direction === 'BUY' ? 'SHORT_USD' : 'LONG_USD';
+  // Both BTC/USD and XAU/USD are quoted against USD: BUY = anti-USD / risk-bid, SELL = pro-USD
+  if (assetId === 'XAUUSD' || assetId === 'BTCUSD') {
+    return direction === 'BUY' ? 'SHORT_USD' : 'LONG_USD';
+  }
   return undefined;
 }
 
@@ -168,26 +159,35 @@ export function computeAtr(bars: CandlePoint[], period = 14): number {
   return Math.max(1e-6, trSum / Math.max(1, count));
 }
 
+export interface ImbalanceZoneBox {
+  low: number;
+  high: number;
+  ceMid: number;
+  idx: number;
+  formedAt: number;
+  touchCount: number;
+}
+
 export interface ImbalanceZonesResult {
-  bullFvg: { low: number; high: number; idx: number; formedAt: number } | null;
-  bearFvg: { low: number; high: number; idx: number; formedAt: number } | null;
-  bullOb: { low: number; high: number; idx: number; formedAt: number } | null;
-  bearOb: { low: number; high: number; idx: number; formedAt: number } | null;
+  bullFvg: ImbalanceZoneBox | null;
+  bearFvg: ImbalanceZoneBox | null;
+  bullOb: ImbalanceZoneBox | null;
+  bearOb: ImbalanceZoneBox | null;
 }
 
 export function findUnmitigatedFvgAndOb(
   bars: CandlePoint[],
   atr: number,
-  lookback = 28,
-  minFvgAtr = 0.14,
-  minObAtr = 0.7,
+  lookback = 32,
+  minFvgAtr = 0.16,
+  minObAtr = 0.68,
   minFormedAtMs = 0
 ): ImbalanceZonesResult {
   const n = bars.length;
-  let bullFvg: ImbalanceZonesResult['bullFvg'] = null;
-  let bearFvg: ImbalanceZonesResult['bearFvg'] = null;
-  let bullOb: ImbalanceZonesResult['bullOb'] = null;
-  let bearOb: ImbalanceZonesResult['bearOb'] = null;
+  let bullFvg: ImbalanceZoneBox | null = null;
+  let bearFvg: ImbalanceZoneBox | null = null;
+  let bullOb: ImbalanceZoneBox | null = null;
+  let bearOb: ImbalanceZoneBox | null = null;
 
   for (let i = Math.max(2, n - lookback); i < n; i++) {
     const b0 = bars[i - 2];
@@ -195,37 +195,63 @@ export function findUnmitigatedFvgAndOb(
     const b2 = bars[i];
     if (minFormedAtMs > 0 && b2.t < minFormedAtMs) continue;
 
-    // Clean 3-candle Bullish FVG (candle[i].low > candle[i-2].high)
+    // Canonical ICT Bullish FVG (candle[i].low > candle[i-2].high with displacement body b1)
     if (b2.l > b0.h && b1.c > b1.o && b2.l - b0.h >= atr * minFvgAtr) {
-      const fullyFilled = bars.slice(i + 1).some((sub) => sub.c < b0.h);
-      if (!fullyFilled) {
-        bullFvg = { low: b0.h, high: b2.l, idx: i, formedAt: b2.t };
+      const fvgLow = b0.h;
+      const fvgHigh = b2.l;
+      const ceMid = (fvgLow + fvgHigh) / 2;
+      const subBars = bars.slice(i + 1);
+      // Canonical CE mitigation: invalid if subsequent closed candle closes below 50% CE or tapped >= 2x
+      const ceBreached = subBars.some((sub) => sub.c < ceMid);
+      const touchCount = subBars.filter((sub) => sub.l <= fvgHigh && sub.h >= fvgLow).length;
+      if (!ceBreached && touchCount <= 1) {
+        if (!bullFvg || touchCount < bullFvg.touchCount || (touchCount === bullFvg.touchCount && i > bullFvg.idx)) {
+          bullFvg = { low: fvgLow, high: fvgHigh, ceMid, idx: i, formedAt: b2.t, touchCount };
+        }
       }
     }
-    // Clean 3-candle Bearish FVG (candle[i].high < candle[i-2].low)
+
+    // Canonical ICT Bearish FVG (candle[i].high < candle[i-2].low with displacement body b1)
     if (b2.h < b0.l && b1.c < b1.o && b0.l - b2.h >= atr * minFvgAtr) {
-      const fullyFilled = bars.slice(i + 1).some((sub) => sub.c > b0.l);
-      if (!fullyFilled) {
-        bearFvg = { low: b2.h, high: b0.l, idx: i, formedAt: b2.t };
+      const fvgLow = b2.h;
+      const fvgHigh = b0.l;
+      const ceMid = (fvgLow + fvgHigh) / 2;
+      const subBars = bars.slice(i + 1);
+      const ceBreached = subBars.some((sub) => sub.c > ceMid);
+      const touchCount = subBars.filter((sub) => sub.h >= fvgLow && sub.l <= fvgHigh).length;
+      if (!ceBreached && touchCount <= 1) {
+        if (!bearFvg || touchCount < bearFvg.touchCount || (touchCount === bearFvg.touchCount && i > bearFvg.idx)) {
+          bearFvg = { low: fvgLow, high: fvgHigh, ceMid, idx: i, formedAt: b2.t, touchCount };
+        }
       }
     }
   }
 
-  for (let i = Math.max(1, n - Math.min(lookback, 22)); i < n - 1; i++) {
+  for (let i = Math.max(1, n - Math.min(lookback, 24)); i < n - 1; i++) {
     const cur = bars[i];
     const nxt = bars[i + 1];
     if (minFormedAtMs > 0 && nxt.t < minFormedAtMs) continue;
 
     if (cur.c < cur.o && nxt.c > cur.h && nxt.c - nxt.o >= atr * minObAtr) {
-      const mitigated = bars.slice(i + 2).some((sub) => sub.c < cur.l);
-      if (!mitigated) {
-        bullOb = { low: cur.l, high: Math.max(cur.o, cur.c), idx: i, formedAt: nxt.t };
+      const obLow = cur.l;
+      const obHigh = Math.max(cur.o, cur.c);
+      const ceMid = (obLow + obHigh) / 2;
+      const subBars = bars.slice(i + 2);
+      const mitigated = subBars.some((sub) => sub.c < obLow);
+      const touchCount = subBars.filter((sub) => sub.l <= obHigh && sub.h >= obLow).length;
+      if (!mitigated && touchCount <= 1) {
+        bullOb = { low: obLow, high: obHigh, ceMid, idx: i, formedAt: nxt.t, touchCount };
       }
     }
     if (cur.c > cur.o && nxt.c < cur.l && nxt.o - nxt.c >= atr * minObAtr) {
-      const mitigated = bars.slice(i + 2).some((sub) => sub.c > cur.h);
-      if (!mitigated) {
-        bearOb = { low: Math.min(cur.o, cur.c), high: cur.h, idx: i, formedAt: nxt.t };
+      const obLow = Math.min(cur.o, cur.c);
+      const obHigh = cur.h;
+      const ceMid = (obLow + obHigh) / 2;
+      const subBars = bars.slice(i + 2);
+      const mitigated = subBars.some((sub) => sub.c > obHigh);
+      const touchCount = subBars.filter((sub) => sub.h >= obLow && sub.l <= obHigh).length;
+      if (!mitigated && touchCount <= 1) {
+        bearOb = { low: obLow, high: obHigh, ceMid, idx: i, formedAt: nxt.t, touchCount };
       }
     }
   }
@@ -236,16 +262,13 @@ export function findUnmitigatedFvgAndOb(
 export function getIct15mAtrRangePct(assetId: string): {
   minPct: number;
   maxPct: number;
-  assetClassLabel: 'Crypto (BTC/USD)' | 'Commodities (XAU/USD)' | 'G10 FX';
+  assetClassLabel: 'Crypto (BTC/USD)' | 'Commodities (XAU/USD)';
 } {
   const id = (assetId || '').toUpperCase();
   if (id === 'BTCUSD') {
     return { minPct: 0.095, maxPct: 0.85, assetClassLabel: 'Crypto (BTC/USD)' };
   }
-  if (id === 'XAUUSD') {
-    return { minPct: 0.032, maxPct: 0.48, assetClassLabel: 'Commodities (XAU/USD)' };
-  }
-  return { minPct: 0.018, maxPct: 0.145, assetClassLabel: 'G10 FX' };
+  return { minPct: 0.032, maxPct: 0.48, assetClassLabel: 'Commodities (XAU/USD)' };
 }
 
 export function getIctVolatilityFloorPct(assetId: string, _timeframe: Timeframe = '15m'): number {
@@ -258,22 +281,11 @@ export function getAssetStopFloorBuffer(
 ): { value: number; reason: string } {
   const id = (asset.id || '').toUpperCase();
   if (id === 'BTCUSD') {
-    const val = Math.min(250, Math.max(150, Number((atr15m * 0.55).toFixed(asset.decimals))));
-    return { value: val, reason: `+$${val.toFixed(0)} BTC vol cushion ($150–$250 rule)` };
+    const val = Math.min(320, Math.max(140, Number((atr15m * 0.55).toFixed(asset.decimals))));
+    return { value: val, reason: `+$${val.toFixed(0)} BTC wick-sweep buffer` };
   }
-  if (id === 'XAUUSD') {
-    const val = Math.min(2.5, Math.max(1.5, Number((atr15m * 0.55).toFixed(asset.decimals))));
-    return { value: val, reason: `+$${val.toFixed(2)} Gold vol cushion ($1.50–$2.50 rule)` };
-  }
-  const pipSize = id.endsWith('JPY') ? 0.01 : 0.0001;
-  const minFloor = 5 * pipSize;
-  const maxFloor = 8 * pipSize;
-  const val = Math.min(maxFloor, Math.max(minFloor, Number((atr15m * 0.5).toFixed(asset.decimals))));
-  const pips = val / pipSize;
-  return {
-    value: val,
-    reason: `+${pips.toFixed(1)} pip FX wick buffer (5–8 pip floor)`,
-  };
+  const val = Math.min(3.5, Math.max(1.5, Number((atr15m * 0.55).toFixed(asset.decimals))));
+  return { value: val, reason: `+$${val.toFixed(2)} Gold COMEX/London sweep buffer` };
 }
 
 export function compute15mAtrMetrics(
@@ -284,7 +296,7 @@ export function compute15mAtrMetrics(
   atr15mPct: number;
   minPct: number;
   maxPct: number;
-  assetClassLabel: 'Crypto (BTC/USD)' | 'Commodities (XAU/USD)' | 'G10 FX';
+  assetClassLabel: 'Crypto (BTC/USD)' | 'Commodities (XAU/USD)';
   volatilityStatus: 'in-range' | 'too-low' | 'too-high' | 'warming';
   volatilityPassed: boolean;
   atrSource: '15m' | 'scaled' | 'warming';
@@ -297,7 +309,6 @@ export function compute15mAtrMetrics(
   );
   const rawAtr = computeAtr(barsForAtr, 14);
   const barMins = TF_BAR_MINUTES[usedTf] ?? 15;
-  // Random-walk square-root-of-time scaling instead of linear division
   const sqrtScaleTo15m = Math.sqrt(Math.max(1 / 15, barMins / 15));
   const atr15m = rawAtr / sqrtScaleTo15m;
   const atr15mPct = currentPrice > 0 ? (atr15m / currentPrice) * 100 : 0;
@@ -340,17 +351,12 @@ export function buildAssetInvalidationTrigger(params: {
   const { assetClassLabel, biasBullish, slFormatted, maxPct } = params;
   if (assetClassLabel === 'Crypto (BTC/USD)') {
     return biasBullish
-      ? `Crypto Rule: 15m candle close below SSL sweep & Bullish OB SL (${slFormatted}), OR 15m ATR > ${maxPct.toFixed(3)}% cascade volatility invalidates long.`
-      : `Crypto Rule: 15m candle close above BSL sweep & Bearish OB SL (${slFormatted}), OR 15m ATR > ${maxPct.toFixed(3)}% cascade volatility invalidates short.`;
-  }
-  if (assetClassLabel === 'Commodities (XAU/USD)') {
-    return biasBullish
-      ? `Gold Rule: 15m candle close below SSL sweep SL (${slFormatted}) & Demand OB, OR XAU 15m ATR > ${maxPct.toFixed(3)}% news whipsaw invalidates long.`
-      : `Gold Rule: 15m candle close above BSL sweep SL (${slFormatted}) & Supply OB, OR XAU 15m ATR > ${maxPct.toFixed(3)}% news whipsaw invalidates short.`;
+      ? `BTC Rule: 15m candle close below Sweep/Distal SL (${slFormatted}), OR 15m ATR > ${maxPct.toFixed(3)}% cascade volatility invalidates long.`
+      : `BTC Rule: 15m candle close above Sweep/Distal SL (${slFormatted}), OR 15m ATR > ${maxPct.toFixed(3)}% cascade volatility invalidates short.`;
   }
   return biasBullish
-    ? `FX Rule: 15m/5m candle close below Asian Low SL (${slFormatted}) before FVG fill, dual-sided sweep, OR FX 15m ATR > ${maxPct.toFixed(3)}% invalidates long.`
-    : `FX Rule: 15m/5m candle close above Asian High SL (${slFormatted}) before FVG fill, dual-sided sweep, OR FX 15m ATR > ${maxPct.toFixed(3)}% invalidates short.`;
+    ? `XAU Rule: 15m candle close below Sweep/Distal SL (${slFormatted}), OR 15m ATR > ${maxPct.toFixed(3)}% spike whipsaw invalidates long.`
+    : `XAU Rule: 15m candle close above Sweep/Distal SL (${slFormatted}), OR 15m ATR > ${maxPct.toFixed(3)}% spike whipsaw invalidates short.`;
 }
 
 export function splitConfirmedClosedBars(
@@ -372,7 +378,6 @@ export function splitConfirmedClosedBars(
   const lastBar = bars[bars.length - 1];
   const tfMs = TF_DURATION_MS[timeframe] ?? 900_000;
   const ageMs = nowMs - (lastBar?.t ?? 0);
-  // Drop live forming bar inside current bucket to avoid intra-bar flicker
   if (lastBar && lastBar.t > 0 && ageMs >= 0 && ageMs < tfMs * 0.92) {
     return {
       evalBars: bars.slice(0, -1),
@@ -390,13 +395,6 @@ export function splitConfirmedClosedBars(
 const ASSET_NEWS_CURRENCIES: Record<string, EconomicCalendarCurrency[]> = {
   BTCUSD: ['USD'],
   XAUUSD: ['USD'],
-  EURUSD: ['USD', 'EUR'],
-  GBPUSD: ['USD', 'GBP'],
-  USDJPY: ['USD', 'JPY'],
-  AUDUSD: ['USD', 'AUD'],
-  USDCHF: ['USD', 'CHF'],
-  USDCAD: ['USD', 'CAD'],
-  NZDUSD: ['USD', 'NZD'],
 };
 
 export function checkMacroNewsBlackout(
@@ -420,7 +418,6 @@ export function checkMacroNewsBlackout(
     const evTs = ev.isoDate ? Date.parse(ev.isoDate) : NaN;
     if (!Number.isFinite(evTs)) continue;
     const diffMin = (evTs - nowMs) / 60_000;
-    // Blackout window: 15 min prior through 20 min post high-impact release
     if (diffMin >= -20 && diffMin <= 15) {
       const timing =
         diffMin > 1
@@ -498,14 +495,14 @@ export function checkLiveSetupValidity(params: {
       return {
         valid: false,
         status: 'invalidated',
-        reason: 'Live spot already closed/traded below Stop Loss — long setup invalidated',
+        reason: 'Live spot breached Stop Loss — long setup invalidated',
       };
     }
     if (currentPrice >= tp1Val) {
       return {
         valid: false,
         status: 'missed',
-        reason: 'Live spot already reached TP1 target — wait for next fresh sweep',
+        reason: 'Live spot already reached TP1 target — wait for fresh sweep',
       };
     }
   } else {
@@ -513,14 +510,14 @@ export function checkLiveSetupValidity(params: {
       return {
         valid: false,
         status: 'invalidated',
-        reason: 'Live spot already closed/traded above Stop Loss — short setup invalidated',
+        reason: 'Live spot breached Stop Loss — short setup invalidated',
       };
     }
     if (currentPrice <= tp1Val) {
       return {
         valid: false,
         status: 'missed',
-        reason: 'Live spot already reached TP1 target — wait for next fresh sweep',
+        reason: 'Live spot already reached TP1 target — wait for fresh sweep',
       };
     }
   }
@@ -539,6 +536,7 @@ export function evaluateLiveExecutionPosture(params: {
   tp2?: number;
   atr?: number;
   executionStatus?: 'active' | 'standby' | 'invalidated' | 'missed';
+  exactLimitOverride?: number;
 }): {
   posture: IctExecutionPosture;
   recommendedOrderType: IctRecommendedOrderType;
@@ -560,6 +558,7 @@ export function evaluateLiveExecutionPosture(params: {
     tp2,
     atr,
     executionStatus,
+    exactLimitOverride,
   } = params;
 
   const bias: 'BUY' | 'SELL' | undefined =
@@ -594,9 +593,15 @@ export function evaluateLiveExecutionPosture(params: {
 
   const lo = Math.min(entryLow!, entryHigh!);
   const hi = Math.max(entryLow!, entryHigh!);
-  // Proximal-biased sweet-spot limit entry (higher fill probability while preserving >= 1:2 R:R)
+  // Use canonical exact limit price (FVG 50% CE or S&D Proximal) when provided, else 55% inside zone
+  const defaultSweetSpot = bias === 'BUY' ? lo + (hi - lo) * 0.55 : hi - (hi - lo) * 0.55;
   const limitEntryPriceNum =
-    bias === 'BUY' ? lo + (hi - lo) * 0.65 : hi - (hi - lo) * 0.65;
+    typeof exactLimitOverride === 'number' &&
+    Number.isFinite(exactLimitOverride) &&
+    exactLimitOverride >= lo * 0.99 &&
+    exactLimitOverride <= hi * 1.01
+      ? exactLimitOverride
+      : defaultSweetSpot;
 
   const limitRisk = Math.abs(limitEntryPriceNum - stopLoss!);
   const limitReward = Math.abs(tp2! - limitEntryPriceNum);
@@ -708,7 +713,7 @@ export function evaluateLiveExecutionPosture(params: {
     }
   }
 
-  const atrPad = typeof atr === 'number' && Number.isFinite(atr) && atr > 0 ? atr * 0.12 : 0;
+  const atrPad = typeof atr === 'number' && Number.isFinite(atr) && atr > 0 ? atr * 0.1 : 0;
   const inZone =
     (currentPrice >= lo - atrPad && currentPrice <= hi + atrPad) ||
     (bias === 'BUY' && currentPrice < lo && currentPrice > stopLoss!) ||
@@ -728,10 +733,10 @@ export function evaluateLiveExecutionPosture(params: {
 
   const atrRunThreshold =
     typeof atr === 'number' && Number.isFinite(atr) && atr > 0
-      ? atr * 0.38
+      ? atr * 0.35
       : Infinity;
   const tooFarByAtr = traveledBeyondEntry > atrRunThreshold;
-  const tooFarByTp1 = chaseProgressPct > 35;
+  const tooFarByTp1 = chaseProgressPct > 32;
 
   if (tooFarByAtr || tooFarByTp1) {
     return {
@@ -756,11 +761,6 @@ export function evaluateLiveExecutionPosture(params: {
   };
 }
 
-// ============================================================================
-// 1. PURE ICT TRADING RULES ENGINE (Strict Liquidity Sweep + MSS + FVG/OB + Dealing-Range OTE)
-//    Used exclusively for BTC/USD and XAU/USD
-// ============================================================================
-
 function getZonedClockParts(
   date: Date,
   timeZone: string
@@ -777,31 +777,92 @@ function getZonedClockParts(
   return { hour, minute, totalMin: hour * 60 + minute };
 }
 
-function resolvePureIctKillzoneLabel(now = new Date()): { label: string; inKillzone: boolean } {
+export function extractMacroContextFromAssets(assets: MarketAsset[]): MacroIctContext | undefined {
+  const dxy = assets.find((a) => a.id.toUpperCase() === 'DXY');
+  if (!dxy) return undefined;
+  const { bars: bars1h } = extractBarsForTf(dxy, ['1h', '4h', '1D'], 8);
+  let dxyBias: 'Bullish' | 'Bearish' | 'Ranging' =
+    bars1h.length >= 8 ? detectSwingStructureBias(bars1h, dxy.price) : 'Ranging';
+  if (dxyBias === 'Ranging') {
+    if (dxy.changePercent >= 0.16) dxyBias = 'Bullish';
+    else if (dxy.changePercent <= -0.16) dxyBias = 'Bearish';
+  }
+  return {
+    dxyBias,
+    dxyChangePct: Number.isFinite(dxy.changePercent) ? dxy.changePercent : 0,
+  };
+}
+
+function resolvePureIctKillzoneLabel(
+  refTsMs = Date.now(),
+  assetId = 'XAUUSD'
+): { label: string; inKillzone: boolean } {
+  const now = new Date(refTsMs);
   const london = getZonedClockParts(now, 'Europe/London');
   const ny = getZonedClockParts(now, 'America/New_York');
+  const isBtc = assetId.toUpperCase() === 'BTCUSD';
 
-  // NY AM Killzone (08:00–11:00 NY local time, automatically tracks EST/EDT DST)
-  if (ny.totalMin >= 8 * 60 && ny.totalMin < 11 * 60) {
+  if (isBtc) {
+    // BTC/USD Institutional Windows (NY EST): London Open 03:00–06:00, NY ETF/Futures Open 08:00–12:00, NY PM 13:30–16:00
+    if (ny.totalMin >= 8 * 60 && ny.totalMin < 12 * 60) {
+      return {
+        label:
+          ny.totalMin < 10 * 60 + 30
+            ? 'BTC NY ETF / Futures Open Killzone'
+            : 'BTC NY Institutional Flow',
+        inKillzone: true,
+      };
+    }
+    if (ny.totalMin >= 3 * 60 && ny.totalMin < 6 * 60) {
+      return { label: 'BTC London Open Killzone', inKillzone: true };
+    }
+    if (ny.totalMin >= 13 * 60 + 30 && ny.totalMin < 16 * 60) {
+      return { label: 'BTC NY PM Close Window', inKillzone: true };
+    }
+    if (ny.totalMin >= 19 * 60 || ny.totalMin < 3 * 60) {
+      return { label: 'BTC Asia Low-Liquidity Range', inKillzone: false };
+    }
+    return { label: 'BTC Inter-Session Consolidation', inKillzone: false };
+  }
+
+  // XAU/USD Gold Institutional Windows (NY EST): London Judas 02:00–05:00, NY AM COMEX 08:00–11:15, NY PM Silver Bullet 13:30–16:00
+  if (ny.totalMin >= 8 * 60 && ny.totalMin < 11 * 60 + 15) {
     const isLondonOverlap = london.totalMin >= 12 * 60 && london.totalMin < 17 * 60;
     return {
-      label: isLondonOverlap ? 'NY AM / London Overlap' : 'NY AM Killzone',
+      label: isLondonOverlap ? 'XAU NY AM / London Overlap' : 'XAU NY AM COMEX Killzone',
       inKillzone: true,
     };
   }
-  // London Open Killzone (07:00–10:00 London local time, automatically tracks GMT/BST DST)
-  if (london.totalMin >= 7 * 60 && london.totalMin < 10 * 60) {
-    return { label: 'London Open Killzone', inKillzone: true };
+  if (ny.totalMin >= 2 * 60 && ny.totalMin < 5 * 60 + 15) {
+    return { label: 'XAU London Judas Killzone', inKillzone: true };
   }
-  // NY PM Silver Bullet (13:30–16:00 NY local time)
   if (ny.totalMin >= 13 * 60 + 30 && ny.totalMin < 16 * 60) {
-    return { label: 'NY PM Silver Bullet', inKillzone: true };
+    return { label: 'XAU NY PM Silver Bullet', inKillzone: true };
   }
-  // Asian Session Range (19:00–00:00 NY local time)
-  if (ny.totalMin >= 19 * 60) {
-    return { label: 'Asia Session Range', inKillzone: false };
+  if (ny.totalMin >= 19 * 60 || ny.totalMin < 2 * 60) {
+    return { label: 'XAU Asia Accumulation Range', inKillzone: false };
   }
-  return { label: 'Inter-Session Consolidation', inKillzone: false };
+  return { label: 'XAU Inter-Session Lunch', inKillzone: false };
+}
+
+function extractAsianSessionRange(
+  asset: MarketAsset,
+  atr15m: number
+): { asianHigh?: number; asianLow?: number; asianRangeAtrRatio?: number } {
+  const { bars } = extractBarsForTf(asset, ['15m', '30m', '1h'], 8);
+  if (bars.length < 8) return {};
+  const asianBars = bars.filter((b) => {
+    if (!b.t || !Number.isFinite(b.t)) return false;
+    const ny = getZonedClockParts(new Date(b.t), 'America/New_York');
+    return ny.hour >= 19 || ny.hour < 2;
+  });
+  if (asianBars.length < 2) return {};
+  const recentAsia = asianBars.slice(-28);
+  const asianHigh = Math.max(...recentAsia.map((b) => b.h));
+  const asianLow = Math.min(...recentAsia.map((b) => b.l));
+  const ratio =
+    atr15m > 0 ? Number(((asianHigh - asianLow) / atr15m).toFixed(2)) : undefined;
+  return { asianHigh, asianLow, asianRangeAtrRatio: ratio };
 }
 
 function analyzePureIctHtf(
@@ -834,21 +895,40 @@ function analyzePureIctHtf(
     bias = bias4h;
   } else if (bias1h !== 'Ranging' && bias4h === 'Ranging') {
     bias = bias1h;
+  } else if (bias1h !== 'Ranging') {
+    bias = bias1h;
   } else if (imb4h.bullFvg && !imb4h.bearFvg) {
     bias = 'Bullish';
   } else if (imb4h.bearFvg && !imb4h.bullFvg) {
     bias = 'Bearish';
   }
 
-  const external4hHigh = Math.max(...bars4h.map((b) => b.h), currentPrice);
-  const external4hLow = Math.min(...bars4h.map((b) => b.l), currentPrice);
-  const pool1hHigh = Math.max(...bars1h.slice(-24).map((b) => b.h), currentPrice);
-  const pool1hLow = Math.min(...bars1h.slice(-24).map((b) => b.l), currentPrice);
+  const external4hHigh = bars4h.length > 0 ? Math.max(...bars4h.map((b) => b.h), currentPrice) : currentPrice;
+  const external4hLow = bars4h.length > 0 ? Math.min(...bars4h.map((b) => b.l), currentPrice) : currentPrice;
+  const pool1hHigh = bars1h.length > 0 ? Math.max(...bars1h.slice(-24).map((b) => b.h), currentPrice) : currentPrice;
+  const pool1hLow = bars1h.length > 0 ? Math.min(...bars1h.slice(-24).map((b) => b.l), currentPrice) : currentPrice;
 
-  const dayHighNum = parseFloat(String(asset.dayHigh).replace(/[^0-9.-]/g, ''));
-  const dayLowNum = parseFloat(String(asset.dayLow).replace(/[^0-9.-]/g, ''));
-  const pdh = Number.isFinite(dayHighNum) && dayHighNum > 0 ? Math.max(dayHighNum, pool1hHigh) : pool1hHigh;
-  const pdl = Number.isFinite(dayLowNum) && dayLowNum > 0 ? Math.min(dayLowNum, pool1hLow) : pool1hLow;
+  // Use true 1H OHLC previous-24h session range (never static/stale asset.dayHigh/dayLow snapshots)
+  const sessionSlice1h = bars1h.slice(-36, -1);
+  const pdh =
+    sessionSlice1h.length > 0 ? Math.max(...sessionSlice1h.map((b) => b.h), pool1hHigh) : pool1hHigh;
+  const pdl =
+    sessionSlice1h.length > 0 ? Math.min(...sessionSlice1h.map((b) => b.l), pool1hLow) : pool1hLow;
+
+  // 1H EMA-20 / EMA-50 structural trend confirmation when swing pivots look mixed
+  if (bias === 'Ranging' && bars1h.length >= 24) {
+    const closes = bars1h.map((b) => b.c);
+    const ema = (vals: number[], period: number) => {
+      const k = 2 / (period + 1);
+      let e = vals[0];
+      for (let idx = 1; idx < vals.length; idx++) e = vals[idx] * k + e * (1 - k);
+      return e;
+    };
+    const ema12 = ema(closes.slice(-30), 12);
+    const ema26 = ema(closes.slice(-40), 26);
+    if (currentPrice > ema12 && ema12 > ema26 * 1.0008) bias = 'Bullish';
+    else if (currentPrice < ema12 && ema12 < ema26 * 0.9992) bias = 'Bearish';
+  }
 
   const bullDemandZone = imb4h.bullFvg || imb4h.bullOb || imb1h.bullFvg || imb1h.bullOb;
   const bearSupplyZone = imb4h.bearFvg || imb4h.bearOb || imb1h.bearFvg || imb1h.bearOb;
@@ -877,12 +957,66 @@ function analyzePureIctHtf(
   };
 }
 
+function buildPlacementSummary(params: {
+  direction: IctDirection;
+  expectedBias: 'BUY' | 'SELL' | 'NEUTRAL';
+  posture: IctExecutionPosture;
+  limitEntryPriceNum?: number;
+  stopLossNum?: number;
+  tp1Num?: number;
+  tp2Num?: number;
+  asset: MarketAsset;
+  waitReason?: string;
+}): string {
+  const {
+    direction,
+    expectedBias,
+    posture,
+    limitEntryPriceNum,
+    stopLossNum,
+    tp1Num,
+    tp2Num,
+    asset,
+    waitReason,
+  } = params;
+  if (direction === 'NEUTRAL') {
+    const lean =
+      expectedBias === 'BUY'
+        ? 'BULLISH LEAN'
+        : expectedBias === 'SELL'
+          ? 'BEARISH LEAN'
+          : 'FLAT';
+    const refPx =
+      typeof limitEntryPriceNum === 'number'
+        ? ` @ ${formatPriceWithAsset(limitEntryPriceNum, asset)}`
+        : '';
+    return `NO ORDER (${lean}${refPx}) — ${waitReason ?? 'Await Sweep + Displacement MSS + Fresh FVG'}`;
+  }
+
+  const slStr = typeof stopLossNum === 'number' ? formatPriceWithAsset(stopLossNum, asset) : '—';
+  const tp1Str = typeof tp1Num === 'number' ? formatPriceWithAsset(tp1Num, asset) : '—';
+  const tp2Str = typeof tp2Num === 'number' ? formatPriceWithAsset(tp2Num, asset) : '—';
+  const limStr =
+    typeof limitEntryPriceNum === 'number'
+      ? formatPriceWithAsset(limitEntryPriceNum, asset)
+      : 'Zone';
+
+  if (posture === 'enter_now') {
+    return `${direction} MARKET (IN ZONE) · SL ${slStr} · TP1 ${tp1Str} (BE) · TP2 ${tp2Str}`;
+  }
+  if (posture === 'limit_pullback_only') {
+    return `${direction} LIMIT PULLBACK @ ${limStr} (NO CHASE) · SL ${slStr} · TP1 ${tp1Str} · TP2 ${tp2Str}`;
+  }
+  return `${direction} LIMIT @ ${limStr} · SL ${slStr} · TP1 ${tp1Str} (BE) · TP2 ${tp2Str}`;
+}
+
 function computePureIctSignalForXauBtc(
   asset: MarketAsset,
   preferredTimeframe?: Timeframe,
   enforceVolatilityFilter = true,
   economicEvents?: EconomicEvent[],
-  enforceNewsBlackout = true
+  enforceNewsBlackout = true,
+  macroContext?: MacroIctContext
 ): IctSignalAnalysis {
   const candidates: Timeframe[] = preferredTimeframe
     ? [preferredTimeframe, ...ICT_TIMEFRAME_PRIORITY.filter((tf) => tf !== preferredTimeframe)]
@@ -890,7 +1024,7 @@ function computePureIctSignalForXauBtc(
 
   const { bars: rawBars, timeframe, isRealOhlc } = extractBarsForTf(asset, candidates, 12);
   if (!isRealOhlc || rawBars.length < 12) {
-    const { label: killzone } = resolvePureIctKillzoneLabel();
+    const { label: killzone } = resolvePureIctKillzoneLabel(Date.now(), asset.id);
     const atr15mMetrics = compute15mAtrMetrics(asset, asset.price);
     const warmingPrice = formatPriceWithAsset(asset.price, asset);
     return {
@@ -898,6 +1032,16 @@ function computePureIctSignalForXauBtc(
       symbol: asset.symbol,
       name: asset.shortName,
       direction: 'NEUTRAL',
+      biasLabel: 'FLAT',
+      biasVerdict: 'NEUTRAL / RANGE',
+      clearanceSummary: '0/5 Gates · Warming real OHLCV candles',
+      clearanceGates: [
+        { id: 'htf', label: 'HTF Bias', passed: false, state: 'WARN', detail: 'Warming bars' },
+        { id: 'kz', label: 'Killzone', passed: false, state: 'WARN', detail: killzone },
+        { id: 'sweep', label: 'Liquidity Sweep', passed: false, state: 'BLOCK', detail: 'Awaiting OHLC' },
+        { id: 'mss', label: 'Displacement MSS', passed: false, state: 'BLOCK', detail: 'Pending' },
+        { id: 'zone', label: 'FVG / OTE & Risk', passed: false, state: 'BLOCK', detail: 'Pending' },
+      ],
       confidence: 20,
       setupName: 'WAIT · Warming Real OHLCV Bars',
       pdZone: 'Equilibrium',
@@ -922,21 +1066,29 @@ function computePureIctSignalForXauBtc(
       volatilityPassed: false,
       atrSource: 'warming',
       executionStatus: 'standby',
+      executionPosture: 'standby',
+      recommendedOrderType: 'WAIT',
       candleStageLabel: 'Awaiting Real OHLC',
       isClosedCandleConfirmed: false,
       isRealOhlc: false,
       setupGrade: 'WAIT',
       isAPlusSetup: false,
+      placementSummary: 'NO ORDER (FLAT) — Warming real OHLCV candles',
       invalidationTrigger: 'Hold flat until real OHLC candlestick bars finish syncing.',
-      invalidationNote: 'Awaiting verified multi-bar OHLC data (synthetic candle fallback disabled).',
+      invalidationNote: 'Awaiting verified multi-bar OHLC data.',
     };
   }
+
+  const refClockMs =
+    typeof asset.updatedAtEpoch === 'number' && asset.updatedAtEpoch > 0
+      ? asset.updatedAtEpoch
+      : rawBars[rawBars.length - 1]?.t ?? Date.now();
 
   const {
     evalBars: closedOrLiveBars,
     isClosedCandleConfirmed,
     candleStageLabel,
-  } = splitConfirmedClosedBars(rawBars, timeframe);
+  } = splitConfirmedClosedBars(rawBars, timeframe, refClockMs);
   const bars = closedOrLiveBars.slice(-56);
   const n = bars.length;
 
@@ -949,19 +1101,40 @@ function computePureIctSignalForXauBtc(
   const pdZone: IctSignalAnalysis['pdZone'] =
     posInRange <= 0.44 ? 'Discount' : posInRange >= 0.56 ? 'Premium' : 'Equilibrium';
 
-  // Separate prior structural swings (excluding recent 16-bar sweep window)
-  const sweepWindowLen = Math.min(16, Math.max(6, Math.floor(n * 0.3)));
-  const priorEndIdx = Math.max(4, n - sweepWindowLen);
+  // Prior structural fractal swings (excluding recent 14-bar sweep window)
+  const sweepWindowLen = Math.min(14, Math.max(5, Math.floor(n * 0.25)));
+  const priorEndIdx = Math.max(5, n - sweepWindowLen);
   const priorSlice = bars.slice(0, priorEndIdx);
 
   const pivotHighs: number[] = [];
   const pivotLows: number[] = [];
-  for (let i = 1; i < priorSlice.length - 1; i++) {
-    if (priorSlice[i].h > priorSlice[i - 1].h && priorSlice[i].h > priorSlice[i + 1].h) {
+  for (let i = 2; i < priorSlice.length - 2; i++) {
+    if (
+      priorSlice[i].h >= priorSlice[i - 1].h &&
+      priorSlice[i].h > priorSlice[i - 2].h &&
+      priorSlice[i].h >= priorSlice[i + 1].h &&
+      priorSlice[i].h > priorSlice[i + 2].h
+    ) {
       pivotHighs.push(priorSlice[i].h);
     }
-    if (priorSlice[i].l < priorSlice[i - 1].l && priorSlice[i].l < priorSlice[i + 1].l) {
+    if (
+      priorSlice[i].l <= priorSlice[i - 1].l &&
+      priorSlice[i].l < priorSlice[i - 2].l &&
+      priorSlice[i].l <= priorSlice[i + 1].l &&
+      priorSlice[i].l < priorSlice[i + 2].l
+    ) {
       pivotLows.push(priorSlice[i].l);
+    }
+  }
+  // Fallback to 3-bar fractals if 5-bar fractals empty
+  if (pivotHighs.length === 0 || pivotLows.length === 0) {
+    for (let i = 1; i < priorSlice.length - 1; i++) {
+      if (pivotHighs.length === 0 && priorSlice[i].h > priorSlice[i - 1].h && priorSlice[i].h > priorSlice[i + 1].h) {
+        pivotHighs.push(priorSlice[i].h);
+      }
+      if (pivotLows.length === 0 && priorSlice[i].l < priorSlice[i - 1].l && priorSlice[i].l < priorSlice[i + 1].l) {
+        pivotLows.push(priorSlice[i].l);
+      }
     }
   }
 
@@ -970,7 +1143,7 @@ function computePureIctSignalForXauBtc(
   const priorSwingLow =
     pivotLows.length > 0 ? pivotLows[pivotLows.length - 1] : Math.min(...priorSlice.map((b) => b.l));
 
-  // Scan recent sweep window for 1-bar OR 2-bar SSL / BSL liquidity sweep + reclaim
+  // Step 1: Liquidity Sweep + Reclaim (SSL or BSL)
   let sslSweepIdx = -1;
   let bslSweepIdx = -1;
   let sslSweepLow = priorSwingLow;
@@ -981,22 +1154,20 @@ function computePureIctSignalForXauBtc(
     const prevB = i > 0 ? bars[i - 1] : b;
     if (
       (b.l < priorSwingLow && b.c > priorSwingLow) ||
-      (prevB.l < priorSwingLow && b.c > priorSwingLow && b.c >= b.o)
+      (prevB.l < priorSwingLow && b.c > priorSwingLow && b.c > b.o)
     ) {
       sslSweepIdx = i;
       sslSweepLow = Math.min(sslSweepLow, b.l, prevB.l);
     }
     if (
       (b.h > priorSwingHigh && b.c < priorSwingHigh) ||
-      (prevB.h > priorSwingHigh && b.c < priorSwingHigh && b.c <= b.o)
+      (prevB.h > priorSwingHigh && b.c < priorSwingHigh && b.c < b.o)
     ) {
       bslSweepIdx = i;
       bslSweepHigh = Math.max(bslSweepHigh, b.h, prevB.h);
     }
   }
 
-  // Only treat as choppy dual-sided sweep if both occurred within 4 bars of each other;
-  // otherwise respect the most recent directional sweep.
   const simultaneousDualSweep =
     sslSweepIdx >= 0 && bslSweepIdx >= 0 && Math.abs(sslSweepIdx - bslSweepIdx) <= 4;
   const sslSweptStrict =
@@ -1013,7 +1184,7 @@ function computePureIctSignalForXauBtc(
   const volatilityStatus = atr15mMetrics.volatilityStatus;
   const volatilityPassed = atr15mMetrics.volatilityPassed;
 
-  // Chronological MSS Break strictly at/after sweep candle (supports 1-bar OR 2-bar displacement)
+  // Step 2: Canonical Displacement + MSS Body Close strictly AFTER Sweep
   let bullMss = false;
   let bullMssIdx = -1;
   let mssImpulseHigh = rangeHigh;
@@ -1025,22 +1196,17 @@ function computePureIctSignalForXauBtc(
     for (let k = sslSweepIdx + 1; k < n; k++) {
       const cur = bars[k];
       const prev = bars[k - 1];
+      const curSpan = Math.max(1e-6, cur.h - cur.l);
+      const curStrongClose = (cur.c - cur.l) / curSpan >= 0.62;
       const twoBarBullPush = cur.c > prev.o ? cur.c - prev.o : 0;
       const disp =
-        (cur.c > cur.o && cur.c - cur.o >= atr * 0.58) ||
-        (prev.c > prev.o && prev.c - prev.o >= atr * 0.58) ||
-        twoBarBullPush >= atr * 0.78;
+        (cur.c > cur.o && cur.c - cur.o >= atr * 0.62 && curStrongClose) ||
+        (prev.c > prev.o && prev.c - prev.o >= atr * 0.65) ||
+        twoBarBullPush >= atr * 0.85;
       if (cur.c > microHigh && disp) {
         bullMss = true;
         bullMssIdx = k;
         break;
-      }
-    }
-    if (!bullMss) {
-      const dispExists = sweepSlice.some((b) => b.c > b.o && b.c - b.o >= atr * 0.75);
-      if (dispExists && currentPrice > microHigh) {
-        bullMss = true;
-        bullMssIdx = n - 1;
       }
     }
   }
@@ -1056,35 +1222,36 @@ function computePureIctSignalForXauBtc(
     for (let k = bslSweepIdx + 1; k < n; k++) {
       const cur = bars[k];
       const prev = bars[k - 1];
+      const curSpan = Math.max(1e-6, cur.h - cur.l);
+      const curStrongClose = (cur.c - cur.l) / curSpan <= 0.38;
       const twoBarBearPush = prev.o > cur.c ? prev.o - cur.c : 0;
       const disp =
-        (cur.c < cur.o && cur.o - cur.c >= atr * 0.58) ||
-        (prev.c < prev.o && prev.o - prev.c >= atr * 0.58) ||
-        twoBarBearPush >= atr * 0.78;
+        (cur.c < cur.o && cur.o - cur.c >= atr * 0.62 && curStrongClose) ||
+        (prev.c < prev.o && prev.o - prev.c >= atr * 0.65) ||
+        twoBarBearPush >= atr * 0.85;
       if (cur.c < microLow && disp) {
         bearMss = true;
         bearMssIdx = k;
         break;
       }
     }
-    if (!bearMss) {
-      const dispExists = sweepSlice.some((b) => b.c < b.o && b.o - b.c >= atr * 0.75);
-      if (dispExists && currentPrice < microLow) {
-        bearMss = true;
-        bearMssIdx = n - 1;
-      }
-    }
   }
 
-  // Dealing-Range OTE (0.618–0.786) anchored strictly on Sweep -> MSS impulse leg
+  // Dealing-Range OTE (0.618–0.786) strictly anchored on Sweep -> MSS impulse leg
   const bullLegLow = sslSweptStrict ? sslSweepLow : priorSwingLow;
-  const bullLegHigh = sslSweptStrict && mssImpulseHigh > bullLegLow ? mssImpulseHigh : Math.max(...bars.slice(-24).map((b) => b.h));
+  const bullLegHigh =
+    sslSweptStrict && mssImpulseHigh > bullLegLow
+      ? mssImpulseHigh
+      : Math.max(...bars.slice(-24).map((b) => b.h));
   const bullLegSpan = Math.max(1e-6, bullLegHigh - bullLegLow);
   const bullOteLow = bullLegHigh - bullLegSpan * 0.786;
   const bullOteHigh = bullLegHigh - bullLegSpan * 0.618;
 
   const bearLegHigh = bslSweptStrict ? bslSweepHigh : priorSwingHigh;
-  const bearLegLow = bslSweptStrict && mssImpulseLow < bearLegHigh ? mssImpulseLow : Math.min(...bars.slice(-24).map((b) => b.l));
+  const bearLegLow =
+    bslSweptStrict && mssImpulseLow < bearLegHigh
+      ? mssImpulseLow
+      : Math.min(...bars.slice(-24).map((b) => b.l));
   const bearLegSpan = Math.max(1e-6, bearLegHigh - bearLegLow);
   const bearOteLow = bearLegLow + bearLegSpan * 0.618;
   const bearOteHigh = bearLegLow + bearLegSpan * 0.786;
@@ -1092,104 +1259,218 @@ function computePureIctSignalForXauBtc(
   const inBullOte = currentPrice >= bullOteLow && currentPrice <= bullOteHigh;
   const inBearOte = currentPrice >= bearOteLow && currentPrice <= bearOteHigh;
 
-  // Unmitigated FVG / OB anchored after sweep when sweep occurred
+  // Step 3: Canonical Fresh FVG / OB formed strictly at/after the Sweep leg
   const bullMinTs = sslSweptStrict ? bars[Math.max(0, sslSweepIdx - 1)].t : 0;
   const bearMinTs = bslSweptStrict ? bars[Math.max(0, bslSweepIdx - 1)].t : 0;
-  const imbBull = findUnmitigatedFvgAndOb(bars, atr, 28, 0.14, 0.7, bullMinTs);
-  const imbBear = findUnmitigatedFvgAndOb(bars, atr, 28, 0.14, 0.7, bearMinTs);
+  const imbBull = findUnmitigatedFvgAndOb(bars, atr, 28, 0.16, 0.68, bullMinTs);
+  const imbBear = findUnmitigatedFvgAndOb(bars, atr, 28, 0.16, 0.68, bearMinTs);
+
+  const bullAnchor = imbBull.bullFvg ?? imbBull.bullOb;
+  const bearAnchor = imbBear.bearFvg ?? imbBear.bearOb;
+
+  const bullDiscountValid = Boolean(
+    bullAnchor && (bullAnchor.ceMid <= bullLegLow + bullLegSpan * 0.62 || pdZone === 'Discount')
+  );
+  const bearPremiumValid = Boolean(
+    bearAnchor && (bearAnchor.ceMid >= bearLegHigh - bearLegSpan * 0.62 || pdZone === 'Premium')
+  );
 
   const nearBullFvg = Boolean(
     imbBull.bullFvg &&
-      currentPrice >= imbBull.bullFvg.low - atr * 0.6 &&
-      currentPrice <= imbBull.bullFvg.high + atr * 1.4
+      currentPrice >= imbBull.bullFvg.low - atr * 0.5 &&
+      currentPrice <= imbBull.bullFvg.high + atr * 1.15
   );
   const nearBullOb = Boolean(
     imbBull.bullOb &&
-      currentPrice >= imbBull.bullOb.low - atr * 0.6 &&
-      currentPrice <= imbBull.bullOb.high + atr * 1.4
+      currentPrice >= imbBull.bullOb.low - atr * 0.5 &&
+      currentPrice <= imbBull.bullOb.high + atr * 1.15
   );
   const nearBearFvg = Boolean(
     imbBear.bearFvg &&
-      currentPrice <= imbBear.bearFvg.high + atr * 0.6 &&
-      currentPrice >= imbBear.bearFvg.low - atr * 1.4
+      currentPrice <= imbBear.bearFvg.high + atr * 0.5 &&
+      currentPrice >= imbBear.bearFvg.low - atr * 1.15
   );
   const nearBearOb = Boolean(
     imbBear.bearOb &&
-      currentPrice <= imbBear.bearOb.high + atr * 0.6 &&
-      currentPrice >= imbBear.bearOb.low - atr * 1.4
+      currentPrice <= imbBear.bearOb.high + atr * 0.5 &&
+      currentPrice >= imbBear.bearOb.low - atr * 1.15
   );
 
-  // HTF Swing Structure & Killzone
+  // HTF Structure & Killzone (evaluates live clock AND sweep candle killzone, tuned per XAU/BTC)
+  const isGold = asset.id.toUpperCase() === 'XAUUSD';
+  const isBtc = asset.id.toUpperCase() === 'BTCUSD';
   const htf = analyzePureIctHtf(asset, currentPrice);
-  const { label: killzone, inKillzone } = resolvePureIctKillzoneLabel();
+  const asianRange = isGold ? extractAsianSessionRange(asset, atr15mMetrics.atr15m) : {};
+  const asianLowSwept = Boolean(
+    isGold &&
+      typeof asianRange.asianLow === 'number' &&
+      sslSweptStrict &&
+      sslSweepLow <= asianRange.asianLow
+  );
+  const asianHighSwept = Boolean(
+    isGold &&
+      typeof asianRange.asianHigh === 'number' &&
+      bslSweptStrict &&
+      bslSweepHigh >= asianRange.asianHigh
+  );
 
-  // Score breakdown reflects verified structural pillars (not phantom shortcuts)
-  const bullSweepPts = sslSweptStrict && !dualSideSwept ? 24 : 0;
-  const bearSweepPts = bslSweptStrict && !dualSideSwept ? 24 : 0;
+  // BTC/USD Psychological Round-Number Liquidity Pools ($1,000 & $500 key magnets)
+  let roundPoolNote: string | undefined;
+  let btcRoundPoolSwept = false;
+  if (isBtc && currentPrice > 0) {
+    const step = currentPrice >= 20_000 ? 1000 : 500;
+    const nearestDown = Math.floor(currentPrice / step) * step;
+    const nearestUp = Math.ceil(currentPrice / step) * step;
+    if (sslSweptStrict && sslSweepLow <= nearestDown && currentPrice > nearestDown) {
+      btcRoundPoolSwept = true;
+      roundPoolNote = `BTC Swept $${nearestDown.toLocaleString('en-US')} Psychological SSL Pool`;
+    } else if (bslSweptStrict && bslSweepHigh >= nearestUp && currentPrice < nearestUp) {
+      btcRoundPoolSwept = true;
+      roundPoolNote = `BTC Swept $${nearestUp.toLocaleString('en-US')} Psychological BSL Pool`;
+    } else {
+      const distUpPct = ((nearestUp - currentPrice) / currentPrice) * 100;
+      const distDnPct = ((currentPrice - nearestDown) / currentPrice) * 100;
+      if (distUpPct <= 0.85) {
+        roundPoolNote = `Near $${nearestUp.toLocaleString('en-US')} Psych BSL Magnet (${distUpPct.toFixed(2)}% away)`;
+      } else if (distDnPct <= 0.85) {
+        roundPoolNote = `Near $${nearestDown.toLocaleString('en-US')} Psych SSL Magnet (${distDnPct.toFixed(2)}% away)`;
+      }
+    }
+  }
+
+  // DXY Inverse Macro Confluence specifically for Gold (XAU/USD)
+  let dxyConfluenceNote: string | undefined;
+  let dxyBullBonus = 0;
+  let dxyBearBonus = 0;
+  if (isGold && macroContext?.dxyBias) {
+    const chg = macroContext.dxyChangePct ?? 0;
+    if (macroContext.dxyBias === 'Bearish' || chg <= -0.15) {
+      dxyBullBonus = 6;
+      dxyBearBonus = chg <= -0.3 ? -6 : 0;
+      dxyConfluenceNote = `DXY Inverse Tailwind (${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%) supports Gold Longs`;
+    } else if (macroContext.dxyBias === 'Bullish' || chg >= 0.15) {
+      dxyBearBonus = 6;
+      dxyBullBonus = chg >= 0.3 ? -6 : 0;
+      dxyConfluenceNote = `DXY Strength (${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%) supports Gold Shorts / Headwind for Longs`;
+    } else {
+      dxyConfluenceNote = `DXY Flat (${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%) — Neutral USD macro bias`;
+    }
+  }
+
+  const activeSweepTs = sslSweptStrict
+    ? bars[sslSweepIdx]?.t
+    : bslSweptStrict
+      ? bars[bslSweepIdx]?.t
+      : undefined;
+  const liveKz = resolvePureIctKillzoneLabel(refClockMs, asset.id);
+  const sweepKz = activeSweepTs ? resolvePureIctKillzoneLabel(activeSweepTs, asset.id) : liveKz;
+  const killzone = sweepKz.inKillzone ? sweepKz.label : liveKz.label;
+  const inKillzone = sweepKz.inKillzone || liveKz.inKillzone;
+
+  const bullSweepPts =
+    sslSweptStrict && !dualSideSwept ? (asianLowSwept || btcRoundPoolSwept ? 26 : 24) : 0;
+  const bearSweepPts =
+    bslSweptStrict && !dualSideSwept ? (asianHighSwept || btcRoundPoolSwept ? 26 : 24) : 0;
   const bullMssPts = bullMss ? 24 : 0;
   const bearMssPts = bearMss ? 24 : 0;
-  const bullImbPts = Math.min(24, (nearBullFvg ? 14 : imbBull.bullFvg ? 6 : 0) + (nearBullOb ? 10 : imbBull.bullOb ? 4 : 0));
-  const bearImbPts = Math.min(24, (nearBearFvg ? 14 : imbBear.bearFvg ? 6 : 0) + (nearBearOb ? 10 : imbBear.bearOb ? 4 : 0));
-  const bullOtePts = inBullOte ? 16 : pdZone === 'Discount' ? 10 : 0;
-  const bearOtePts = inBearOte ? 16 : pdZone === 'Premium' ? 10 : 0;
-  const bullHtfPts = (htf.bias === 'Bullish' ? 8 : htf.bullDemandAligned ? 6 : htf.bias === 'Ranging' ? 3 : 0) + (inKillzone ? 4 : 0);
-  const bearHtfPts = (htf.bias === 'Bearish' ? 8 : htf.bearSupplyAligned ? 6 : htf.bias === 'Ranging' ? 3 : 0) + (inKillzone ? 4 : 0);
+  const bullImbPts = Math.min(
+    24,
+    (imbBull.bullFvg ? (imbBull.bullFvg.touchCount === 0 ? 16 : 12) : 0) +
+      (imbBull.bullOb ? 8 : 0)
+  );
+  const bearImbPts = Math.min(
+    24,
+    (imbBear.bearFvg ? (imbBear.bearFvg.touchCount === 0 ? 16 : 12) : 0) +
+      (imbBear.bearOb ? 8 : 0)
+  );
+  const bullOtePts = inBullOte ? 16 : bullDiscountValid ? 12 : 0;
+  const bearOtePts = inBearOte ? 16 : bearPremiumValid ? 12 : 0;
+  const bullHtfPts = Math.max(
+    0,
+    (htf.bias === 'Bullish' ? 8 : htf.bullDemandAligned ? 6 : htf.bias === 'Ranging' ? 4 : 0) +
+      (inKillzone ? 4 : 0) +
+      dxyBullBonus
+  );
+  const bearHtfPts = Math.max(
+    0,
+    (htf.bias === 'Bearish' ? 8 : htf.bearSupplyAligned ? 6 : htf.bias === 'Ranging' ? 4 : 0) +
+      (inKillzone ? 4 : 0) +
+      dxyBearBonus
+  );
 
   const bullTotal = bullSweepPts + bullMssPts + bullImbPts + bullOtePts + bullHtfPts;
   const bearTotal = bearSweepPts + bearMssPts + bearImbPts + bearOtePts + bearHtfPts;
 
-  const newsBlackout = checkMacroNewsBlackout(asset.id, economicEvents);
+  const newsBlackout = checkMacroNewsBlackout(asset.id, economicEvents, refClockMs);
   const newsBlocked = enforceNewsBlackout && newsBlackout.active;
 
-  // Strict 3-Pillar Gate (Two-Stage Armed Limit + Active Entry):
-  // Sweep + Chronological MSS + Unmitigated FVG/OB (or active OTE) + HTF compatibility
-  const hasBullImbalanceZone = Boolean(imbBull.bullFvg || imbBull.bullOb || inBullOte);
-  const hasBearImbalanceZone = Boolean(imbBear.bearFvg || imbBear.bearOb || inBearOte);
+  // Canonical ICT 2022 requires real FVG/OB imbalance in Discount/Premium + fresh post-MSS window + virgin or single-test FVG
+  const hasBullImbalanceZone = Boolean(
+    bullAnchor &&
+      bullDiscountValid &&
+      bullAnchor.touchCount === 0 &&
+      bullMssIdx >= n - 10
+  );
+  const hasBearImbalanceZone = Boolean(
+    bearAnchor &&
+      bearPremiumValid &&
+      bearAnchor.touchCount === 0 &&
+      bearMssIdx >= n - 10
+  );
 
   const buyCoreConfirmed =
     !dualSideSwept &&
     sslSweptStrict &&
     bullMss &&
-    bullMssIdx >= sslSweepIdx &&
+    bullMssIdx > sslSweepIdx &&
     hasBullImbalanceZone &&
-    (htf.bias !== 'Bearish' || htf.bullDemandAligned);
+    (htf.bias === 'Bullish' || (htf.bias === 'Ranging' && inKillzone) || (htf.bullDemandAligned && inKillzone));
 
   const sellCoreConfirmed =
     !dualSideSwept &&
     bslSweptStrict &&
     bearMss &&
-    bearMssIdx >= bslSweepIdx &&
+    bearMssIdx > bslSweepIdx &&
     hasBearImbalanceZone &&
-    (htf.bias !== 'Bullish' || htf.bearSupplyAligned);
+    (htf.bias === 'Bearish' || (htf.bias === 'Ranging' && inKillzone) || (htf.bearSupplyAligned && inKillzone));
 
   const bullBiasDominant =
     buyCoreConfirmed ||
-    (!sellCoreConfirmed && (sslSweptStrict || bullTotal > bearTotal || (bullTotal === bearTotal && htf.bias !== 'Bearish')));
+    (!sellCoreConfirmed &&
+      (sslSweptStrict ||
+        bullTotal > bearTotal ||
+        (bullTotal === bearTotal && htf.bias !== 'Bearish')));
 
-  // Entry Zone selection (Prioritize Unmitigated FVG -> Unmitigated OB -> Dealing-Range OTE)
+  // Entry Zone + Exact Canonical Placement Price (FVG 50% CE or OB CE)
   let entryLow = bullBiasDominant ? bullOteLow : bearOteLow;
   let entryHigh = bullBiasDominant ? bullOteHigh : bearOteHigh;
+  let canonicalLimitPx: number | undefined;
   if (bullBiasDominant) {
-    if (imbBull.bullFvg && (nearBullFvg || buyCoreConfirmed)) {
+    if (imbBull.bullFvg) {
       entryLow = imbBull.bullFvg.low;
       entryHigh = imbBull.bullFvg.high;
-    } else if (imbBull.bullOb && (nearBullOb || buyCoreConfirmed)) {
+      canonicalLimitPx = imbBull.bullFvg.ceMid;
+    } else if (imbBull.bullOb) {
       entryLow = imbBull.bullOb.low;
       entryHigh = imbBull.bullOb.high;
+      canonicalLimitPx = entryLow + (entryHigh - entryLow) * 0.65;
     }
   } else {
-    if (imbBear.bearFvg && (nearBearFvg || sellCoreConfirmed)) {
+    if (imbBear.bearFvg) {
       entryLow = imbBear.bearFvg.low;
       entryHigh = imbBear.bearFvg.high;
-    } else if (imbBear.bearOb && (nearBearOb || sellCoreConfirmed)) {
+      canonicalLimitPx = imbBear.bearFvg.ceMid;
+    } else if (imbBear.bearOb) {
       entryLow = imbBear.bearOb.low;
       entryHigh = imbBear.bearOb.high;
+      canonicalLimitPx = entryHigh - (entryHigh - entryLow) * 0.65;
     }
   }
 
-  const entryMid = (entryLow + entryHigh) / 2;
+  const entryAnchorPx = canonicalLimitPx ?? (entryLow + entryHigh) / 2;
   const slBuffer = getAssetStopFloorBuffer(asset, atr15mMetrics.atr15m);
   const tfMult = Math.sqrt(Math.max(1, (TF_BAR_MINUTES[timeframe] ?? 15) / 15));
+  const minSlDist = atr15mMetrics.atr15m * 0.85 * tfMult;
   const maxSlDist = atr15mMetrics.atr15m * 2.5 * tfMult;
 
   let slVal: number;
@@ -1199,60 +1480,61 @@ function computePureIctSignalForXauBtc(
   let liquidityTarget: string;
 
   if (bullBiasDominant) {
-    const structuralStopAnchor = sslSweptStrict ? Math.min(sslSweepLow, entryLow) : Math.min(priorSwingLow, entryLow);
-    slVal = structuralStopAnchor - slBuffer.value;
-    risk = Math.max(1e-6, entryMid - slVal);
+    const structuralStopAnchor = sslSweptStrict
+      ? Math.min(sslSweepLow, entryLow)
+      : Math.min(priorSwingLow, entryLow);
+    slVal = Math.min(structuralStopAnchor - slBuffer.value, entryAnchorPx - minSlDist);
+    risk = Math.max(1e-6, entryAnchorPx - slVal);
 
-    // Real structural upside liquidity pools (zero synthetic risk multipliers!)
+    // Realistic structural targets (TP1 1.15R..1.65R for BE lock, TP2 2.2R..3.8R opposing 1H/session pool)
     const rawUpsidePools = [
       bullLegHigh,
       priorSwingHigh,
       rangeHigh,
       htf.pool1hHigh,
       htf.pdh,
-      htf.external4hHigh,
     ]
-      .filter((p) => Number.isFinite(p) && p > entryMid + risk * 0.6)
+      .filter((p) => Number.isFinite(p) && p >= entryAnchorPx + risk * 1.1)
       .sort((a, b) => a - b);
 
-    tp1Val =
-      rawUpsidePools.find((p) => p >= entryMid + risk * 1.0) ??
-      rawUpsidePools[0] ??
-      Math.max(rangeHigh, htf.pool1hHigh);
-    tp2Val =
-      rawUpsidePools.find((p) => p >= entryMid + risk * 2.0 && p >= tp1Val) ??
-      rawUpsidePools[rawUpsidePools.length - 1] ??
-      tp1Val;
+    const tp1Candidate = rawUpsidePools.find(
+      (p) => p >= entryAnchorPx + risk * 1.15 && p <= entryAnchorPx + risk * 1.65
+    );
+    tp1Val = tp1Candidate ?? entryAnchorPx + risk * 1.3;
+    const optimalTp2Pool = rawUpsidePools.find(
+      (p) => p >= entryAnchorPx + risk * 2.1 && p <= entryAnchorPx + risk * 3.8 && p > tp1Val
+    );
+    tp2Val = optimalTp2Pool ?? entryAnchorPx + risk * 2.6;
     liquidityTarget = `BSL (${formatPriceWithAsset(tp2Val, asset)})`;
   } else {
-    const structuralStopAnchor = bslSweptStrict ? Math.max(bslSweepHigh, entryHigh) : Math.max(priorSwingHigh, entryHigh);
-    slVal = structuralStopAnchor + slBuffer.value;
-    risk = Math.max(1e-6, slVal - entryMid);
+    const structuralStopAnchor = bslSweptStrict
+      ? Math.max(bslSweepHigh, entryHigh)
+      : Math.max(priorSwingHigh, entryHigh);
+    slVal = Math.max(structuralStopAnchor + slBuffer.value, entryAnchorPx + minSlDist);
+    risk = Math.max(1e-6, slVal - entryAnchorPx);
 
-    // Real structural downside liquidity pools (zero synthetic risk multipliers!)
     const rawDownsidePools = [
       bearLegLow,
       priorSwingLow,
       rangeLow,
       htf.pool1hLow,
       htf.pdl,
-      htf.external4hLow,
     ]
-      .filter((p) => Number.isFinite(p) && p < entryMid - risk * 0.6)
+      .filter((p) => Number.isFinite(p) && p <= entryAnchorPx - risk * 1.1)
       .sort((a, b) => b - a);
 
-    tp1Val =
-      rawDownsidePools.find((p) => p <= entryMid - risk * 1.0) ??
-      rawDownsidePools[0] ??
-      Math.min(rangeLow, htf.pool1hLow);
-    tp2Val =
-      rawDownsidePools.find((p) => p <= entryMid - risk * 2.0 && p <= tp1Val) ??
-      rawDownsidePools[rawDownsidePools.length - 1] ??
-      tp1Val;
+    const tp1Candidate = rawDownsidePools.find(
+      (p) => p <= entryAnchorPx - risk * 1.15 && p >= entryAnchorPx - risk * 1.65
+    );
+    tp1Val = tp1Candidate ?? entryAnchorPx - risk * 1.3;
+    const optimalTp2Pool = rawDownsidePools.find(
+      (p) => p <= entryAnchorPx - risk * 2.1 && p >= entryAnchorPx - risk * 3.8 && p < tp1Val
+    );
+    tp2Val = optimalTp2Pool ?? entryAnchorPx - risk * 2.6;
     liquidityTarget = `SSL (${formatPriceWithAsset(tp2Val, asset)})`;
   }
 
-  const realRr = risk > 0 ? Math.abs(tp2Val - entryMid) / risk : 0;
+  const realRr = risk > 0 ? Math.abs(tp2Val - entryAnchorPx) / risk : 0;
   const stopTooWide = risk > maxSlDist;
 
   let direction: IctDirection = 'NEUTRAL';
@@ -1334,17 +1616,20 @@ function computePureIctSignalForXauBtc(
     tp2: tp2Val,
     atr,
     executionStatus,
+    exactLimitOverride: canonicalLimitPx,
   });
 
   if (direction === 'NEUTRAL' && waitReasons.length === 0) {
     if (sslSweptStrict && !bullMss) {
-      waitReasons.push('SSL swept — awaiting LTF Bullish MSS break');
+      waitReasons.push('SSL swept — awaiting displacement + Bullish MSS body close');
     } else if (bslSweptStrict && !bearMss) {
-      waitReasons.push('BSL swept — awaiting LTF Bearish MSS break');
-    } else if ((bullMss || bearMss) && !hasBullImbalanceZone && !hasBearImbalanceZone) {
-      waitReasons.push('MSS confirmed — awaiting unmitigated FVG/OB or OTE zone');
+      waitReasons.push('BSL swept — awaiting displacement + Bearish MSS body close');
+    } else if ((bullMss && !hasBullImbalanceZone) || (bearMss && !hasBearImbalanceZone)) {
+      waitReasons.push('MSS printed — awaiting fresh Discount/Premium FVG or OB');
+    } else if ((bullMss && htf.bias === 'Bearish') || (bearMss && htf.bias === 'Bullish')) {
+      waitReasons.push(`Counter-trend vs HTF ${htf.bias} outside Killzone/HTF Zone`);
     } else {
-      waitReasons.push('Awaiting Sweep + MSS + FVG/OB + OTE alignment');
+      waitReasons.push('Awaiting Sweep + Displacement MSS + Fresh FVG');
     }
   }
 
@@ -1392,32 +1677,41 @@ function computePureIctSignalForXauBtc(
 
   const triggers: string[] = [];
   if (direction === 'BUY') {
-    triggers.push('SSL Liquidity Swept');
-    triggers.push('Bullish MSS Break');
-    if (nearBullFvg) triggers.push('Unmitigated Bull FVG');
-    if (nearBullOb) triggers.push('Bullish Order Block');
-    if (inBullOte) triggers.push('0.618–0.786 OTE Discount');
-    if (htf.bias === 'Bullish') triggers.push('HTF Swing Bullish');
+    triggers.push(asianLowSwept ? 'Asian Low + SSL Swept' : 'SSL Liquidity Swept');
+    triggers.push('Displacement + Bullish MSS');
+    if (imbBull.bullFvg) triggers.push(imbBull.bullFvg.touchCount === 0 ? 'Virgin Bull FVG (50% CE)' : 'Unmitigated Bull FVG');
+    if (imbBull.bullOb) triggers.push('Bullish Order Block');
+    if (inBullOte || bullDiscountValid) triggers.push('Discount OTE Aligned');
+    if (htf.bias === 'Bullish') triggers.push('HTF 1H/4H Bullish');
+    if (dxyBullBonus > 0) triggers.push('DXY Inverse Bearish Aligned');
+    if (btcRoundPoolSwept) triggers.push('BTC Round-Number SSL Pool');
   } else if (direction === 'SELL') {
-    triggers.push('BSL Liquidity Swept');
-    triggers.push('Bearish MSS Break');
-    if (nearBearFvg) triggers.push('Unmitigated Bear FVG');
-    if (nearBearOb) triggers.push('Bearish Order Block');
-    if (inBearOte) triggers.push('0.618–0.786 OTE Premium');
-    if (htf.bias === 'Bearish') triggers.push('HTF Swing Bearish');
+    triggers.push(asianHighSwept ? 'Asian High + BSL Swept' : 'BSL Liquidity Swept');
+    triggers.push('Displacement + Bearish MSS');
+    if (imbBear.bearFvg) triggers.push(imbBear.bearFvg.touchCount === 0 ? 'Virgin Bear FVG (50% CE)' : 'Unmitigated Bear FVG');
+    if (imbBear.bearOb) triggers.push('Bearish Order Block');
+    if (inBearOte || bearPremiumValid) triggers.push('Premium OTE Aligned');
+    if (htf.bias === 'Bearish') triggers.push('HTF 1H/4H Bearish');
+    if (dxyBearBonus > 0) triggers.push('DXY Inverse Bullish Aligned');
+    if (btcRoundPoolSwept) triggers.push('BTC Round-Number BSL Pool');
   } else {
     triggers.push(`${pdZone} Zone`);
-    triggers.push(waitReasons[0] ?? 'Awaiting 3-Pillar Setup');
+    triggers.push(waitReasons[0] ?? 'Awaiting Canonical 2022 ICT');
     if (inKillzone) triggers.push(killzone);
+    if (dxyConfluenceNote && isGold) triggers.push(dxyBullBonus > 0 ? 'DXY Tailwind Long' : dxyBearBonus > 0 ? 'DXY Tailwind Short' : 'DXY Neutral');
   }
 
   let setupName: string;
   if (direction === 'BUY') {
-    setupName = 'Pure ICT SSL Sweep + MSS & FVG/OB Long';
+    setupName = asianLowSwept
+      ? 'ICT 2022 Asian Low Judas Sweep + MSS & Virgin FVG Long'
+      : 'ICT 2022 SSL Sweep + MSS & Virgin FVG Long';
   } else if (direction === 'SELL') {
-    setupName = 'Pure ICT BSL Sweep + MSS & FVG/OB Short';
+    setupName = asianHighSwept
+      ? 'ICT 2022 Asian High Judas Sweep + MSS & Virgin FVG Short'
+      : 'ICT 2022 BSL Sweep + MSS & Virgin FVG Short';
   } else if (newsBlocked) {
-    setupName = 'Pure ICT Filtered · High-Impact Macro Blackout';
+    setupName = 'ICT Filtered · High-Impact Macro Blackout';
   } else if (stopTooWide) {
     setupName = 'WAIT · Stop Too Wide (> 2.5x ATR)';
   } else if (volatilityStatus === 'warming') {
@@ -1425,8 +1719,8 @@ function computePureIctSignalForXauBtc(
   } else if (enforceVolatilityFilter && !volatilityPassed) {
     setupName =
       volatilityStatus === 'too-high'
-        ? 'Pure ICT Filtered · Erratic High-Volatility Session'
-        : 'Pure ICT Filtered · Low Volatility Consolidation';
+        ? 'ICT Filtered · Erratic High-Volatility Session'
+        : 'ICT Filtered · Low Volatility Consolidation';
   } else {
     setupName = `WAIT · ${waitReasons[0].split('(')[0].trim()}`;
   }
@@ -1452,15 +1746,14 @@ function computePureIctSignalForXauBtc(
       : undefined;
 
   const latestBarTs = bars[n - 1]?.t;
-  const nowMs = Date.now();
   const evaluatedAt =
     typeof asset.updatedAtEpoch === 'number' &&
     asset.updatedAtEpoch > 0 &&
     asset.marketSessionOpen
       ? asset.updatedAtEpoch
-      : latestBarTs && latestBarTs > 0 && latestBarTs <= nowMs
+      : latestBarTs && latestBarTs > 0 && latestBarTs <= refClockMs
         ? latestBarTs
-        : nowMs;
+        : refClockMs;
 
   const projectedLevelsSummary = `Ref Zone ${formatBand(entryLow, entryHigh, asset)} · SL Ref ${formatPriceWithAsset(slVal, asset)} · Draw ${formatPriceWithAsset(tp2Val, asset)}`;
 
@@ -1478,11 +1771,133 @@ function computePureIctSignalForXauBtc(
   });
   const usdExposure = resolveUsdExposure(asset.id, direction);
 
+  const biasLabel: IctSignalAnalysis['biasLabel'] =
+    direction === 'BUY' ? 'BULLISH' : direction === 'SELL' ? 'BEARISH' : 'FLAT';
+
+  const expectedBias: 'BUY' | 'SELL' | 'NEUTRAL' =
+    direction !== 'NEUTRAL'
+      ? direction
+      : sslSweptStrict
+        ? 'BUY'
+        : bslSweptStrict
+          ? 'SELL'
+          : bullTotal > bearTotal
+            ? 'BUY'
+            : bearTotal > bullTotal
+              ? 'SELL'
+              : 'NEUTRAL';
+
+  const placementSummary = buildPlacementSummary({
+    direction,
+    expectedBias,
+    posture: postureEval.posture,
+    limitEntryPriceNum: postureEval.limitEntryPriceNum ?? canonicalLimitPx,
+    stopLossNum: slVal,
+    tp1Num: tp1Val,
+    tp2Num: tp2Val,
+    asset,
+    waitReason: waitReasons[0],
+  });
+
+  const htfClearPass = bullBiasDominant
+    ? htf.bias === 'Bullish' || (htf.bias === 'Ranging' && inKillzone) || (htf.bullDemandAligned && inKillzone)
+    : htf.bias === 'Bearish' || (htf.bias === 'Ranging' && inKillzone) || (htf.bearSupplyAligned && inKillzone);
+  const sweepClearPass = bullBiasDominant ? sslSweptStrict && !dualSideSwept : bslSweptStrict && !dualSideSwept;
+  const mssClearPass = bullBiasDominant ? bullMss && bullMssIdx > sslSweepIdx : bearMss && bearMssIdx > bslSweepIdx;
+  const zoneClearPass = bullBiasDominant ? hasBullImbalanceZone : hasBearImbalanceZone;
+  const riskClearPass = !newsBlocked && (!enforceVolatilityFilter || volatilityPassed) && !stopTooWide && realRr >= 2.0;
+
+  const clearanceGates: SignalClearanceGate[] = [
+    {
+      id: 'htf',
+      label: '1. HTF & Macro Bias',
+      passed: htfClearPass,
+      state: htfClearPass ? 'PASS' : 'WARN',
+      detail: `${htf.bias} 1H/4H · ${pdZone}${isGold && dxyBullBonus > 0 ? ' · DXY -' : isGold && dxyBearBonus > 0 ? ' · DXY +' : ''}`,
+    },
+    {
+      id: 'kz',
+      label: '2. Session Killzone',
+      passed: inKillzone,
+      state: inKillzone ? 'PASS' : 'WARN',
+      detail: killzone,
+    },
+    {
+      id: 'sweep',
+      label: '3. Liquidity Sweep',
+      passed: sweepClearPass,
+      state: dualSideSwept ? 'BLOCK' : sweepClearPass ? 'PASS' : 'BLOCK',
+      detail: dualSideSwept
+        ? 'Dual-side chop'
+        : asianLowSwept
+          ? 'Asian Low + SSL swept'
+          : asianHighSwept
+            ? 'Asian High + BSL swept'
+            : sslSweptStrict
+              ? 'SSL swept & reclaimed'
+              : bslSweptStrict
+                ? 'BSL swept & reclaimed'
+                : 'Awaiting sweep',
+    },
+    {
+      id: 'mss',
+      label: '4. Displacement MSS',
+      passed: mssClearPass,
+      state: mssClearPass ? 'PASS' : sweepClearPass ? 'WARN' : 'BLOCK',
+      detail: mssClearPass
+        ? `${bullBiasDominant ? 'Bullish' : 'Bearish'} MSS body close`
+        : 'Awaiting displacement close',
+    },
+    {
+      id: 'risk',
+      label: '5. Virgin FVG & Risk',
+      passed: zoneClearPass && riskClearPass,
+      state: newsBlocked || stopTooWide ? 'BLOCK' : zoneClearPass && riskClearPass ? 'PASS' : 'WARN',
+      detail: newsBlocked
+        ? 'News blackout'
+        : stopTooWide
+          ? 'SL > 2.5x ATR'
+          : zoneClearPass
+            ? `Virgin Zone · 1:${realRr.toFixed(1)} R:R`
+            : realRr < 2.0
+              ? `R:R 1:${realRr.toFixed(1)} < 2.0`
+              : 'Awaiting Virgin FVG/OB',
+    },
+  ];
+
+  const passedGateCount = clearanceGates.filter((g) => g.passed).length;
+  const blockerGate = clearanceGates.find((g) => !g.passed);
+  const clearanceSummary =
+    direction !== 'NEUTRAL'
+      ? `${passedGateCount}/5 Cleared · Unambiguous ${direction} (${setupGrade} Setup)`
+      : `${passedGateCount}/5 Cleared · Blocker: ${blockerGate?.label.replace(/^\d+\.\s*/, '') ?? 'Structure'} (${waitReasons[0] ?? 'Standby'})`;
+
+  const biasVerdict: SignalBiasVerdict =
+    direction === 'BUY'
+      ? isAPlusSetup || precisionScore >= 84
+        ? 'STRONG BUY'
+        : 'BUY'
+      : direction === 'SELL'
+        ? isAPlusSetup || precisionScore >= 84
+          ? 'STRONG SELL'
+          : 'SELL'
+        : expectedBias === 'BUY'
+          ? 'BULLISH LEAN (WAIT)'
+          : expectedBias === 'SELL'
+            ? 'BEARISH LEAN (WAIT)'
+            : 'NEUTRAL / RANGE';
+
   return {
     assetId: asset.id,
     symbol: asset.symbol,
     name: asset.shortName,
     direction,
+    biasLabel,
+    biasVerdict,
+    clearanceSummary,
+    clearanceGates,
+    dxyConfluenceNote,
+    roundPoolNote,
     confidence,
     setupName,
     pdZone,
@@ -1490,7 +1905,7 @@ function computePureIctSignalForXauBtc(
     stopLoss: formatPriceWithAsset(slVal, asset),
     targetPrice: formatPriceWithAsset(tp2Val, asset),
     riskReward: realRr > 0 ? `1:${realRr.toFixed(1)}` : 'WAIT',
-    triggers: triggers.slice(0, 5),
+    triggers: triggers.slice(0, 6),
     timeframe,
     currentPrice,
     decimals: asset.decimals,
@@ -1500,7 +1915,14 @@ function computePureIctSignalForXauBtc(
     htfBias: htf.bias,
     killzone,
     sessionLabel: killzone,
-    stopLossReason: `${slBuffer.reason}`,
+    asianHigh: asianRange.asianHigh,
+    asianLow: asianRange.asianLow,
+    asianRangeAtrRatio: asianRange.asianRangeAtrRatio,
+    sweepMssStatus:
+      direction === 'NEUTRAL'
+        ? waitReasons[0]
+        : `${asianLowSwept ? 'Asian Low + SSL' : asianHighSwept ? 'Asian High + BSL' : bullBiasDominant ? 'SSL' : 'BSL'} Sweep -> Displacement MSS -> ${nearBullFvg || nearBearFvg ? 'Virgin FVG 50% CE' : nearBullOb || nearBearOb ? 'Order Block' : 'FVG Zone'}`,
+    stopLossReason: `${slBuffer.reason} beyond Sweep Wick`,
     tp1: formatPriceWithAsset(tp1Val, asset),
     tp2: formatPriceWithAsset(tp2Val, asset),
     invalidationNote,
@@ -1540,828 +1962,7 @@ function computePureIctSignalForXauBtc(
     spotRr: postureEval.spotRr,
     chaseProgressPct: postureEval.chaseProgressPct,
     hasRunAway: postureEval.hasRunAway,
-  };
-}
-
-// ============================================================================
-// 2. SESSION RANGE LIQUIDITY SWEEP + ICT (MSS/FVG) ENGINE
-//    Used for G10 FX Pairs (EUR/USD, GBP/USD, USD/JPY, AUD/USD, USD/CHF, USD/CAD, NZD/USD)
-// ============================================================================
-
-function resolveCurrentSession(now = new Date()): {
-  label: string;
-  killzone: 'london' | 'ny' | 'asia' | 'off';
-  inKillzone: boolean;
-} {
-  const london = getZonedClockParts(now, 'Europe/London');
-  const ny = getZonedClockParts(now, 'America/New_York');
-
-  // NY Killzone (08:00–11:00 NY local, tracks EST/EDT automatically)
-  if (ny.totalMin >= 8 * 60 && ny.totalMin < 11 * 60) {
-    return { label: 'New York Killzone (08:00–11:00 NY DST)', killzone: 'ny', inKillzone: true };
-  }
-  // London Killzone (07:00–10:00 London local, tracks GMT/BST automatically)
-  if (london.totalMin >= 7 * 60 && london.totalMin < 10 * 60) {
-    return { label: 'London Killzone (07:00–10:00 LDN DST)', killzone: 'london', inKillzone: true };
-  }
-  // NY PM Silver Bullet (13:30–16:00 NY local)
-  if (ny.totalMin >= 13 * 60 + 30 && ny.totalMin < 16 * 60) {
-    return { label: 'NY PM Silver Bullet (13:30–16:00 NY DST)', killzone: 'ny', inKillzone: true };
-  }
-  // Asian Session Range (19:00–00:00 NY local, tracks DST cleanly)
-  if (ny.totalMin >= 19 * 60) {
-    return { label: 'Asian Range Window (19:00–00:00 NY)', killzone: 'asia', inKillzone: false };
-  }
-  return { label: 'Inter-Session Transition (Outside Killzone)', killzone: 'off', inKillzone: false };
-}
-
-function isKillzoneUtcTimestamp(tsMs: number): boolean {
-  const d = new Date(tsMs);
-  const london = getZonedClockParts(d, 'Europe/London');
-  const ny = getZonedClockParts(d, 'America/New_York');
-  const inLondon = london.totalMin >= 7 * 60 && london.totalMin <= 10 * 60 + 15;
-  const inNyAm = ny.totalMin >= 8 * 60 && ny.totalMin <= 11 * 60 + 15;
-  const inNyPm = ny.totalMin >= 13 * 60 + 30 && ny.totalMin <= 16 * 60;
-  return inLondon || inNyAm || inNyPm;
-}
-
-function isAsianSessionUtcTimestamp(tsMs: number): boolean {
-  const ny = getZonedClockParts(new Date(tsMs), 'America/New_York');
-  // 19:00–00:00 America/New_York automatically shifts for EST/EDT
-  return ny.totalMin >= 19 * 60;
-}
-
-interface HtfAnalysis {
-  bias: 'Bullish' | 'Bearish' | 'Ranging';
-  bullDemandAligned: boolean;
-  bearSupplyAligned: boolean;
-  pdh: number;
-  pdl: number;
-  external4hHigh: number;
-  external4hLow: number;
-  pool1hHigh: number;
-  pool1hLow: number;
-  detailText: string;
-}
-
-function analyzeHtfForFx(asset: MarketAsset, currentPrice: number): HtfAnalysis {
-  const { bars: bars4h } = extractBarsForTf(asset, ['4h', '1D'], 6);
-  const { bars: bars1h } = extractBarsForTf(asset, ['1h', '4h', '1D'], 6);
-
-  const atr4h = computeAtr(bars4h, 14);
-  const atr1h = computeAtr(bars1h, 14);
-  const htfImb4h = findUnmitigatedFvgAndOb(bars4h, atr4h, 24);
-  const htfImb1h = findUnmitigatedFvgAndOb(bars1h, atr1h, 24);
-
-  const external4hHigh = Math.max(...bars4h.map((b) => b.h), currentPrice);
-  const external4hLow = Math.min(...bars4h.map((b) => b.l), currentPrice);
-  const pool1hHigh = Math.max(...bars1h.slice(-24).map((b) => b.h), currentPrice);
-  const pool1hLow = Math.min(...bars1h.slice(-24).map((b) => b.l), currentPrice);
-
-  const dayHighNum = parseFloat(String(asset.dayHigh).replace(/[^0-9.-]/g, ''));
-  const dayLowNum = parseFloat(String(asset.dayLow).replace(/[^0-9.-]/g, ''));
-  const pdh = Number.isFinite(dayHighNum) && dayHighNum > 0 ? Math.max(dayHighNum, pool1hHigh) : pool1hHigh;
-  const pdl = Number.isFinite(dayLowNum) && dayLowNum > 0 ? Math.min(dayLowNum, pool1hLow) : pool1hLow;
-
-  // Swing-Structure HTF bias (eliminates SMA crossover lag at sweep reversals)
-  const bias4h = detectSwingStructureBias(bars4h, currentPrice);
-  const bias1h = detectSwingStructureBias(bars1h, currentPrice);
-
-  let bias: 'Bullish' | 'Bearish' | 'Ranging' = 'Ranging';
-  if (bias4h !== 'Ranging' && (bias1h === bias4h || bias1h === 'Ranging')) {
-    bias = bias4h;
-  } else if (bias1h !== 'Ranging' && bias4h === 'Ranging') {
-    bias = bias1h;
-  } else if (htfImb4h.bullFvg && !htfImb4h.bearFvg) {
-    bias = 'Bullish';
-  } else if (htfImb4h.bearFvg && !htfImb4h.bullFvg) {
-    bias = 'Bearish';
-  }
-
-  const bullDemandZone = htfImb4h.bullFvg || htfImb4h.bullOb || htfImb1h.bullFvg || htfImb1h.bullOb;
-  const bearSupplyZone = htfImb4h.bearFvg || htfImb4h.bearOb || htfImb1h.bearFvg || htfImb1h.bearOb;
-
-  const bullDemandAligned = Boolean(
-    bullDemandZone &&
-      currentPrice >= bullDemandZone.low - atr1h * 0.8 &&
-      currentPrice <= bullDemandZone.high + atr1h * 1.6
-  );
-  const bearSupplyAligned = Boolean(
-    bearSupplyZone &&
-      currentPrice <= bearSupplyZone.high + atr1h * 0.8 &&
-      currentPrice >= bearSupplyZone.low - atr1h * 1.6
-  );
-
-  const primaryTarget =
-    bias === 'Bullish'
-      ? `PDH / 4H Pool ${formatPriceWithAsset(Math.max(pdh, external4hHigh), asset)}`
-      : bias === 'Bearish'
-        ? `PDL / 4H Pool ${formatPriceWithAsset(Math.min(pdl, external4hLow), asset)}`
-        : `Range Liq ${formatPriceWithAsset(pdl, asset)} / ${formatPriceWithAsset(pdh, asset)}`;
-
-  const imbalanceText =
-    bias === 'Bullish' && bullDemandZone
-      ? `Unmitigated HTF Demand (${formatBand(bullDemandZone.low, bullDemandZone.high, asset)})`
-      : bias === 'Bearish' && bearSupplyZone
-        ? `Unmitigated HTF Supply (${formatBand(bearSupplyZone.low, bearSupplyZone.high, asset)})`
-        : bullDemandZone
-          ? 'HTF Demand active'
-          : bearSupplyZone
-            ? 'HTF Supply active'
-            : 'No clean HTF imbalance';
-
-  return {
-    bias,
-    bullDemandAligned,
-    bearSupplyAligned,
-    pdh,
-    pdl,
-    external4hHigh,
-    external4hLow,
-    pool1hHigh,
-    pool1hLow,
-    detailText: `${bias} · ${imbalanceText} · Draw: ${primaryTarget}`,
-  };
-}
-
-function computeAsianSweepIctSignalForFx(
-  asset: MarketAsset,
-  preferredTimeframe?: Timeframe,
-  enforceVolatilityFilter = true,
-  economicEvents?: EconomicEvent[],
-  enforceNewsBlackout = true
-): IctSignalAnalysis {
-  const sessionInfo = resolveCurrentSession();
-  const { bars: rawMtfBars, timeframe: mtfTf, isRealOhlc: hasRealMtf } = extractBarsForTf(
-    asset,
-    preferredTimeframe === '30m' ? ['30m', '15m', '1h', '1D'] : ['15m', '30m', '1h', '1D'],
-    6
-  );
-  const ltfPriority: Timeframe[] =
-    preferredTimeframe === '1m' ? ['1m', '5m', '15m', '1D'] : ['5m', '1m', '15m', '1D'];
-  const { bars: rawLtfBars, timeframe: ltfTf, isRealOhlc: hasRealLtf } = extractBarsForTf(
-    asset,
-    ltfPriority,
-    6
-  );
-
-  if (!hasRealMtf || !hasRealLtf || rawMtfBars.length < 6 || rawLtfBars.length < 6) {
-    const atr15mMetrics = compute15mAtrMetrics(asset, asset.price);
-    const warmingPrice = formatPriceWithAsset(asset.price, asset);
-    return {
-      assetId: asset.id,
-      symbol: asset.symbol,
-      name: asset.shortName,
-      direction: 'NEUTRAL',
-      confidence: 20,
-      setupName: 'WAIT · Warming Real OHLCV Bars',
-      pdZone: 'Equilibrium',
-      entryZone: `Standby (${warmingPrice})`,
-      stopLoss: warmingPrice,
-      targetPrice: warmingPrice,
-      riskReward: 'WAIT',
-      triggers: ['Awaiting real 15m/5m OHLC bars'],
-      timeframe: ltfTf,
-      currentPrice: asset.price,
-      decimals: asset.decimals,
-      currencyPrefix: asset.currencyPrefix,
-      unitSuffix: asset.unitSuffix,
-      evaluatedAt: asset.updatedAtEpoch ?? Date.now(),
-      htfBias: 'Ranging',
-      killzone: sessionInfo.label,
-      sessionLabel: sessionInfo.label,
-      sweepMssStatus: 'Awaiting verified multi-bar OHLC candles for Asian Range & MSS analysis.',
-      assetClassLabel: atr15mMetrics.assetClassLabel,
-      volatilityThresholdPct: atr15mMetrics.minPct,
-      volatilityMaxPct: atr15mMetrics.maxPct,
-      volatilityStatus: 'warming',
-      volatilityPassed: false,
-      atrSource: 'warming',
-      executionStatus: 'standby',
-      candleStageLabel: 'Awaiting Real OHLC',
-      isClosedCandleConfirmed: false,
-      isRealOhlc: false,
-      setupGrade: 'WAIT',
-      isAPlusSetup: false,
-      invalidationTrigger: 'Hold flat until real OHLC candlestick bars finish syncing.',
-      invalidationNote: 'Awaiting verified multi-bar OHLC data (synthetic candle fallback disabled).',
-    };
-  }
-
-  const mtfSplit = splitConfirmedClosedBars(rawMtfBars, mtfTf);
-  const mtfBars = mtfSplit.evalBars;
-  const ltfSplit = splitConfirmedClosedBars(rawLtfBars, ltfTf);
-  const ltfBars = ltfSplit.evalBars;
-
-  const currentPrice = asset.price > 0 ? asset.price : ltfBars[ltfBars.length - 1]?.c ?? 0;
-
-  // 1. HTF (4H/1H) Swing Structure Analysis
-  const htf = analyzeHtfForFx(asset, currentPrice);
-  const atr15mMetrics = compute15mAtrMetrics(asset, currentPrice);
-  const slBuf = getAssetStopFloorBuffer(asset, atr15mMetrics.atr15m);
-  const newsBlackout = checkMacroNewsBlackout(asset.id, economicEvents);
-  const newsBlocked = enforceNewsBlackout && newsBlackout.active;
-
-  // 2. Genuine Asian Session Range (07:00–12:00 WIB / 00:00–05:00 UTC) — NO fake 45% slice fallback
-  const asianIndices: number[] = [];
-  for (let i = 0; i < mtfBars.length; i++) {
-    if (isAsianSessionUtcTimestamp(mtfBars[i].t)) {
-      asianIndices.push(i);
-    }
-  }
-
-  let asianBars: CandlePoint[] = [];
-  let postAsianBars: CandlePoint[] = [];
-  let hasGenuineAsianRange = false;
-  let sessionRangeName = 'Asian Session';
-
-  if (asianIndices.length >= 4) {
-    const blocks: Array<{ start: number; end: number }> = [];
-    let bStart = asianIndices[0];
-    let bPrev = asianIndices[0];
-    for (let k = 1; k < asianIndices.length; k++) {
-      if (asianIndices[k] - bPrev <= 2) {
-        bPrev = asianIndices[k];
-      } else {
-        blocks.push({ start: bStart, end: bPrev });
-        bStart = asianIndices[k];
-        bPrev = asianIndices[k];
-      }
-    }
-    blocks.push({ start: bStart, end: bPrev });
-
-    const completedBlock =
-      [...blocks].reverse().find((b) => b.end - b.start + 1 >= 4 && mtfBars.length - 1 - b.end >= 2) ??
-      blocks[blocks.length - 1];
-
-    if (completedBlock && completedBlock.end - completedBlock.start + 1 >= 4) {
-      asianBars = mtfBars.slice(completedBlock.start, completedBlock.end + 1);
-      postAsianBars = mtfBars.slice(completedBlock.end + 1);
-      hasGenuineAsianRange = mtfTf === '15m' || mtfTf === '30m';
-    }
-  }
-
-  // Fallback to Prior Completed Intraday Session Consolidation Range when Asia window aged out of lookback
-  if ((!hasGenuineAsianRange || asianBars.length < 4) && (mtfTf === '15m' || mtfTf === '30m') && mtfBars.length >= 24) {
-    const rangeEnd = mtfBars.length - 12;
-    const rangeStart = Math.max(0, rangeEnd - 16);
-    if (rangeEnd - rangeStart >= 6) {
-      asianBars = mtfBars.slice(rangeStart, rangeEnd);
-      postAsianBars = mtfBars.slice(rangeEnd);
-      hasGenuineAsianRange = true;
-      sessionRangeName = 'Prior Session Range';
-    }
-  }
-
-  const latestBarTs = ltfBars[ltfBars.length - 1]?.t;
-  const nowMs = Date.now();
-  const evaluatedAt =
-    typeof asset.updatedAtEpoch === 'number' &&
-    asset.updatedAtEpoch > 0 &&
-    asset.marketSessionOpen
-      ? asset.updatedAtEpoch
-      : latestBarTs && latestBarTs > 0 && latestBarTs <= nowMs
-        ? latestBarTs
-        : nowMs;
-
-  // If genuine Asian range is not available yet, never fabricate sweep signals
-  if (!hasGenuineAsianRange || asianBars.length < 4) {
-    const waitReason =
-      asianIndices.length < 4
-        ? 'Awaiting complete 07:00–12:00 WIB Asian Session 15M range bars'
-        : 'Asian Session currently forming — waiting for post-Asia London/NY sweep';
-    const refSl = htf.bias === 'Bearish' ? htf.pool1hHigh + slBuf.value : htf.pool1hLow - slBuf.value;
-    const refTp2 = htf.bias === 'Bearish' ? htf.pdl : htf.pdh;
-    const fxInvalidationTrigger = buildAssetInvalidationTrigger({
-      assetClassLabel: atr15mMetrics.assetClassLabel,
-      biasBullish: htf.bias !== 'Bearish',
-      slFormatted: formatPriceWithAsset(refSl, asset),
-      maxPct: atr15mMetrics.maxPct,
-    });
-
-    return {
-      assetId: asset.id,
-      symbol: asset.symbol,
-      name: asset.shortName,
-      direction: 'NEUTRAL',
-      confidence: 28,
-      setupName: `WAIT · ${waitReason.split('—')[0].trim()}`,
-      pdZone: 'Equilibrium',
-      entryZone: 'Standby (Awaiting Asian Range)',
-      stopLoss: formatPriceWithAsset(refSl, asset),
-      targetPrice: formatPriceWithAsset(refTp2, asset),
-      riskReward: 'WAIT',
-      triggers: ['Awaiting Asian Session Range', `HTF ${htf.bias}`],
-      timeframe: ltfTf,
-      currentPrice,
-      decimals: asset.decimals,
-      currencyPrefix: asset.currencyPrefix,
-      unitSuffix: asset.unitSuffix,
-      evaluatedAt,
-      htfBias: htf.bias,
-      killzone: sessionInfo.label,
-      sessionLabel: sessionInfo.label,
-      htfBiasDetail: htf.detailText,
-      sweepMssStatus: waitReason,
-      stopLossReason: `HTF structural invalidation ref (${slBuf.reason})`,
-      tp1: formatPriceWithAsset(htf.bias === 'Bearish' ? htf.pool1hLow : htf.pool1hHigh, asset),
-      tp2: formatPriceWithAsset(refTp2, asset),
-      tp3: formatPriceWithAsset(htf.bias === 'Bearish' ? htf.external4hLow : htf.external4hHigh, asset),
-      tp1Label: htf.bias === 'Bearish' ? '1H Range Low' : '1H Range High',
-      tp2Label: 'PDH/PDL / 1H Liq Pool',
-      tp3Label: '4H External Liq Pool',
-      pyramidNote: 'Pyramiding inactive until Asian range sweep confirms.',
-      invalidationNote: `NO TRADE (${waitReason}). ${fxInvalidationTrigger}`,
-      invalidationTrigger: fxInvalidationTrigger,
-      assetClassLabel: atr15mMetrics.assetClassLabel,
-      liquidityTarget: `${formatPriceWithAsset(refTp2, asset)} (Projected)`,
-      atrPct: atr15mMetrics.atr15mPct,
-      volatilityThresholdPct: atr15mMetrics.minPct,
-      volatilityMaxPct: atr15mMetrics.maxPct,
-      volatilityStatus: atr15mMetrics.volatilityStatus,
-      volatilityPassed: atr15mMetrics.volatilityPassed,
-      atrSource: atr15mMetrics.atrSource,
-      executionStatus: 'standby',
-      projectedLevelsSummary: `Projected HTF Pool: ${formatPriceWithAsset(refTp2, asset)} · Ref SL ${formatPriceWithAsset(refSl, asset)}`,
-      stopLossNum: refSl,
-      tp2Num: refTp2,
-      isClosedCandleConfirmed: ltfSplit.isClosedCandleConfirmed,
-      candleStageLabel: ltfSplit.candleStageLabel,
-      newsBlackoutActive: newsBlackout.active,
-      newsBlackoutReason: newsBlackout.reason,
-    };
-  }
-
-  const asianHigh = Math.max(...asianBars.map((b) => b.h));
-  const asianLow = Math.min(...asianBars.map((b) => b.l));
-  const asianSpan = Math.max(1e-6, asianHigh - asianLow);
-
-  const atr15m = computeAtr(mtfBars, 14);
-  const atrLtf = computeAtr(ltfBars, 14);
-  const historicalSpans: number[] = [];
-  if (mtfBars.length >= 20) {
-    for (let i = 0; i <= mtfBars.length - 16; i += 4) {
-      const seg = mtfBars.slice(i, i + 16);
-      const sp = Math.max(...seg.map((x) => x.h)) - Math.min(...seg.map((x) => x.l));
-      if (sp > 0) historicalSpans.push(sp);
-    }
-  }
-  const medianHistoricalSpan =
-    historicalSpans.length >= 2
-      ? [...historicalSpans].sort((a, b) => a - b)[Math.floor(historicalSpans.length / 2)]
-      : atr15m * 5.2;
-  const normalAsianAtr = Math.max(atr15m * 4.5, medianHistoricalSpan);
-  const asianRangeAtrRatio = Number((asianSpan / Math.max(1e-6, normalAsianAtr)).toFixed(2));
-  const asianRangeTooWide = asianRangeAtrRatio > 1.5;
-
-  const sweepScanBars = postAsianBars.slice(-28);
-  const postHigh = sweepScanBars.length > 0 ? Math.max(...sweepScanBars.map((b) => b.h)) : asianHigh;
-  const postLow = sweepScanBars.length > 0 ? Math.min(...sweepScanBars.map((b) => b.l)) : asianLow;
-
-  let lowSweepIdx = -1;
-  let highSweepIdx = -1;
-  for (let i = 0; i < sweepScanBars.length; i++) {
-    if (sweepScanBars[i].l < asianLow && lowSweepIdx === -1) lowSweepIdx = i;
-    if (sweepScanBars[i].l < asianLow) lowSweepIdx = i;
-    if (sweepScanBars[i].h > asianHigh) highSweepIdx = i;
-  }
-
-  const simultaneousDualFx =
-    lowSweepIdx >= 0 && highSweepIdx >= 0 && Math.abs(lowSweepIdx - highSweepIdx) <= 4;
-  const sweptAsianLow = lowSweepIdx >= 0 && !simultaneousDualFx && (highSweepIdx < 0 || lowSweepIdx > highSweepIdx);
-  const sweptAsianHigh = highSweepIdx >= 0 && !simultaneousDualFx && (lowSweepIdx < 0 || highSweepIdx > lowSweepIdx);
-  const lowSweepBar = sweptAsianLow ? sweepScanBars[lowSweepIdx] : undefined;
-  const highSweepBar = sweptAsianHigh ? sweepScanBars[highSweepIdx] : undefined;
-  const lowSweepTs = lowSweepBar?.t ?? 0;
-  const highSweepTs = highSweepBar?.t ?? 0;
-
-  const sweepOccurredInKillzone = sweepScanBars.some(
-    (b) => (b.l < asianLow || b.h > asianHigh) && (isKillzoneUtcTimestamp(b.t) || sessionInfo.inKillzone)
-  );
-
-  // 3. Chronological LTF (5M/1M) Close Back Inside Range + MSS + Clean FVG strictly AFTER Sweep
-  const lastLtf = ltfBars[ltfBars.length - 1];
-  const postLowSweepLtf = lowSweepTs > 0 ? ltfBars.filter((b) => b.t >= lowSweepTs) : ltfBars.slice(-14);
-  const postHighSweepLtf = highSweepTs > 0 ? ltfBars.filter((b) => b.t >= highSweepTs) : ltfBars.slice(-14);
-
-  const preLowSweepLtf = ltfBars.filter((b) => lowSweepTs === 0 || b.t < lowSweepTs).slice(-8);
-  const preHighSweepLtf = ltfBars.filter((b) => highSweepTs === 0 || b.t < highSweepTs).slice(-8);
-
-  const ltfSwingHighBeforeLowSweep =
-    preLowSweepLtf.length >= 2 ? Math.max(...preLowSweepLtf.map((b) => b.h)) : asianHigh;
-  const ltfSwingLowBeforeHighSweep =
-    preHighSweepLtf.length >= 2 ? Math.min(...preHighSweepLtf.map((b) => b.l)) : asianLow;
-
-  const closedBackInsideFromLow =
-    sweptAsianLow &&
-    lastLtf.c > asianLow &&
-    postLowSweepLtf.some((b) => b.c > asianLow);
-  const closedBackInsideFromHigh =
-    sweptAsianHigh &&
-    lastLtf.c < asianHigh &&
-    postHighSweepLtf.some((b) => b.c < asianHigh);
-
-  const bullDisplacement = postLowSweepLtf.slice(-8).some((b, idx, arr) => {
-    const prev = idx > 0 ? arr[idx - 1] : b;
-    const twoBarPush = b.c > prev.o ? b.c - prev.o : 0;
-    return ((b.c > b.o && b.c - b.o >= atrLtf * 0.58) || twoBarPush >= atrLtf * 0.8) && b.c > asianLow;
-  });
-  const bearDisplacement = postHighSweepLtf.slice(-8).some((b, idx, arr) => {
-    const prev = idx > 0 ? arr[idx - 1] : b;
-    const twoBarPush = prev.o > b.c ? prev.o - b.c : 0;
-    return ((b.c < b.o && b.o - b.c >= atrLtf * 0.58) || twoBarPush >= atrLtf * 0.8) && b.c < asianHigh;
-  });
-
-  const bullMssConfirmed =
-    closedBackInsideFromLow &&
-    bullDisplacement &&
-    (currentPrice > ltfSwingHighBeforeLowSweep ||
-      postLowSweepLtf.slice(-6).some((b) => b.c > ltfSwingHighBeforeLowSweep));
-  const bearMssConfirmed =
-    closedBackInsideFromHigh &&
-    bearDisplacement &&
-    (currentPrice < ltfSwingLowBeforeHighSweep ||
-      postHighSweepLtf.slice(-6).some((b) => b.c < ltfSwingLowBeforeHighSweep));
-
-  // Chronological FVG/OB: formed strictly after sweep timestamp
-  const imbBullLtf = findUnmitigatedFvgAndOb(ltfBars, atrLtf, 24, 0.14, 0.65, lowSweepTs);
-  const imbBearLtf = findUnmitigatedFvgAndOb(ltfBars, atrLtf, 24, 0.14, 0.65, highSweepTs);
-
-  const bullZoneAnchor = imbBullLtf.bullFvg ?? imbBullLtf.bullOb;
-  const bearZoneAnchor = imbBearLtf.bearFvg ?? imbBearLtf.bearOb;
-
-  const bullPullbackFvg = Boolean(
-    bullZoneAnchor &&
-      currentPrice >= bullZoneAnchor.low - atrLtf * 0.55 &&
-      currentPrice <= bullZoneAnchor.high + atrLtf * 1.4
-  );
-  const bearPullbackFvg = Boolean(
-    bearZoneAnchor &&
-      currentPrice <= bearZoneAnchor.high + atrLtf * 0.55 &&
-      currentPrice >= bearZoneAnchor.low - atrLtf * 1.4
-  );
-
-  const atrPct = atr15mMetrics.atr15mPct;
-  const volatilityThresholdPct = atr15mMetrics.minPct;
-  const volatilityMaxPct = atr15mMetrics.maxPct;
-  const volatilityStatus = atr15mMetrics.volatilityStatus;
-  const volatilityPassed = atr15mMetrics.volatilityPassed;
-
-  let direction: IctDirection = 'NEUTRAL';
-  let executionStatus: IctSignalAnalysis['executionStatus'] = 'standby';
-  const waitReasons: string[] = [];
-
-  if (newsBlocked && newsBlackout.reason) {
-    waitReasons.push(newsBlackout.reason);
-  }
-  if (volatilityStatus === 'warming') {
-    waitReasons.push('Warming 15m OHLCV bars for ATR volatility verification');
-  } else if (enforceVolatilityFilter && !volatilityPassed) {
-    waitReasons.push(
-      volatilityStatus === 'too-high'
-        ? `15m ATR ${atrPct.toFixed(3)}% > ${volatilityMaxPct.toFixed(3)}% erratic volatility cap (sweeps unstable)`
-        : `15m ATR ${atrPct.toFixed(3)}% < ${volatilityThresholdPct.toFixed(3)}% minimum floor`
-    );
-  }
-  if (asianRangeTooWide) {
-    waitReasons.push(
-      `${sessionRangeName} abnormally wide (${asianRangeAtrRatio.toFixed(2)}x normal ATR > 1.50x cap)`
-    );
-  }
-  if (simultaneousDualFx) {
-    waitReasons.push(`Both ${sessionRangeName} High & Low swept within 4 bars`);
-  } else if (!sweptAsianLow && !sweptAsianHigh) {
-    waitReasons.push(
-      `Neither ${sessionRangeName} High (${formatPriceWithAsset(asianHigh, asset)}) nor Low (${formatPriceWithAsset(asianLow, asset)}) swept yet`
-    );
-  }
-
-  const buyValidPreRR =
-    !asianRangeTooWide &&
-    sweptAsianLow &&
-    !simultaneousDualFx &&
-    bullMssConfirmed &&
-    Boolean(bullZoneAnchor) &&
-    (htf.bias === 'Bullish' || htf.bullDemandAligned || htf.bias === 'Ranging');
-
-  const sellValidPreRR =
-    !asianRangeTooWide &&
-    sweptAsianHigh &&
-    !simultaneousDualFx &&
-    bearMssConfirmed &&
-    Boolean(bearZoneAnchor) &&
-    (htf.bias === 'Bearish' || htf.bearSupplyAligned || htf.bias === 'Ranging');
-
-  if (!buyValidPreRR && !sellValidPreRR && waitReasons.length === 0) {
-    if (sweptAsianLow) {
-      if (!closedBackInsideFromLow || !bullMssConfirmed) {
-        waitReasons.push(`${sessionRangeName} Low swept — awaiting post-sweep LTF Bullish MSS inside range`);
-      } else if (!bullZoneAnchor) {
-        waitReasons.push('Bullish MSS printed — awaiting unmitigated post-sweep Bullish FVG/OB');
-      } else {
-        waitReasons.push(`HTF (${htf.bias}) does not support counter-trend Buy yet`);
-      }
-    } else if (sweptAsianHigh) {
-      if (!closedBackInsideFromHigh || !bearMssConfirmed) {
-        waitReasons.push(`${sessionRangeName} High swept — awaiting post-sweep LTF Bearish MSS inside range`);
-      } else if (!bearZoneAnchor) {
-        waitReasons.push('Bearish MSS printed — awaiting unmitigated post-sweep Bearish FVG/OB');
-      } else {
-        waitReasons.push(`HTF (${htf.bias}) does not support counter-trend Sell yet`);
-      }
-    }
-  }
-
-  let projLow = htf.bias === 'Bearish' ? (asianLow + asianHigh) / 2 : asianLow;
-  let projHigh = htf.bias === 'Bearish' ? asianHigh : (asianLow + asianHigh) / 2;
-  let slVal = htf.bias === 'Bearish' ? asianHigh + slBuf.value : asianLow - slBuf.value;
-  let tp1Val = htf.bias === 'Bearish' ? asianLow : asianHigh;
-  let tp2Val = htf.bias === 'Bearish' ? htf.pdl : htf.pdh;
-  let tp3Val = htf.bias === 'Bearish' ? htf.external4hLow : htf.external4hHigh;
-  let rrRatio = 0;
-  let stopLossReason = `Reference invalidation beyond Asian boundary (${slBuf.reason})`;
-  let invalidationNote = '';
-  let pyramidNote = '';
-  let sweepMssStatus = '';
-  let setupName = '';
-  let activeFvgZone: string | undefined;
-
-  const maxAllowedFxSl = atr15mMetrics.atr15m * 2.5;
-
-  if (buyValidPreRR && bullZoneAnchor) {
-    projLow = bullZoneAnchor.low;
-    projHigh = bullZoneAnchor.high;
-    activeFvgZone = formatBand(projLow, projHigh, asset);
-    const entryMid = (projLow + projHigh) / 2;
-    slVal = Math.min(postLow, asianLow, projLow) - slBuf.value;
-    const risk = Math.max(1e-6, entryMid - slVal);
-
-    // Strictly anchor targets to REAL liquidity pools (monotonic: entryMid < TP1 <= TP2 <= TP3)
-    const rawTp1 = asianHigh > entryMid + risk * 0.6 ? asianHigh : Math.min(htf.pool1hHigh, htf.pdh);
-    tp1Val = Math.max(entryMid + risk * 0.5, rawTp1);
-    tp2Val = Math.max(tp1Val, htf.pdh, htf.pool1hHigh);
-    tp3Val = Math.max(tp2Val, htf.external4hHigh);
-    rrRatio = (tp2Val - entryMid) / risk;
-
-    if (risk > maxAllowedFxSl) {
-      waitReasons.push(`Stop Too Wide (${formatPriceWithAsset(risk, asset)} > 2.5x 15m ATR cap)`);
-    } else if (rrRatio < 2.2) {
-      waitReasons.push(`Real liquidity R:R to TP2 is 1:${rrRatio.toFixed(1)} (below 1:2.2 minimum)`);
-    } else if (newsBlocked && newsBlackout.reason) {
-      waitReasons.push(newsBlackout.reason);
-    } else if (volatilityStatus === 'warming' || (enforceVolatilityFilter && !volatilityPassed)) {
-      if (waitReasons.length === 0) {
-        waitReasons.push(`15m ATR ${atrPct.toFixed(3)}% outside safe band`);
-      }
-    } else {
-      const liveCheck = checkLiveSetupValidity({
-        direction: 'BUY',
-        currentPrice,
-        slVal,
-        tp1Val,
-      });
-      if (!liveCheck.valid) {
-        executionStatus = liveCheck.status;
-        if (liveCheck.reason) waitReasons.unshift(liveCheck.reason);
-      } else {
-        direction = 'BUY';
-        executionStatus = 'active';
-        setupName = `${sessionRangeName === 'Asian Session' ? 'Asian Low' : 'Session Low'} Sweep + Bullish MSS & FVG/OB`;
-        stopLossReason = `Below sweep wick (${formatPriceWithAsset(postLow, asset)}) + ${slBuf.reason}`;
-        sweepMssStatus = `15M swept ${sessionRangeName} Low (${formatPriceWithAsset(asianLow, asset)} → ${formatPriceWithAsset(postLow, asset)})${sweepOccurredInKillzone ? ' in Killzone' : ''}; ${ltfTf.toUpperCase()} closed inside range with post-sweep Bullish MSS + clean FVG/OB`;
-        invalidationNote = buildAssetInvalidationTrigger({
-          assetClassLabel: atr15mMetrics.assetClassLabel,
-          biasBullish: true,
-          slFormatted: formatPriceWithAsset(slVal, asset),
-          maxPct: volatilityMaxPct,
-        });
-        pyramidNote = `Pyramid Trigger: Move SL to BE at TP1 (${formatPriceWithAsset(tp1Val, asset)}); add 2nd pyramid leg on fresh 15M Bullish FVG retest toward ${formatPriceWithAsset(tp3Val, asset)}.`;
-      }
-    }
-  } else if (sellValidPreRR && bearZoneAnchor) {
-    projLow = bearZoneAnchor.low;
-    projHigh = bearZoneAnchor.high;
-    activeFvgZone = formatBand(projLow, projHigh, asset);
-    const entryMid = (projLow + projHigh) / 2;
-    slVal = Math.max(postHigh, asianHigh, projHigh) + slBuf.value;
-    const risk = Math.max(1e-6, slVal - entryMid);
-
-    // Strictly anchor targets to REAL liquidity pools (monotonic: entryMid > TP1 >= TP2 >= TP3)
-    const rawTp1 = asianLow < entryMid - risk * 0.6 ? asianLow : Math.max(htf.pool1hLow, htf.pdl);
-    tp1Val = Math.min(entryMid - risk * 0.5, rawTp1);
-    tp2Val = Math.min(tp1Val, htf.pdl, htf.pool1hLow);
-    tp3Val = Math.min(tp2Val, htf.external4hLow);
-    rrRatio = (entryMid - tp2Val) / risk;
-
-    if (risk > maxAllowedFxSl) {
-      waitReasons.push(`Stop Too Wide (${formatPriceWithAsset(risk, asset)} > 2.5x 15m ATR cap)`);
-    } else if (rrRatio < 2.2) {
-      waitReasons.push(`Real liquidity R:R to TP2 is 1:${rrRatio.toFixed(1)} (below 1:2.2 minimum)`);
-    } else if (newsBlocked && newsBlackout.reason) {
-      waitReasons.push(newsBlackout.reason);
-    } else if (volatilityStatus === 'warming' || (enforceVolatilityFilter && !volatilityPassed)) {
-      if (waitReasons.length === 0) {
-        waitReasons.push(`15m ATR ${atrPct.toFixed(3)}% outside safe band`);
-      }
-    } else {
-      const liveCheck = checkLiveSetupValidity({
-        direction: 'SELL',
-        currentPrice,
-        slVal,
-        tp1Val,
-      });
-      if (!liveCheck.valid) {
-        executionStatus = liveCheck.status;
-        if (liveCheck.reason) waitReasons.unshift(liveCheck.reason);
-      } else {
-        direction = 'SELL';
-        executionStatus = 'active';
-        setupName = `${sessionRangeName === 'Asian Session' ? 'Asian High' : 'Session High'} Sweep + Bearish MSS & FVG/OB`;
-        stopLossReason = `Above sweep wick (${formatPriceWithAsset(postHigh, asset)}) + ${slBuf.reason}`;
-        sweepMssStatus = `15M swept ${sessionRangeName} High (${formatPriceWithAsset(asianHigh, asset)} → ${formatPriceWithAsset(postHigh, asset)})${sweepOccurredInKillzone ? ' in Killzone' : ''}; ${ltfTf.toUpperCase()} closed inside range with post-sweep Bearish MSS + clean FVG/OB`;
-        invalidationNote = buildAssetInvalidationTrigger({
-          assetClassLabel: atr15mMetrics.assetClassLabel,
-          biasBullish: false,
-          slFormatted: formatPriceWithAsset(slVal, asset),
-          maxPct: volatilityMaxPct,
-        });
-        pyramidNote = `Pyramid Trigger: Move SL to BE at TP1 (${formatPriceWithAsset(tp1Val, asset)}); add 2nd pyramid leg on fresh 15M Bearish FVG retest toward ${formatPriceWithAsset(tp3Val, asset)}.`;
-      }
-    }
-  }
-
-  const fxArmedBias: 'BUY' | 'SELL' =
-    direction === 'BUY' || direction === 'SELL'
-      ? direction
-      : sweptAsianLow
-        ? 'BUY'
-        : sweptAsianHigh
-          ? 'SELL'
-          : htf.bias === 'Bearish'
-            ? 'SELL'
-            : 'BUY';
-
-  const fxPostureEval = evaluateLiveExecutionPosture({
-    direction,
-    setupArmed: direction === 'BUY' || direction === 'SELL',
-    armedBias: fxArmedBias,
-    currentPrice,
-    entryLow: projLow,
-    entryHigh: projHigh,
-    stopLoss: slVal,
-    tp1: tp1Val,
-    tp2: tp2Val,
-    atr: atrLtf,
-    executionStatus,
-  });
-
-  const fxInvalidationTrigger = buildAssetInvalidationTrigger({
-    assetClassLabel: atr15mMetrics.assetClassLabel,
-    biasBullish: direction === 'SELL' ? false : fxArmedBias === 'BUY',
-    slFormatted: formatPriceWithAsset(slVal, asset),
-    maxPct: volatilityMaxPct,
-  });
-
-  if (direction === 'NEUTRAL') {
-    const primaryWait = waitReasons[0] || `Awaiting ${sessionRangeName} sweep & LTF MSS/FVG displacement`;
-    setupName = `WAIT · ${primaryWait.split('(')[0].trim()}`;
-    sweepMssStatus = `${sessionRangeName} ${formatBand(asianLow, asianHigh, asset)} (${asianRangeAtrRatio.toFixed(2)}x ATR) · ${primaryWait}`;
-    invalidationNote = `NO TRADE (${primaryWait}). ${fxInvalidationTrigger}`;
-    pyramidNote = 'Pyramiding inactive until primary TP1 (50% + BE) triggers on a confirmed setup.';
-  }
-
-  const posInAsian = (currentPrice - asianLow) / asianSpan;
-  const pdZone: IctSignalAnalysis['pdZone'] =
-    posInAsian <= 0.44 ? 'Discount' : posInAsian >= 0.56 ? 'Premium' : 'Equilibrium';
-
-  const scoreBreakdown = {
-    sweep: sweptAsianLow !== sweptAsianHigh ? (sweepOccurredInKillzone ? 24 : 18) : 0,
-    displacementMss: bullMssConfirmed || bearMssConfirmed ? 24 : 0,
-    imbalanceFvgOb:
-      (direction === 'BUY' && bullPullbackFvg) || (direction === 'SELL' && bearPullbackFvg)
-        ? 24
-        : imbBullLtf.bullFvg || imbBearLtf.bearFvg
-          ? 12
-          : 0,
-    oteFib: rrRatio >= 3.0 ? 16 : 4,
-    htfConfluence:
-      (htf.bias !== 'Ranging' ? 12 : htf.bullDemandAligned || htf.bearSupplyAligned ? 8 : 0) +
-      (sessionInfo.inKillzone ? 4 : 0),
-  };
-
-  const precisionScore = Math.min(
-    100,
-    scoreBreakdown.sweep +
-      scoreBreakdown.displacementMss +
-      scoreBreakdown.imbalanceFvgOb +
-      scoreBreakdown.oteFib +
-      Math.min(12, scoreBreakdown.htfConfluence)
-  );
-
-  const confidence =
-    direction === 'NEUTRAL'
-      ? Math.min(48, Math.max(20, Math.round(precisionScore * 0.5)))
-      : Math.min(97, Math.max(76, Math.round(precisionScore)));
-
-  const triggers: string[] = [];
-  if (sweptAsianLow && !simultaneousDualFx) triggers.push(`${sessionRangeName} Low Swept`);
-  if (sweptAsianHigh && !simultaneousDualFx) triggers.push(`${sessionRangeName} High Swept`);
-  if (simultaneousDualFx) triggers.push('Both Sides Swept (Skip)');
-  if (asianRangeTooWide) triggers.push(`Range >1.5x ATR (${asianRangeAtrRatio}x)`);
-  if (bullMssConfirmed || bearMssConfirmed) triggers.push('Post-Sweep LTF MSS');
-  if (bullZoneAnchor || bearZoneAnchor) triggers.push('Post-Sweep FVG/OB');
-  if (rrRatio >= 2.2) triggers.push(`R:R 1:${rrRatio.toFixed(1)}`);
-
-  const projectedLevelsSummary = `${sessionRangeName} ${formatBand(asianLow, asianHigh, asset)} · SL Ref ${formatPriceWithAsset(slVal, asset)} · Pool ${formatPriceWithAsset(tp2Val, asset)}`;
-
-  const { setupGrade, isAPlusSetup } = computeSetupGrade({
-    direction,
-    inKillzone: sessionInfo.inKillzone,
-    volatilityPassed,
-    newsBlocked,
-    confidence,
-    realRr: rrRatio,
-    htfAligned:
-      direction === 'BUY'
-        ? htf.bias === 'Bullish' || htf.bullDemandAligned
-        : htf.bias === 'Bearish' || htf.bearSupplyAligned,
-  });
-  const usdExposure = resolveUsdExposure(asset.id, direction);
-
-  return {
-    assetId: asset.id,
-    symbol: asset.symbol,
-    name: asset.shortName,
-    direction,
-    confidence,
-    setupName,
-    pdZone,
-    entryZone:
-      direction === 'NEUTRAL'
-        ? `Standby (${formatBand(projLow, projHigh, asset)})`
-        : formatBand(projLow, projHigh, asset),
-    stopLoss: formatPriceWithAsset(slVal, asset),
-    targetPrice: formatPriceWithAsset(tp2Val, asset),
-    riskReward: rrRatio >= 2.2 ? `1:${rrRatio.toFixed(1)}` : rrRatio > 0 ? `WAIT (1:${rrRatio.toFixed(1)} < 1:2.2)` : 'WAIT',
-    triggers: triggers.length > 0 ? triggers : ['Wait for Asian Sweep'],
-    timeframe: ltfTf,
-    currentPrice,
-    decimals: asset.decimals,
-    currencyPrefix: asset.currencyPrefix,
-    unitSuffix: asset.unitSuffix,
-    evaluatedAt,
-    htfBias: htf.bias,
-    killzone: sessionInfo.label,
-    sessionLabel: sessionInfo.label,
-    htfBiasDetail: htf.detailText,
-    sweepMssStatus,
-    stopLossReason,
-    tp1: formatPriceWithAsset(tp1Val, asset),
-    tp2: formatPriceWithAsset(tp2Val, asset),
-    tp3: formatPriceWithAsset(tp3Val, asset),
-    tp1Label: direction === 'SELL' ? 'Opposing Asian Low' : 'Opposing Asian High',
-    tp2Label: 'PDH/PDL / 1H Liq Pool',
-    tp3Label: '4H External Liq Pool',
-    pyramidNote,
-    invalidationNote,
-    invalidationTrigger: fxInvalidationTrigger,
-    assetClassLabel: atr15mMetrics.assetClassLabel,
-    liquidityTarget: `${formatPriceWithAsset(tp2Val, asset)} (TP2)`,
-    atrPct,
-    volatilityThresholdPct,
-    volatilityMaxPct,
-    volatilityStatus,
-    volatilityPassed,
-    atrSource: atr15mMetrics.atrSource,
-    executionStatus,
-    projectedLevelsSummary,
-    asianHigh,
-    asianLow,
-    asianRangeAtrRatio,
-    fvgZone: activeFvgZone,
-    precisionScore,
-    scoreBreakdown,
-    entryLowNum: direction === 'NEUTRAL' ? undefined : Math.min(projLow, projHigh),
-    entryHighNum: direction === 'NEUTRAL' ? undefined : Math.max(projLow, projHigh),
-    stopLossNum: slVal,
-    tp1Num: tp1Val,
-    tp2Num: tp2Val,
-    tp3Num: tp3Val,
-    isClosedCandleConfirmed: ltfSplit.isClosedCandleConfirmed,
-    candleStageLabel: ltfSplit.candleStageLabel,
-    newsBlackoutActive: newsBlackout.active,
-    newsBlackoutReason: newsBlackout.reason,
-    isRealOhlc: true,
-    setupGrade,
-    isAPlusSetup,
-    usdExposure,
-    executionPosture: fxPostureEval.posture,
-    recommendedOrderType: fxPostureEval.recommendedOrderType,
-    limitEntryPriceNum: fxPostureEval.limitEntryPriceNum,
-    limitRr: fxPostureEval.limitRr,
-    spotRr: fxPostureEval.spotRr,
-    chaseProgressPct: fxPostureEval.chaseProgressPct,
-    hasRunAway: fxPostureEval.hasRunAway,
+    placementSummary,
   };
 }
 
@@ -2370,23 +1971,16 @@ export function computeIctSignal(
   preferredTimeframe?: Timeframe,
   enforceVolatilityFilter = true,
   economicEvents?: EconomicEvent[],
-  enforceNewsBlackout = true
+  enforceNewsBlackout = true,
+  macroContext?: MacroIctContext
 ): IctSignalAnalysis {
-  if (PURE_ICT_ASSET_IDS.has(asset.id)) {
-    return computePureIctSignalForXauBtc(
-      asset,
-      preferredTimeframe,
-      enforceVolatilityFilter,
-      economicEvents,
-      enforceNewsBlackout
-    );
-  }
-  return computeAsianSweepIctSignalForFx(
+  return computePureIctSignalForXauBtc(
     asset,
     preferredTimeframe,
     enforceVolatilityFilter,
     economicEvents,
-    enforceNewsBlackout
+    enforceNewsBlackout,
+    macroContext
   );
 }
 
@@ -2397,6 +1991,7 @@ export function scanAllIctSignals(
   economicEvents?: EconomicEvent[],
   enforceNewsBlackout = true
 ): IctSignalAnalysis[] {
+  const macroContext = extractMacroContextFromAssets(assets);
   return assets
     .filter(isIctEligibleAsset)
     .map((asset) =>
@@ -2405,16 +2000,14 @@ export function scanAllIctSignals(
         preferredByAsset?.[asset.id],
         enforceVolatilityFilter,
         economicEvents,
-        enforceNewsBlackout
+        enforceNewsBlackout,
+        macroContext
       )
     )
     .sort((a, b) => {
       const aActive = a.direction === 'NEUTRAL' ? 0 : 1;
       const bActive = b.direction === 'NEUTRAL' ? 0 : 1;
       if (aActive !== bActive) return bActive - aActive;
-      const aCore = PURE_ICT_ASSET_IDS.has(a.assetId) ? 1 : 0;
-      const bCore = PURE_ICT_ASSET_IDS.has(b.assetId) ? 1 : 0;
-      if (aCore !== bCore) return bCore - aCore;
       return b.confidence - a.confidence;
     });
 }

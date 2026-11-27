@@ -149,25 +149,21 @@ const DashboardTickerCard: React.FC<DashboardTickerCardProps> = React.memo(
         type="button"
         onClick={() => onSelect(tile.id)}
         style={volHeatStyle}
-        className={`text-left shrink-0 xl:min-w-0 liquid-glass-card overflow-hidden transition-all duration-200 ease-out flex flex-col justify-between ${
+        className={`text-left shrink-0 xl:min-w-0 liquid-glass-card overflow-hidden transition-colors duration-150 flex flex-col justify-between ${
           isCompactCards
-            ? 'min-w-[148px] rounded-xl px-3 py-2'
-            : 'min-w-[162px] rounded-2xl px-3.5 py-2.5'
+            ? 'min-w-[140px] rounded-xl px-2.5 py-1.5'
+            : 'min-w-[152px] rounded-xl px-2.5 py-1.5'
         } ${
           isSelected
-            ? '!border-[#0071E3] dark:!border-[#3898FF] ring-2 ring-[#0071E3]/30 dark:ring-[#3898FF]/35 shadow-md'
-            : 'hover:brightness-[0.98] dark:hover:brightness-110'
+            ? '!border-[#1D4ED8] dark:!border-[#2962FF] ring-1 ring-[#1D4ED8]/35 dark:ring-[#2962FF]/45'
+            : 'hover:border-[#94A3B8] dark:hover:border-[#3E4556]'
         }`}
       >
-        <div className="flex items-center justify-between gap-2 w-full">
-          <span
-            className={`font-medium text-[#6C6C70] dark:text-[#D1D1D6] truncate ${
-              isCompactCards ? 'text-[11px]' : 'text-xs'
-            }`}
-          >
+        <div className="flex items-center justify-between gap-1.5 w-full">
+          <span className="text-[11px] font-semibold text-[#425466] dark:text-[#9CA3AF] truncate">
             {tile.shortName}
           </span>
-          <div className="flex items-center gap-1.5 shrink-0">
+          <div className="flex items-center gap-1 shrink-0">
             {!isCompactCards && (
               <span
                 className={`text-[9px] font-bold uppercase tracking-tight whitespace-nowrap ${signalTextClass}`}
@@ -178,14 +174,14 @@ const DashboardTickerCard: React.FC<DashboardTickerCardProps> = React.memo(
                   : tileSignal.direction === 'bear'
                     ? 'Bear'
                     : 'Flat'}
-                <span className={`ml-1 font-mono tabular-nums ${getFearGreedTextTone(tileFearGreed.zone)}`}>
-                  · {tileFearGreed.score}
+                <span className={`ml-0.5 font-mono tabular-nums ${getFearGreedTextTone(tileFearGreed.zone)}`}>
+                  ·{tileFearGreed.score}
                 </span>
               </span>
             )}
             <span
               className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-                tile.marketSessionOpen ? 'bg-[#30D158]' : 'bg-[#8E8E93]/60'
+                tile.marketSessionOpen ? 'bg-[#0F7638] dark:bg-[#26A69A]' : 'bg-[#8E8E93]/60'
               }`}
               title={
                 tile.marketSessionOpen
@@ -196,22 +192,16 @@ const DashboardTickerCard: React.FC<DashboardTickerCardProps> = React.memo(
           </div>
         </div>
 
-        <div
-          className={`w-full ${
-            isCompactCards
-              ? 'mt-1 flex items-center justify-between gap-2'
-              : 'mt-1.5 flex items-baseline justify-between gap-2'
-          }`}
-        >
+        <div className="mt-0.5 w-full flex items-center justify-between gap-1.5">
           <div
             className={`font-bold tabular-nums font-mono tracking-tight ${
-              isCompactCards ? 'text-xs sm:text-sm' : 'text-base sm:text-lg'
+              isCompactCards ? 'text-xs sm:text-[13px]' : 'text-sm sm:text-[15px]'
             } ${
               tileFlash === 'gain'
-                ? 'text-[#16803C] dark:text-[#30D158]'
+                ? 'text-[#0F7638] dark:text-[#34D399]'
                 : tileFlash === 'loss'
-                  ? 'text-[#D7261C] dark:text-[#FF453A]'
-                  : 'text-[#1C1C1E] dark:text-white'
+                  ? 'text-[#B91C1C] dark:text-[#F87171]'
+                  : 'text-[#0A2540] dark:text-[#F0F3FA]'
             }`}
           >
             {formatAssetPrice(tile)}
@@ -219,20 +209,20 @@ const DashboardTickerCard: React.FC<DashboardTickerCardProps> = React.memo(
           <GoogleFinanceDeltaPill changePercent={tile.changePercent} compact />
         </div>
 
-        {/* 5-Minute D3 Price Trajectory Sparkline */}
+        {/* Compact 5-Minute D3 Price Trajectory Sparkline */}
         {!isCompactCards && (
           <div
             data-testid="ticker-5m-sparkline-row"
-            className="mt-1.5 pt-1 border-t border-black/8 dark:border-white/8 w-full flex items-center justify-between gap-2"
+            className="mt-1 pt-1 border-t border-black/8 dark:border-white/8 w-full flex items-center justify-between gap-1.5"
             title={`5-minute price trajectory: ${fiveMin.deltaPct >= 0 ? '+' : ''}${fiveMin.deltaPct.toFixed(2)}%`}
           >
             <span
               className={`text-[9px] font-mono font-bold tabular-nums whitespace-nowrap shrink-0 ${
                 fiveMin.deltaPct > 0.005
-                  ? 'text-[#0F7033] dark:text-[#4ADE80]'
+                  ? 'text-[#0F7638] dark:text-[#34D399]'
                   : fiveMin.deltaPct < -0.005
-                    ? 'text-[#C41C16] dark:text-[#FF6B63]'
-                    : 'text-[#6C6C70] dark:text-[#9EB5C8]'
+                    ? 'text-[#B91C1C] dark:text-[#F87171]'
+                    : 'text-[#425466] dark:text-[#9CA3AF]'
               }`}
             >
               5m {fiveMin.deltaPct >= 0 ? '+' : ''}
@@ -241,9 +231,9 @@ const DashboardTickerCard: React.FC<DashboardTickerCardProps> = React.memo(
             <D3FiveMinSparkline
               points={fiveMin.points}
               deltaPct={fiveMin.deltaPct}
-              width={72}
-              height={18}
-              className="w-[72px] h-[18px] shrink-0"
+              width={56}
+              height={14}
+              className="w-[56px] h-[14px] shrink-0"
             />
           </div>
         )}
@@ -501,16 +491,16 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
 
   return (
     <div className="flex flex-col flex-1">
-      {/* Sticky Region Tabs + Sessions Shown Above Cards Only + Simple No-Chart Ticker Cards */}
+      {/* Compact Sticky Region Tabs + Sessions Bar + Slim Ticker Cards Strip */}
       <section
-        style={{ top: 'var(--app-header-height, 108px)' }}
-        className={`sticky z-30 liquid-glass-strong !border-x-0 !border-t-0 px-4 lg:px-6 transition-all duration-300 ease-out flex flex-col ${
-          isCompactCards ? 'pt-2 pb-2 gap-1.5' : 'pt-2.5 pb-3 gap-2'
+        style={{ top: 'var(--app-header-height, 96px)' }}
+        className={`lg:sticky z-30 liquid-glass-strong !border-x-0 !border-t-0 px-3 sm:px-4 lg:px-6 transition-all duration-200 flex flex-col ${
+          isCompactCards ? 'pt-1.5 pb-1.5 gap-1.5' : 'pt-2 pb-2 gap-1.5'
         }`}
       >
         {/* Region Filter Strip & Summary */}
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar">
+        <div className="flex flex-wrap items-center justify-between gap-1.5">
+          <div className="flex items-center gap-1 overflow-x-auto no-scrollbar">
             {REGION_TABS.map((tab) => {
               const active = regionTab === tab.id;
               return (
@@ -518,12 +508,10 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
                   key={tab.id}
                   type="button"
                   onClick={() => setRegionTab(tab.id)}
-                  className={`px-3 rounded-xl text-xs font-semibold whitespace-nowrap transition-all duration-200 border ${
-                    isCompactCards ? 'py-1' : 'py-1.5'
-                  } ${
+                  className={`px-2.5 py-1 rounded-lg text-xs font-semibold whitespace-nowrap transition-colors border ${
                     active
-                      ? 'bg-[#1C1C1E] dark:bg-white text-white dark:text-[#111318] border-transparent shadow-sm'
-                      : 'liquid-glass-pill text-[#4A4D57] dark:text-[#C7CBD6] hover:text-[#1C1C1E] dark:hover:text-white'
+                      ? 'bg-[#1D4ED8] dark:bg-[#2962FF] text-white border-transparent'
+                      : 'liquid-glass-pill text-[#425466] dark:text-[#9CA3AF] hover:text-[#0A2540] dark:hover:text-[#F0F3FA]'
                   }`}
                 >
                   {tab.label}
@@ -532,12 +520,12 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
             })}
           </div>
 
-          <div className="flex items-center gap-2.5 flex-wrap">
-            <div className="inline-flex items-center gap-1.5 text-xs text-[#4A4D57] dark:text-[#C7CBD6]">
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className="inline-flex items-center gap-1.5 text-[11px] text-[#425466] dark:text-[#9CA3AF]">
               {regionBanner.isOpen ? (
                 <Sun className="w-3.5 h-3.5 text-[#D97706] dark:text-[#FBBF24]" />
               ) : (
-                <Moon className="w-3.5 h-3.5 text-[#6366F1] dark:text-[#A78BFA]" />
+                <Moon className="w-3.5 h-3.5 text-[#1D4ED8] dark:text-[#60A5FA]" />
               )}
               <span className="font-semibold">{regionBanner.text}</span>
             </div>
@@ -546,18 +534,18 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
               type="button"
               onClick={() => setShowVolHeatmap((prev) => !prev)}
               aria-pressed={showVolHeatmap}
-              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-[11px] font-bold border whitespace-nowrap shrink-0 transition-all ${
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-bold border whitespace-nowrap shrink-0 transition-colors ${
                 showVolHeatmap
-                  ? 'bg-gradient-to-r from-[#16A34A]/20 via-[#F59E0B]/20 to-[#DC2626]/20 border-[#F59E0B]/55 text-[#1C1C1E] dark:text-white shadow-sm'
-                  : 'liquid-glass-pill text-[#4A4D57] dark:text-[#C7CBD6] hover:text-[#1C1C1E] dark:hover:text-white'
+                  ? 'bg-[#1D4ED8]/12 dark:bg-[#2962FF]/22 border-[#1D4ED8]/45 dark:border-[#3B82F6]/55 text-[#0A2540] dark:text-[#F0F3FA]'
+                  : 'liquid-glass-pill text-[#425466] dark:text-[#9CA3AF] hover:text-[#0A2540] dark:hover:text-[#F0F3FA]'
               }`}
               title="Color-code dashboard assets by 5-minute price deviation relative to the rest of the market"
             >
               <Flame
                 className={`w-3.5 h-3.5 ${
                   showVolHeatmap
-                    ? 'text-[#D97706] dark:text-[#FBBF24]'
-                    : 'text-[#6C6C70] dark:text-[#AEAEB2]'
+                    ? 'text-[#1D4ED8] dark:text-[#60A5FA]'
+                    : 'text-[#526375] dark:text-[#9CA3AF]'
                 }`}
               />
               <span>5m Volatility</span>
@@ -567,12 +555,12 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
               type="button"
               onClick={() => setIsAlertDrawerOpen((prev) => !prev)}
               data-testid="alerts-drawer-toggle"
-              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-[11px] font-bold border whitespace-nowrap shrink-0 transition-all ${
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-bold border whitespace-nowrap shrink-0 transition-colors ${
                 unreadAlertCount > 0
                   ? 'bg-[#FF9F0A]/18 border-[#FF9F0A]/45 text-[#9A4E00] dark:text-[#FBBF24]'
                   : isAlertDrawerOpen
-                    ? 'bg-[#1C1C1E] dark:bg-white text-white dark:text-[#111318] border-transparent'
-                    : 'liquid-glass-pill text-[#4A4D57] dark:text-[#C7CBD6] hover:text-[#1C1C1E] dark:hover:text-white'
+                    ? 'bg-[#1D4ED8] dark:bg-[#2962FF] text-white border-transparent'
+                    : 'liquid-glass-pill text-[#425466] dark:text-[#9CA3AF] hover:text-[#0A2540] dark:hover:text-[#F0F3FA]'
               }`}
               title="Real-time 5m volatility (>2%) & ICT Buy/Sell signal alerts"
             >
@@ -589,36 +577,36 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
           </div>
         </div>
 
-        {/* Market Sessions Shown Strictly Above Ticker Cards */}
-        <div className="flex items-center justify-between gap-2 overflow-x-auto no-scrollbar text-[11px]">
-          <div className="flex items-center gap-2 shrink-0">
-            <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-[#4A4D57] dark:text-[#B4B8C4] shrink-0">
+        {/* Compact Market Sessions Line */}
+        <div className="flex items-center justify-between gap-2 overflow-x-auto no-scrollbar text-[10.5px]">
+          <div className="flex items-center gap-1.5 shrink-0">
+            <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-[#425466] dark:text-[#9CA3AF] shrink-0">
               <Clock className="w-3 h-3" />
               Sessions
             </span>
-            <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+            <div className="flex items-center gap-1.5 shrink-0">
               {sessionList.map((s) => {
                 const dotColor =
                   s.tone === 'open'
-                    ? 'bg-[#22C55E] dark:bg-[#4ADE80]'
+                    ? 'bg-[#0F7638] dark:bg-[#26A69A]'
                     : s.tone === 'extended' || s.tone === 'break'
-                      ? 'bg-[#FF9F0A]'
+                      ? 'bg-[#D97706]'
                       : 'bg-[#8E8E93]';
                 const badgeText =
                   s.tone === 'open'
-                    ? 'text-[#0F7033] dark:text-[#4ADE80]'
+                    ? 'text-[#0F7638] dark:text-[#34D399]'
                     : s.tone === 'extended' || s.tone === 'break'
-                      ? 'text-[#9A4E00] dark:text-[#FFB340]'
-                      : 'text-[#4A4D57] dark:text-[#B4B8C4]';
+                      ? 'text-[#9A4E00] dark:text-[#FBBF24]'
+                      : 'text-[#425466] dark:text-[#9CA3AF]';
 
                 return (
                   <div
                     key={s.id}
                     title={`${s.label}: ${s.stateLabel} (${s.detail})`}
-                    className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full liquid-glass-pill whitespace-nowrap"
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full liquid-glass-pill whitespace-nowrap"
                   >
                     <span className={`w-1.5 h-1.5 rounded-full ${dotColor}`} />
-                    <span className="font-semibold text-[#1C1C1E] dark:text-white">{s.shortLabel}:</span>
+                    <span className="font-semibold text-[#0A2540] dark:text-[#F0F3FA]">{s.shortLabel}:</span>
                     <span className={`font-bold ${badgeText}`}>{s.stateLabel}</span>
                   </div>
                 );
@@ -628,19 +616,19 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
 
           {showVolHeatmap && (
             <div className="inline-flex items-center gap-2 px-2.5 py-0.5 rounded-full liquid-glass-pill text-[10px] font-mono shrink-0">
-              <span className="font-bold text-[#1C1C1E] dark:text-white">
+              <span className="font-bold text-[#0A2540] dark:text-[#F0F3FA]">
                 5m Active Med {(market5mStats.medianPct ?? market5mStats.meanPct) >= 0 ? '+' : ''}
                 {(market5mStats.medianPct ?? market5mStats.meanPct).toFixed(2)}% · σ {market5mStats.stdPct.toFixed(2)}%:
               </span>
-              <span className="inline-flex items-center gap-1 text-[#C41C16] dark:text-[#FF6B63] font-bold">
+              <span className="inline-flex items-center gap-1 text-[#B91C1C] dark:text-[#F87171] font-bold">
                 <span className="w-2 h-2 rounded-sm bg-[#DC2626]" />
                 -2σ
               </span>
-              <span className="inline-flex items-center gap-1 text-[#6C6C70] dark:text-[#AEAEB2] font-semibold">
+              <span className="inline-flex items-center gap-1 text-[#425466] dark:text-[#9CA3AF] font-semibold">
                 <span className="w-2 h-2 rounded-sm bg-[#94A3B8]" />
                 0σ
               </span>
-              <span className="inline-flex items-center gap-1 text-[#0F7033] dark:text-[#4ADE80] font-bold">
+              <span className="inline-flex items-center gap-1 text-[#0F7638] dark:text-[#34D399] font-bold">
                 <span className="w-2 h-2 rounded-sm bg-[#16A34A]" />
                 +2σ
               </span>
@@ -648,8 +636,8 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
           )}
         </div>
 
-        {/* Simple Ticker Cards (Memoized per-tile for 1s live updates) */}
-        <div className="flex xl:grid xl:grid-cols-6 gap-2.5 lg:gap-3 overflow-x-auto no-scrollbar pb-0.5">
+        {/* Slim Ticker Cards Row */}
+        <div className="flex xl:grid xl:grid-cols-6 gap-2 overflow-x-auto no-scrollbar pb-0.5">
           {snapshotAssets.map((tile) => (
             <DashboardTickerCard
               key={tile.id}

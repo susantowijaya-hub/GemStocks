@@ -65,11 +65,60 @@ export interface SyncedRadarConfig {
   enforceNewsBlackout: boolean;
 }
 
+export type SurvivalModeStatus = 'NORMAL' | 'CAUTION' | 'LOCKDOWN';
+
+export interface SurvivalRuleCheck {
+  id: string;
+  label: string;
+  passed: boolean;
+  detail: string;
+}
+
+export interface SurvivalMetrics {
+  mode: SurvivalModeStatus;
+  consecutiveLosses: number;
+  netR48h: number;
+  wins: number;
+  bes: number;
+  losses: number;
+  winRatePct: number | null;
+  riskMultiplierLabel: string;
+  minRrRequired: number;
+  requireAPlusOnly: boolean;
+  cooldownRemainingMin: number;
+  cooldownUntil?: number;
+  headline: string;
+  rules: SurvivalRuleCheck[];
+}
+
+export type SignalBiasVerdict =
+  | 'STRONG BUY'
+  | 'BUY'
+  | 'BULLISH LEAN (WAIT)'
+  | 'NEUTRAL / RANGE'
+  | 'BEARISH LEAN (WAIT)'
+  | 'SELL'
+  | 'STRONG SELL';
+
+export interface SignalClearanceGate {
+  id: string;
+  label: string;
+  passed: boolean;
+  state: 'PASS' | 'WARN' | 'BLOCK';
+  detail: string;
+}
+
 export interface IctSignalAnalysis {
   assetId: string;
   symbol: string;
   name: string;
   direction: IctDirection;
+  biasLabel?: 'BULLISH' | 'BEARISH' | 'FLAT';
+  biasVerdict?: SignalBiasVerdict;
+  clearanceSummary?: string;
+  clearanceGates?: SignalClearanceGate[];
+  dxyConfluenceNote?: string;
+  roundPoolNote?: string;
   confidence: number; // 0..100
   setupName: string;
   pdZone: 'Discount' | 'Equilibrium' | 'Premium';
@@ -144,6 +193,9 @@ export interface IctSignalAnalysis {
   spotRr?: number;
   chaseProgressPct?: number;
   hasRunAway?: boolean;
+  placementSummary?: string;
+  survivalBlocked?: boolean;
+  survivalNote?: string;
 }
 
 export interface SdCandleVolumeSignal {
@@ -152,6 +204,11 @@ export interface SdCandleVolumeSignal {
   name: string;
   assetClassLabel: 'Crypto (BTC/USD)' | 'Commodities (XAU/USD)' | 'G10 FX';
   direction: IctDirection;
+  biasLabel?: 'BULLISH' | 'BEARISH' | 'FLAT';
+  biasVerdict?: SignalBiasVerdict;
+  clearanceSummary?: string;
+  clearanceGates?: SignalClearanceGate[];
+  dxyConfluenceNote?: string;
   confidence: number;
   timeframe: Timeframe;
   currentPrice: number;
@@ -161,6 +218,10 @@ export interface SdCandleVolumeSignal {
   evaluatedAt: number;
   zoneBias: 'Demand' | 'Supply' | 'Mid-Range';
   zoneStatus: 'Fresh' | 'Tested 1x' | 'Mid-Range';
+  sdPattern?: 'RBR' | 'DBR' | 'DBD' | 'RBD' | 'BASE';
+  proximalLineNum?: number;
+  distalLineNum?: number;
+  htfCurvePct?: number;
   demandZone: string;
   supplyZone: string;
   candlePattern: string;
@@ -205,6 +266,9 @@ export interface SdCandleVolumeSignal {
   spotRr?: number;
   chaseProgressPct?: number;
   hasRunAway?: boolean;
+  placementSummary?: string;
+  survivalBlocked?: boolean;
+  survivalNote?: string;
 }
 
 export type WatchlistCategory =
@@ -414,6 +478,16 @@ export interface StockTradePlan {
   ema20Num?: number;
   ema50Num?: number;
   trendFilterLabel?: 'Uptrend (EMA20 > EMA50)' | 'Downtrend (EMA20 < EMA50)' | 'Neutral';
+  verdictLabel?:
+    | 'BUY NOW (ACCUMULATION)'
+    | 'BUY AT DEMAND'
+    | 'BREAKOUT BUY'
+    | 'WAIT PULLBACK'
+    | 'AVOID / SELL'
+    | 'WATCH';
+  scannerScore?: number; // 0..100 composite buy readiness score
+  buyReasons?: string[];
+  cautionNote?: string;
 }
 
 export interface ChartTradeOverlays {

@@ -355,10 +355,13 @@ export function useLiveMarket() {
   // Fetch all live market quotes from backend aggregator (1s compact ticks after initial full series hydration)
   const refreshQuotes = useCallback(
     async (force = false) => {
-      if (quotesInFlightRef.current || shouldSkipForBackoff('quotes', force)) return;
+      if ((!force && quotesInFlightRef.current) || shouldSkipForBackoff('quotes', force)) return;
       quotesInFlightRef.current = true;
       try {
         const now = Date.now();
+        if (force) {
+          lastFullQuotesAtRef.current = 0;
+        }
         const needFullSeries =
           lastFullQuotesAtRef.current === 0 || now - lastFullQuotesAtRef.current >= 30_000;
         const { data: payload, rttMs } = await fetchJsonWithLatency<{
@@ -545,11 +548,12 @@ export function useLiveMarket() {
   // Fetch live News RSS and Economic Calendar
   const refreshSecondaryFeeds = useCallback(async (force = false) => {
     if (shouldSkipForBackoff('secondary', force)) return;
+    const calendarUrl = force ? '/api/calendar/events?range=this_week&refresh=1' : '/api/calendar/events';
     const [newsRes, calRes] = await Promise.all([
       fetchJsonWithTimeout<{ stories?: NewsStory[] }>('/api/news/feed', 7500),
       fetchJsonWithTimeout<{ events?: EconomicEvent[]; nextCatalyst?: CalendarCatalyst | null }>(
-        '/api/calendar/events',
-        7500
+        calendarUrl,
+        9000
       ),
     ]);
 
@@ -880,32 +884,19 @@ export function useLiveMarket() {
     fetchMarketIntelligence,
   ]);
 
-  // Politely pre-warm 15m and 5m real OHLC candles for ICT Radar assets after boot so
-  // background alerts & volatility bands are ready even before opening #ict
+  // Politely pre-warm real OHLC candles (15m, 5m, 1h, 4h) strictly for BTCUSD & XAUUSD
+  // so HTF structure, Survival checks, and background alerts are ready immediately
   useEffect(() => {
-    const ICT_WARM_IDS = [
-      'BTCUSD',
-      'XAUUSD',
-      'EURUSD',
-      'GBPUSD',
-      'USDJPY',
-      'AUDUSD',
-      'USDCHF',
-      'USDCAD',
-      'NZDUSD',
-    ];
+    const ICT_WARM_IDS = ['BTCUSD', 'XAUUSD'];
     let cancelled = false;
 
     const warmBatches = async () => {
-      const tfs: Timeframe[] = ['15m', '5m'];
+      const tfs: Timeframe[] = ['15m', '5m', '1h', '4h'];
       for (const tf of tfs) {
-        for (let i = 0; i < ICT_WARM_IDS.length; i += 3) {
-          if (cancelled) return;
-          const batch = ICT_WARM_IDS.slice(i, i + 3);
-          await Promise.allSettled(batch.map((id) => loadChartTimeframe(id, tf)));
-          if (cancelled) return;
-          await new Promise((r) => window.setTimeout(r, 180));
-        }
+        if (cancelled) return;
+        await Promise.allSettled(ICT_WARM_IDS.map((id) => loadChartTimeframe(id, tf)));
+        if (cancelled) return;
+        await new Promise((r) => window.setTimeout(r, 150));
       }
     };
 
@@ -1067,15 +1058,17 @@ export function useLiveMarket() {
     }
   }, [quotesRttMs]);
 
-  const refreshAll = useCallback(() => {
-    void refreshQuotes(true);
-    void refreshFxRates(true);
-    void refreshSecondaryFeeds(true);
-    void refreshStocks(true);
-    void refreshHeatmap(true);
-    void fetchDailySummary(true);
-    void fetchMarketIntelligence(true);
-    void refreshDiagnostics();
+  const refreshAll = useCallback(async () => {
+    await Promise.allSettled([
+      refreshQuotes(true),
+      refreshFxRates(true),
+      refreshSecondaryFeeds(true),
+      refreshStocks(true),
+      refreshHeatmap(true),
+      fetchDailySummary(true),
+      fetchMarketIntelligence(true),
+      refreshDiagnostics(),
+    ]);
   }, [
     refreshQuotes,
     refreshFxRates,

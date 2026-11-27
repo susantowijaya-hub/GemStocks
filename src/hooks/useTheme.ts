@@ -14,31 +14,31 @@ export interface ThemeOptionMeta {
 }
 
 /**
- * 3 Surviving Themes synthesized & refined from the 5 reference dashboards:
- * - obsidian  : Ref 02 (Smart Home) smoked obsidian glass + warm tungsten amber highlights
- * - arctic    : Refs 04 & 05 (Turbine + Fenisco) Nordic mist daylight glass + fintech cobalt
- * - parchment : Refs 01 & 03 (Worktail + SentinelAI) warm alabaster editorial matte + coral/sage clarity
+ * Curated Terminal Themes:
+ * - obsidian  : Desk Slate Pro — deep obsidian charcoal surfaces with 1px structural hairlines & #2962FF cobalt controls
+ * - arctic    : Institutional Daylight — crisp #F4F6F9 canvas, pure white elevated cards & #0A2540 midnight ink legibility
+ * - parchment : Warm Editorial — ivory matte surfaces with disciplined burnt-copper accents
  */
 export const THEME_OPTIONS: ThemeOptionMeta[] = [
   {
     id: 'obsidian',
-    label: 'Obsidian Amber',
-    shortLabel: 'Obsidian',
-    description: 'Smoked dark glass with warm tungsten amber & slate depth',
-    swatchTop: '#0A0F18',
-    swatchBottom: '#F59E0B',
-    accent: '#FBBF24',
+    label: 'Desk Slate Pro',
+    shortLabel: 'Desk Slate',
+    description: 'Deep obsidian terminal surfaces with 1px hairlines & cobalt controls',
+    swatchTop: '#0B0E14',
+    swatchBottom: '#2962FF',
+    accent: '#2962FF',
     recommended: true,
     isDarkSurface: true,
   },
   {
     id: 'arctic',
-    label: 'Arctic Cobalt',
-    shortLabel: 'Arctic',
-    description: 'Nordic frosted crystal light with fintech cobalt accents',
-    swatchTop: '#EDF3FA',
-    swatchBottom: '#1D63ED',
-    accent: '#0066CC',
+    label: 'Institutional Daylight',
+    shortLabel: 'Daylight',
+    description: 'Crisp studio white cards on cool gray canvas with midnight ink',
+    swatchTop: '#F4F6F9',
+    swatchBottom: '#1D4ED8',
+    accent: '#1D4ED8',
     recommended: true,
     isDarkSurface: false,
   },
@@ -46,10 +46,10 @@ export const THEME_OPTIONS: ThemeOptionMeta[] = [
     id: 'parchment',
     label: 'Warm Editorial',
     shortLabel: 'Editorial',
-    description: 'Ivory parchment hairlines with terracotta & sage telemetry',
+    description: 'Matte ivory parchment hairlines with terracotta & sage telemetry',
     swatchTop: '#F4F0E6',
-    swatchBottom: '#C2410C',
-    accent: '#C2410C',
+    swatchBottom: '#B4410E',
+    accent: '#B4410E',
     isDarkSurface: false,
   },
 ];
@@ -117,10 +117,10 @@ export function useTheme() {
     if (themeMeta) {
       const metaColor =
         themeMode === 'obsidian'
-          ? '#080C14'
+          ? '#0B0E14'
           : themeMode === 'parchment'
             ? '#F4F0E6'
-            : '#EDF3FA';
+            : '#F4F6F9';
       themeMeta.setAttribute('content', metaColor);
     }
 

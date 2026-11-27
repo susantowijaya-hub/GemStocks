@@ -11,6 +11,7 @@ import {
   SignalTier,
   StockExecutionAction,
   StockMover,
+  StocksMoversBucket,
   StockTradePlan,
   Timeframe,
   UnifiedMarketPulse,
@@ -1179,7 +1180,108 @@ export function formatStockCurrencyValue(price: number, currency: 'USD' | 'IDR')
   })}`;
 }
 
+function deriveIdxVerdictAndScore(
+  stock: StockMover,
+  plan: StockTradePlan,
+  rangePos: number,
+  isOverextended: boolean
+): Pick<StockTradePlan, 'verdictLabel' | 'scannerScore' | 'buyReasons' | 'cautionNote'> {
+  const bandar = stock.bandarmology;
+  const bandarScore = bandar?.score ?? Math.round(Math.tanh(stock.changePercent / 2) * 35);
+  const foreignBuy =
+    stock.foreignFlowSide === 'BUY' ||
+    (stock.foreignNetAmount ?? 0) > 0 ||
+    bandar?.foreignBias === 'Net Buy';
+  const foreignSell =
+    stock.foreignFlowSide === 'SELL' ||
+    (stock.foreignNetAmount ?? 0) < 0 ||
+    bandar?.foreignBias === 'Net Sell';
+  const volRatio = bandar?.volumeRatio ?? 1.0;
+
+  const rawScanner =
+    50 +
+    bandarScore * 0.34 +
+    (foreignBuy ? 14 : foreignSell ? -14 : 0) +
+    (rangePos <= 0.42 ? 12 : rangePos >= 0.75 ? -14 : 4) +
+    (plan.trendFilterLabel === 'Uptrend (EMA20 > EMA50)'
+      ? 10
+      : plan.trendFilterLabel === 'Downtrend (EMA20 < EMA50)'
+        ? -12
+        : 0) +
+    (volRatio >= 1.2 ? 6 : 0) -
+    (isOverextended ? 18 : 0);
+  const scannerScore = plan.scannerScore ?? Math.round(Math.max(5, Math.min(98, rawScanner)));
+
+  let verdictLabel: StockTradePlan['verdictLabel'] = plan.verdictLabel;
+  if (!verdictLabel) {
+    if (plan.action === 'BUY') {
+      if (bandar?.phase === 'Strong Accumulation' && (foreignBuy || rangePos <= 0.48)) {
+        verdictLabel = 'BUY NOW (ACCUMULATION)';
+      } else if (rangePos <= 0.45) {
+        verdictLabel = 'BUY AT DEMAND';
+      } else {
+        verdictLabel = 'BREAKOUT BUY';
+      }
+    } else if (
+      plan.action === 'WAIT' &&
+      (isOverextended || bandarScore >= 12 || foreignBuy)
+    ) {
+      verdictLabel = 'WAIT PULLBACK';
+    } else if (
+      plan.action === 'SELL' ||
+      bandar?.phase === 'Strong Distribution' ||
+      (bandarScore <= -20 && foreignSell)
+    ) {
+      verdictLabel = 'AVOID / SELL';
+    } else {
+      verdictLabel = 'WATCH';
+    }
+  }
+
+  let buyReasons = plan.buyReasons;
+  if (!buyReasons || buyReasons.length === 0) {
+    const reasons: string[] = [];
+    if (bandar?.phase === 'Strong Accumulation' || bandar?.phase === 'Early Accumulation') {
+      reasons.push(`${bandar.phase} (${bandar.score >= 0 ? '+' : ''}${bandar.score})`);
+    }
+    if (foreignBuy) {
+      reasons.push(
+        stock.foreignNetLabel ? `Foreign Buy (${stock.foreignNetLabel})` : 'Foreign Net Buy'
+      );
+    }
+    if (rangePos <= 0.48) {
+      reasons.push('Near Fresh Demand Zone');
+    }
+    if (plan.trendFilterLabel === 'Uptrend (EMA20 > EMA50)') {
+      reasons.push('Uptrend (EMA20 > EMA50)');
+    }
+    if (volRatio >= 1.2) {
+      reasons.push(`${volRatio.toFixed(1)}x 20D Volume`);
+    }
+    if (reasons.length === 0) {
+      reasons.push(bandar?.phase && bandar.phase !== 'Neutral' ? bandar.phase : 'Consolidating Base');
+    }
+    buyReasons = reasons.slice(0, 4);
+  }
+
+  let cautionNote = plan.cautionNote;
+  if (!cautionNote) {
+    if (isOverextended) {
+      cautionNote = `Extended (+${stock.changePercent.toFixed(1)}% / Supply ceiling) — wait pullback to Demand.`;
+    } else if (bandar?.summary?.includes('Upper-wick supply')) {
+      cautionNote = 'Upper-wick supply / distribution trap risk on elevated volume.';
+    } else if (foreignSell) {
+      cautionNote = 'Foreign Net Sell outflow active — wait Demand absorption.';
+    } else if (plan.trendFilterLabel === 'Downtrend (EMA20 < EMA50)') {
+      cautionNote = 'Below EMA50 downtrend — treat rebounds defensively.';
+    }
+  }
+
+  return { verdictLabel, scannerScore, buyReasons, cautionNote };
+}
+
 export function computeStockTradeStrategy(stock: StockMover): StockTradePlan {
+  const px = Math.max(stock.price, stock.prevClose, 1);
   if (
     stock.tradePlan &&
     stock.tradePlan.entryPrice > 0 &&
@@ -1187,11 +1289,18 @@ export function computeStockTradeStrategy(stock: StockMover): StockTradePlan {
     stock.tradePlan.takeProfit1 > 0 &&
     stock.tradePlan.takeProfit2 > 0
   ) {
-    return stock.tradePlan;
+    const demHi = stock.tradePlan.demandHighNum ?? px * 0.985;
+    const supLo = stock.tradePlan.supplyLowNum ?? px * 1.015;
+    const posInSd = (px - demHi) / Math.max(1e-6, supLo - demHi);
+    const overextended = stock.changePercent >= 8.5 || (posInSd >= 0.78 && stock.changePercent >= 3.0);
+    const enriched = deriveIdxVerdictAndScore(stock, stock.tradePlan, posInSd, overextended);
+    return {
+      ...stock.tradePlan,
+      ...enriched,
+    };
   }
 
   const cur = stock.currency;
-  const px = Math.max(stock.price, stock.prevClose, 1);
   const validPts = (stock.sparklinePoints ?? []).filter(
     (v) => typeof v === 'number' && Number.isFinite(v) && v > 0
   );
@@ -1220,9 +1329,10 @@ export function computeStockTradeStrategy(stock: StockMover): StockTradePlan {
 
   const zoneBias = rangePos <= 0.38 ? 16 : rangePos >= 0.72 ? -14 : 0;
   const composite = bandarScore * 0.65 + (accPressure - 50) * 0.65 + flowBonus + zoneBias;
+  const isOverextended = stock.changePercent >= 8.5 || (rangePos >= 0.78 && stock.changePercent >= 3.0);
 
   let action: StockExecutionAction = 'WAIT';
-  if (composite >= 14 && rangePos <= 0.78) {
+  if (!isOverextended && composite >= 14 && rangePos <= 0.74) {
     action = 'BUY';
   } else if (composite <= -14 && rangePos >= 0.22) {
     action = 'SELL';
@@ -1247,6 +1357,8 @@ export function computeStockTradeStrategy(stock: StockMover): StockTradePlan {
       ? px < 200 ? 1 : px < 500 ? 2 : px < 2000 ? 5 : px < 5000 ? 10 : 25
       : 0.01;
 
+  let basePlan: StockTradePlan;
+
   if (action === 'BUY') {
     const rawEntry = rangePos <= 0.45 ? px : Math.min(px, (px + demandHigh) / 2);
     const entryPrice = snapStockPriceToTick(rawEntry, cur);
@@ -1258,7 +1370,7 @@ export function computeStockTradeStrategy(stock: StockMover): StockTradePlan {
     const rrVal = Math.max(1.5, Number(((tp2 - entryPrice) / risk).toFixed(1)));
     const phaseText = bandar?.phase && bandar.phase !== 'Neutral' ? bandar.phase : 'Demand Accumulation';
 
-    return {
+    basePlan = {
       action,
       conviction,
       strategyTag: `${phaseText} + Demand Entry`,
@@ -1280,9 +1392,7 @@ export function computeStockTradeStrategy(stock: StockMover): StockTradePlan {
       supplyLowNum: supplyLow,
       supplyHighNum: supplyHigh,
     };
-  }
-
-  if (action === 'SELL') {
+  } else if (action === 'SELL') {
     const rawEntry = rangePos >= 0.55 ? px : Math.max(px, (px + supplyLow) / 2);
     const entryPrice = snapStockPriceToTick(rawEntry, cur);
     const entryLo = snapStockPriceToTick(Math.min(entryPrice, Math.max(px, entryPrice * 0.994)), cur);
@@ -1293,7 +1403,7 @@ export function computeStockTradeStrategy(stock: StockMover): StockTradePlan {
     const rrVal = Math.max(1.5, Number(((entryPrice - tp2) / risk).toFixed(1)));
     const phaseText = bandar?.phase && bandar.phase !== 'Neutral' ? bandar.phase : 'Supply Distribution';
 
-    return {
+    basePlan = {
       action,
       conviction,
       strategyTag: `${phaseText} + Supply Reject`,
@@ -1315,37 +1425,116 @@ export function computeStockTradeStrategy(stock: StockMover): StockTradePlan {
       supplyLowNum: supplyLow,
       supplyHighNum: supplyHigh,
     };
+  } else {
+    // WAIT setup: expose clear conditional buy limit at Demand Zone with protective SL and Supply TP targets
+    const entryPrice = snapStockPriceToTick(demandHigh, cur);
+    const stopLoss = snapStockPriceToTick(Math.min(demandLow - tickStep * 2, entryPrice - totalSpan * 0.45), cur);
+    const risk = Math.max(tickStep * 2, entryPrice - stopLoss);
+    const tp1 = snapStockPriceToTick(Math.max(supplyLow, entryPrice + risk * 1.5), cur);
+    const tp2 = snapStockPriceToTick(Math.max(tp1 + risk * 0.65, supplyHigh), cur);
+    const rrVal = Math.max(1.5, Number(((tp2 - entryPrice) / risk).toFixed(1)));
+
+    basePlan = {
+      action: 'WAIT',
+      conviction,
+      strategyTag: isOverextended
+        ? 'Extended · Wait Demand Pullback'
+        : 'Neutral Zone · Await Pullback / Flow',
+      entryPrice,
+      entryZoneLabel: demandZoneLabel,
+      takeProfit1: tp1,
+      takeProfit2: tp2,
+      stopLoss,
+      riskReward: `1:${rrVal.toFixed(1)}`,
+      demandZoneLabel,
+      supplyZoneLabel,
+      bandarFlowBias,
+      executionNote: isOverextended
+        ? `CHASE GUARD (+${stock.changePercent.toFixed(1)}%): Do not chase near Supply. Place BUY limit inside Demand ${demandZoneLabel} (TP ${formatStockCurrencyValue(tp1, cur)}, SL ${formatStockCurrencyValue(stopLoss, cur)}).`
+        : `WAIT mid-range: only place BUY limit inside Demand ${demandZoneLabel} on volume/foreign confirmation (TP ${formatStockCurrencyValue(tp1, cur)}, SL ${formatStockCurrencyValue(stopLoss, cur)}), or sell rallies into ${supplyZoneLabel}.`,
+      demandLowNum: demandLow,
+      demandHighNum: demandHigh,
+      supplyLowNum: supplyLow,
+      supplyHighNum: supplyHigh,
+    };
   }
 
-  // WAIT setup: expose clear conditional buy limit at Demand Zone with protective SL and Supply TP targets
-  const entryPrice = snapStockPriceToTick(demandHigh, cur);
-  const stopLoss = snapStockPriceToTick(Math.min(demandLow - tickStep * 2, entryPrice - totalSpan * 0.45), cur);
-  const risk = Math.max(tickStep * 2, entryPrice - stopLoss);
-  const tp1 = snapStockPriceToTick(Math.max(supplyLow, entryPrice + risk * 1.5), cur);
-  const tp2 = snapStockPriceToTick(Math.max(tp1 + risk * 0.65, supplyHigh), cur);
-  const rrVal = Math.max(1.5, Number(((tp2 - entryPrice) / risk).toFixed(1)));
-
   return {
-    action: 'WAIT',
-    conviction,
-    strategyTag: 'Neutral Zone · Await Pullback / Flow',
-    entryPrice,
-    entryZoneLabel: demandZoneLabel,
-    takeProfit1: tp1,
-    takeProfit2: tp2,
-    stopLoss,
-    riskReward: `1:${rrVal.toFixed(1)}`,
-    demandZoneLabel,
-    supplyZoneLabel,
-    bandarFlowBias,
-    executionNote: `WAIT mid-range: only place BUY limit inside Demand ${demandZoneLabel} on volume/foreign confirmation (TP ${formatStockCurrencyValue(tp1, cur)}, SL ${formatStockCurrencyValue(stopLoss, cur)}), or sell rallies into ${supplyZoneLabel}.`,
-    demandLowNum: demandLow,
-    demandHighNum: demandHigh,
-    supplyLowNum: supplyLow,
-    supplyHighNum: supplyHigh,
+    ...basePlan,
+    ...deriveIdxVerdictAndScore(stock, basePlan, rangePos, isOverextended),
   };
 }
 
+export interface IdxScannerCandidate {
+  stock: StockMover;
+  plan: StockTradePlan;
+  scannerScore: number;
+  verdictLabel: NonNullable<StockTradePlan['verdictLabel']>;
+  isBuyReady: boolean;
+  isPullbackQueue: boolean;
+}
 
+export function buildIdxBuyScannerList(idxBucket: StocksMoversBucket): IdxScannerCandidate[] {
+  const pool = [
+    ...(idxBucket.foreignBuy ?? []),
+    ...(idxBucket.impact ?? []),
+    ...(idxBucket.gainers ?? []),
+    ...(idxBucket.losers ?? []),
+    ...(idxBucket.foreignSell ?? []),
+  ];
 
+  const deduped = new Map<string, StockMover>();
+  for (const item of pool) {
+    if (item.market !== 'ID') continue;
+    const sym = item.symbol.trim().toUpperCase().replace(/\.JK$/i, '');
+    if (!sym || item.price <= 0) continue;
+    const existing = deduped.get(sym);
+    if (!existing) {
+      deduped.set(sym, { ...item, symbol: sym });
+    } else {
+      deduped.set(sym, {
+        ...existing,
+        ...item,
+        symbol: sym,
+        bandarmology: item.bandarmology ?? existing.bandarmology,
+        tradePlan: item.tradePlan ?? existing.tradePlan,
+        foreignNetAmount: item.foreignNetAmount ?? existing.foreignNetAmount,
+        foreignNetLabel: item.foreignNetLabel ?? existing.foreignNetLabel,
+        foreignFlowSide: item.foreignFlowSide ?? existing.foreignFlowSide,
+      });
+    }
+  }
 
+  const results: IdxScannerCandidate[] = [];
+  for (const stock of deduped.values()) {
+    const plan = computeStockTradeStrategy(stock);
+    const verdictLabel = plan.verdictLabel ?? 'WATCH';
+    const scannerScore = plan.scannerScore ?? 50;
+    const isBuyReady =
+      plan.action === 'BUY' ||
+      verdictLabel === 'BUY NOW (ACCUMULATION)' ||
+      verdictLabel === 'BUY AT DEMAND' ||
+      verdictLabel === 'BREAKOUT BUY';
+    const isPullbackQueue =
+      !isBuyReady &&
+      verdictLabel === 'WAIT PULLBACK' &&
+      ((stock.bandarmology?.score ?? 0) >= 8 ||
+        stock.foreignFlowSide === 'BUY' ||
+        (stock.foreignNetAmount ?? 0) > 0);
+
+    results.push({
+      stock,
+      plan,
+      scannerScore,
+      verdictLabel,
+      isBuyReady,
+      isPullbackQueue,
+    });
+  }
+
+  return results.sort((a, b) => {
+    if (a.isBuyReady !== b.isBuyReady) return a.isBuyReady ? -1 : 1;
+    if (b.scannerScore !== a.scannerScore) return b.scannerScore - a.scannerScore;
+    return b.plan.conviction - a.plan.conviction;
+  });
+}

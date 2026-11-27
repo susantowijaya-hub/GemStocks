@@ -13,8 +13,8 @@ const ALL_ROUTES = [
 ] as const;
 
 const ALL_THEMES = [
-  { id: 'obsidian', menuLabel: 'Obsidian Amber', isDark: true },
-  { id: 'arctic', menuLabel: 'Arctic Cobalt', isDark: false },
+  { id: 'obsidian', menuLabel: 'Desk Slate Pro', isDark: true },
+  { id: 'arctic', menuLabel: 'Institutional Daylight', isDark: false },
   { id: 'parchment', menuLabel: 'Warm Editorial', isDark: false },
 ] as const;
 
@@ -127,8 +127,8 @@ test.describe('Stocks Terminal E2E & Visual Contrast Regression', () => {
 
       const audit = await page.evaluate((expectedThemeId) => {
         const CANVAS_RGB: Record<string, [number, number, number]> = {
-          obsidian: [8, 12, 20],
-          arctic: [237, 243, 250],
+          obsidian: [11, 14, 20],
+          arctic: [244, 246, 249],
           parchment: [244, 240, 230],
         };
 
@@ -773,14 +773,22 @@ test.describe('Stocks Terminal E2E & Visual Contrast Regression', () => {
 
     const ictGrid = ictView.getByTestId('ict-pairs-grid');
     await expect(ictGrid).toBeVisible();
-    for (const sym of ['BTC/USD', 'XAU/USD', 'EUR/USD', 'GBP/USD', 'USD/JPY', 'AUD/USD']) {
+    for (const sym of ['BTC/USD', 'XAU/USD']) {
       await expect(ictGrid).toContainText(sym);
     }
-    await expect(ictGrid).not.toContainText('USD/IDR');
-    await expect(ictGrid).not.toContainText('USD/CNY');
-    await expect(ictGrid).not.toContainText('US10Y');
-    await expect(ictGrid).not.toContainText('ID10Y');
-    await expect(ictGrid).not.toContainText('DXY');
+    for (const excludedSym of [
+      'EUR/USD',
+      'GBP/USD',
+      'USD/JPY',
+      'AUD/USD',
+      'USD/IDR',
+      'USD/CNY',
+      'US10Y',
+      'ID10Y',
+      'DXY',
+    ]) {
+      await expect(ictGrid).not.toContainText(excludedSym);
+    }
 
     // Verify Volatility Noise Filter & Macro News Guard toggles + Relative Timestamps inside #ict
     const volFilterToggle = ictView.getByTestId('ict-vol-filter-toggle');
@@ -823,22 +831,28 @@ test.describe('Stocks Terminal E2E & Visual Contrast Regression', () => {
     await expect(ictView.getByTestId('ict-action-callout')).toBeVisible();
     await expect(ictView.getByTestId('ict-confluence-strip')).toBeVisible();
 
-    // Verify WAIT-state safety: never show IN ENTRY ZONE or live lot order sizing during WAIT
+    // Verify Risk Calculator & Survival Shield are completely removed, Clearance Scorecard & Bias->Placement Ticket are visible, and WAIT safety holds
+    await expect(ictView.getByTestId('ict-position-calculator')).toHaveCount(0);
+    await expect(ictView.getByTestId('survival-strategy-panel')).toHaveCount(0);
+    const clearanceScorecard = ictView.getByTestId('ict-clearance-scorecard');
+    await expect(clearanceScorecard).toBeVisible();
+    await expect(clearanceScorecard).toContainText('5-Gate Signal Clearance');
+    await expect(clearanceScorecard.getByTestId('ict-bias-verdict-badge')).toHaveText(
+      /^(STRONG BUY|BUY|BULLISH LEAN \(WAIT\)|NEUTRAL \/ RANGE|BEARISH LEAN \(WAIT\)|SELL|STRONG SELL)$/
+    );
+    const placementTicket = ictView.getByTestId('signal-placement-ticket');
+    await expect(placementTicket).toBeVisible();
+    await expect(placementTicket).toContainText('Directional Bias');
+    await expect(placementTicket).toContainText('Order Placement');
+    await expect(placementTicket).toContainText('Hard Stop Loss');
+    await expect(placementTicket).toContainText('Take Profit Plan');
+
     const focusedBadgeText = await ictView.getByTestId('ict-focused-signal-badge').innerText();
-    const posCalc = ictView.getByTestId('ict-position-calculator');
-    await expect(posCalc).toBeVisible();
     if (focusedBadgeText.includes('WAIT')) {
       await expect(ictView.getByTestId('ict-spot-proximity')).not.toContainText('IN ENTRY ZONE');
       await expect(ictView.getByTestId('ict-spot-proximity')).toContainText(/Standby|Invalidated|Missed/);
-      await expect(posCalc).toContainText('Standby (WAIT)');
-      await expect(posCalc).toContainText('Unlocks on BUY/SELL');
+      await expect(placementTicket).toContainText('NO ORDER — STAND BY');
     }
-
-    // Verify Inline Position Size Calculator & Copy Ticket button
-    await posCalc.getByRole('button', { name: '2%' }).click();
-    await expect(posCalc).toContainText('Risk $200');
-    await posCalc.getByRole('button', { name: '1%' }).click();
-    await expect(posCalc).toContainText('Risk $100');
 
     const copyTicketBtn = ictView.getByTestId('ict-copy-ticket-btn');
     await expect(copyTicketBtn).toBeVisible();
@@ -877,10 +891,18 @@ test.describe('Stocks Terminal E2E & Visual Contrast Regression', () => {
     await expect(ictView).toContainText(/Relative Volume|Tick-Range Effort|Bar Volume/);
     await expect(ictView.locator('canvas')).toHaveCount(0);
 
+    await expect(ictView.getByTestId('ict-position-calculator')).toHaveCount(0);
+    await expect(ictView.getByTestId('survival-strategy-panel')).toHaveCount(0);
+    await expect(ictView.getByTestId('ict-clearance-scorecard')).toBeVisible();
+    await expect(ictView.getByTestId('ict-bias-verdict-badge')).toHaveText(
+      /^(STRONG BUY|BUY|BULLISH LEAN \(WAIT\)|NEUTRAL \/ RANGE|BEARISH LEAN \(WAIT\)|SELL|STRONG SELL)$/
+    );
+    await expect(ictView.getByTestId('signal-placement-ticket')).toBeVisible();
+    await expect(ictView.getByTestId('signal-placement-ticket')).toContainText('Order Placement');
     const sdcvBadgeText = await ictView.getByTestId('ict-focused-signal-badge').innerText();
     if (sdcvBadgeText.includes('WAIT')) {
       await expect(ictView.getByTestId('ict-spot-proximity')).not.toContainText('IN ENTRY ZONE');
-      await expect(posCalc).toContainText('Standby (WAIT)');
+      await expect(ictView.getByTestId('signal-placement-ticket')).toContainText('NO ORDER — STAND BY');
     }
 
     await ictView.getByTestId('ict-scan-now-btn').click();
@@ -1032,7 +1054,21 @@ test.describe('Stocks Terminal E2E & Visual Contrast Regression', () => {
     await expect(page.getByTestId('idx-bandarmology-filter')).toBeVisible();
     await expect(page.getByTestId('stocks-action-filter')).toBeVisible();
     await expect(page.getByTestId('idx-bandar-shift-monitor')).toBeVisible();
-    const firstStockRow = page.locator('main tbody tr').first();
+
+    const idxScanner = page.getByTestId('idx-buy-scanner');
+    await expect(idxScanner).toBeVisible({ timeout: 15_000 });
+    await expect(idxScanner.getByTestId('idx-buy-ready-count')).toContainText(/\d+ Can Buy Now/);
+    await idxScanner.getByTestId('idx-scanner-tab-all').click();
+    await expect(idxScanner.getByTestId('idx-scanner-tab-all')).toHaveAttribute('aria-selected', 'true');
+    const firstScannerRow = idxScanner.locator('tbody tr').first();
+    await expect(firstScannerRow).toBeVisible({ timeout: 15_000 });
+    await expect(firstScannerRow).toContainText(/BUY NOW|BUY AT DEMAND|BREAKOUT BUY|WAIT PULLBACK|AVOID \/ SELL|WATCH/);
+    await expect(firstScannerRow).toContainText(/TP/);
+    await expect(firstScannerRow).toContainText(/SL/);
+    await idxScanner.getByTestId('idx-scanner-tab-buy').click();
+    await expect(idxScanner.getByTestId('idx-scanner-tab-buy')).toHaveAttribute('aria-selected', 'true');
+
+    const firstStockRow = page.locator('main section:not([data-testid="idx-buy-scanner"]) tbody tr').first();
     await expect(firstStockRow).toBeVisible({ timeout: 15_000 });
     await expect(firstStockRow).toContainText(/BUY|SELL|WAIT/);
     await expect(firstStockRow).toContainText(/TP1/);
@@ -1146,7 +1182,7 @@ test.describe('Stocks Terminal E2E & Visual Contrast Regression', () => {
     await expect(modal).toHaveCount(0);
 
     // Reopen SymbolDetailModal on second stock row and verify 15m persisted across symbol switches
-    const secondStockRow = page.locator('main tbody tr').nth(1);
+    const secondStockRow = page.locator('main section:not([data-testid="idx-buy-scanner"]) tbody tr').nth(1);
     await secondStockRow.click();
     const reopenedModal = page.getByTestId('symbol-detail-modal');
     await expect(reopenedModal).toBeVisible();
@@ -1309,6 +1345,42 @@ test.describe('Stocks Terminal E2E & Visual Contrast Regression', () => {
       await expect(ffCalendar.getByTestId('calendar-actual-cell').first()).not.toContainText(/pending/i);
     }
 
+    expect(pageErrors).toEqual([]);
+  });
+
+  test('Header Refresh All button re-fetches assets, news, and calendar while keeping current view', async ({
+    page,
+  }) => {
+    const { consoleErrors, pageErrors } = attachErrorCollectors(page);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto('/#ict', { waitUntil: 'domcontentloaded' });
+    await expect(page.getByTestId('ict-radar-view')).toBeVisible({ timeout: 15_000 });
+
+    const refreshBtn = page.getByTestId('header-refresh-all-btn');
+    await expect(refreshBtn).toBeVisible();
+    await expect(refreshBtn).toContainText('Refresh All');
+
+    const seenEndpoints = new Set<string>();
+    const onRequest = (req: import('@playwright/test').Request) => {
+      const url = req.url();
+      if (url.includes('/api/market/quotes')) seenEndpoints.add('quotes');
+      if (url.includes('/api/news/feed')) seenEndpoints.add('news');
+      if (url.includes('/api/calendar/events')) seenEndpoints.add('calendar');
+    };
+    page.on('request', onRequest);
+
+    await refreshBtn.click();
+
+    await expect
+      .poll(() => seenEndpoints.has('quotes') && seenEndpoints.has('news') && seenEndpoints.has('calendar'), {
+        timeout: 10_000,
+      })
+      .toBe(true);
+
+    page.off('request', onRequest);
+    expect(new URL(page.url()).hash).toBe('#ict');
+    await expect(page.getByTestId('ict-radar-view')).toBeVisible();
+    expect(consoleErrors).toEqual([]);
     expect(pageErrors).toEqual([]);
   });
 });
