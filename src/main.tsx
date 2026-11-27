@@ -18,8 +18,14 @@ if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
   }
 }
 
-if (typeof window !== 'undefined') {
-  (window as unknown as { __STOCKS_MOUNTED__?: boolean }).__STOCKS_MOUNTED__ = true;
+const rootEl = document.getElementById('root');
+if (rootEl) {
+  try {
+    createRoot(rootEl).render(<App />);
+    if (typeof window !== 'undefined') {
+      (window as unknown as { __STOCKS_MOUNTED__?: boolean }).__STOCKS_MOUNTED__ = true;
+    }
+  } catch (err) {
+    console.error('[Stocks] Fatal mount error:', err);
+  }
 }
-
-createRoot(document.getElementById('root')!).render(<App />);

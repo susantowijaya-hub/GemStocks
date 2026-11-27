@@ -15,6 +15,9 @@ import { useLiveMarket } from './hooks/useLiveMarket';
 import { usePrefetch } from './hooks/usePrefetch';
 import { usePriceAlerts } from './hooks/usePriceAlerts';
 import { useRenderPerformance } from './hooks/useRenderPerformance';
+import { useSignalHistory } from './hooks/useSignalHistory';
+import { useSignalVerification } from './hooks/useSignalVerification';
+import { useSwipeNavigation } from './hooks/useSwipeNavigation';
 import { useTheme } from './hooks/useTheme';
 import {
   AppRoute,
@@ -48,8 +51,8 @@ const NewsFeedView = lazyWithRetry(() =>
 const EconomicCalendarView = lazyWithRetry(() =>
   import('./components/EconomicCalendarView').then((m) => ({ default: m.EconomicCalendarView }))
 );
-const MarketExtractShareView = lazyWithRetry(() =>
-  import('./components/MarketExtractShareView').then((m) => ({ default: m.MarketExtractShareView }))
+const SettingsModal = lazyWithRetry(() =>
+  import('./components/SettingsModal').then((m) => ({ default: m.SettingsModal }))
 );
 const NewsModal = lazyWithRetry(() =>
   import('./components/NewsModal').then((m) => ({ default: m.NewsModal }))
@@ -64,7 +67,7 @@ const PriceAlertToastStack = lazyWithRetry(() =>
   import('./components/PriceAlertOverlay').then((m) => ({ default: m.PriceAlertToastStack }))
 );
 
-const VALID_ROUTES: AppRoute[] = ['dashboard', 'watchlist', 'portfolio', 'stocks', 'heatmap', 'ict', 'news', 'calendar', 'extract'];
+const VALID_ROUTES: AppRoute[] = ['dashboard', 'watchlist', 'portfolio', 'stocks', 'heatmap', 'ict', 'news', 'calendar'];
 
 const ROUTE_SHORT_LABELS: Record<AppRoute, string> = {
   dashboard: 'Markets',
@@ -75,28 +78,7 @@ const ROUTE_SHORT_LABELS: Record<AppRoute, string> = {
   ict: 'ICT Radar',
   news: 'News',
   calendar: 'Calendar',
-  extract: 'Share',
 };
-
-function hasHorizontalScrollAncestor(el: EventTarget | null, boundary: HTMLElement | null): boolean {
-  let curr = el instanceof HTMLElement ? el : null;
-  while (curr && curr !== boundary) {
-    if (curr.dataset.noViewSwipe === 'true') return true;
-    const tag = curr.tagName;
-    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || tag === 'CANVAS') {
-      return true;
-    }
-    const style = window.getComputedStyle(curr);
-    if (
-      (style.overflowX === 'auto' || style.overflowX === 'scroll') &&
-      curr.scrollWidth > curr.clientWidth + 6
-    ) {
-      return true;
-    }
-    curr = curr.parentElement;
-  }
-  return false;
-}
 
 function getInitialRoute(): AppRoute {
   if (typeof window === 'undefined') return 'dashboard';
@@ -157,10 +139,10 @@ function StocksTerminalShell() {
     dailySummaryLoading,
     refreshDailySummary,
     marketIntelligence,
-    intelligenceLoading,
-    refreshMarketIntelligence,
     isPulseActive,
     wsConnected,
+    priorityStreamStatus,
+    prioritySources,
     feedsLive,
     flashMap,
     serverDiagnostics,
@@ -176,11 +158,6 @@ function StocksTerminalShell() {
   const [activeRoute, setActiveRoute] = useState<AppRoute>(getInitialRoute);
   const [priorityReady, setPriorityReady] = useState<boolean>(false);
   const [swipeSlideDir, setSwipeSlideDir] = useState<1 | -1 | 0>(0);
-  const [swipeHint, setSwipeHint] = useState<{
-    direction: 'prev' | 'next';
-    targetRoute: AppRoute;
-    progress: number;
-  } | null>(null);
   const [selectedAssetId, setSelectedAssetId] = useState<string>('SPX');
   const [syncedRadarConfig, setSyncedRadarConfig] = useState<SyncedRadarConfig>(
     getInitialSyncedRadarConfig
@@ -197,24 +174,9 @@ function StocksTerminalShell() {
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [isPercentMode, setIsPercentMode] = useState<boolean>(true);
   const [activeStory, setActiveStory] = useState<NewsStory | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState<boolean>(false);
   const [countdownSeconds, setCountdownSeconds] = useState<number>(3 * 3600 + 42 * 60 + 15);
   const lastRollRefreshRef = useRef<number>(0);
-  const mainSwipeRef = useRef<HTMLElement | null>(null);
-  const swipeSessionRef = useRef<{
-    active: boolean;
-    locked: 'horizontal' | 'vertical' | null;
-    startX: number;
-    startY: number;
-    startAt: number;
-    lastDx: number;
-  }>({
-    active: false,
-    locked: null,
-    startX: 0,
-    startY: 0,
-    startAt: 0,
-    lastDx: 0,
-  });
 
   // Priority Loading: mark dashboard interactive after first browser paint before warming non-critical views
   useEffect(() => {
@@ -253,6 +215,40 @@ function StocksTerminalShell() {
     scanIctAlerts,
     scanBandarmologyAlerts,
   } = usePriceAlerts(assets, idxMoversBucket, economicEvents, syncedRadarConfig);
+
+  const {
+    records: signalHistory,
+    activeBySymbol: activeSignalBySymbol,
+    stats: signalHistoryStats,
+    cloudSynced: signalCloudSynced,
+    annotateSignal,
+    applyVerificationPatch,
+    isRecordConfirmedOnServer,
+    tryAcquireSignalWriteLock,
+    releaseSignalWriteLock,
+    deleteSignal,
+    clearClosedSignals,
+  } = useSignalHistory(
+    assets,
+    idxMoversBucket,
+    usMoversBucket,
+    economicEvents,
+    syncedRadarConfig,
+    feedsLive
+  );
+
+  const signalVerificationMetrics = useSignalVerification({
+    records: signalHistory,
+    assets,
+    idxMoversBucket,
+    usMoversBucket,
+    feedsLive,
+    cloudSynced: signalCloudSynced,
+    isRecordConfirmedOnServer,
+    tryAcquireSignalWriteLock,
+    releaseSignalWriteLock,
+    applyVerificationPatch,
+  });
 
   // Sync browser hash navigation (Back/Forward on Desktop, Android, and iOS Safari)
   useEffect(() => {
@@ -340,87 +336,17 @@ function StocksTerminalShell() {
     }
   }, []);
 
-  const handleSwipeTouchStart = useCallback(
-    (e: React.TouchEvent<HTMLElement>) => {
-      if (activeStory || inspectedSymbol || e.touches.length !== 1) {
-        swipeSessionRef.current.active = false;
-        return;
-      }
-      if (hasHorizontalScrollAncestor(e.target, mainSwipeRef.current)) {
-        swipeSessionRef.current.active = false;
-        return;
-      }
-      const touch = e.touches[0];
-      swipeSessionRef.current = {
-        active: true,
-        locked: null,
-        startX: touch.clientX,
-        startY: touch.clientY,
-        startAt: Date.now(),
-        lastDx: 0,
-      };
-    },
-    [activeStory, inspectedSymbol]
-  );
-
-  const handleSwipeTouchMove = useCallback(
-    (e: React.TouchEvent<HTMLElement>) => {
-      const sess = swipeSessionRef.current;
-      if (!sess.active || e.touches.length !== 1) return;
-      const touch = e.touches[0];
-      const dx = touch.clientX - sess.startX;
-      const dy = touch.clientY - sess.startY;
-      sess.lastDx = dx;
-
-      if (sess.locked === null) {
-        if (Math.abs(dx) < 14 && Math.abs(dy) < 14) return;
-        if (Math.abs(dx) > Math.abs(dy) * 1.45) {
-          sess.locked = 'horizontal';
-        } else {
-          sess.locked = 'vertical';
-          sess.active = false;
-          setSwipeHint(null);
-          return;
-        }
-      }
-
-      if (sess.locked === 'horizontal') {
-        const curIdx = VALID_ROUTES.indexOf(activeRoute);
-        const targetIdx = dx < 0 ? curIdx + 1 : curIdx - 1;
-        if (targetIdx < 0 || targetIdx >= VALID_ROUTES.length || Math.abs(dx) < 20) {
-          setSwipeHint(null);
-          return;
-        }
-        setSwipeHint({
-          direction: dx < 0 ? 'next' : 'prev',
-          targetRoute: VALID_ROUTES[targetIdx],
-          progress: Math.min(1, Math.abs(dx) / 72),
-        });
-      }
-    },
-    [activeRoute]
-  );
-
-  const handleSwipeTouchEnd = useCallback(() => {
-    const sess = swipeSessionRef.current;
-    setSwipeHint(null);
-    if (!sess.active || sess.locked !== 'horizontal') {
-      sess.active = false;
-      return;
-    }
-    sess.active = false;
-    const dx = sess.lastDx;
-    const elapsed = Date.now() - sess.startAt;
-    const absDx = Math.abs(dx);
-    const shouldSwitch = absDx >= 68 || (absDx >= 42 && elapsed < 260);
-    if (!shouldSwitch) return;
-
-    const curIdx = VALID_ROUTES.indexOf(activeRoute);
-    const nextIdx = dx < 0 ? curIdx + 1 : curIdx - 1;
-    if (nextIdx >= 0 && nextIdx < VALID_ROUTES.length) {
-      handleNavigate(VALID_ROUTES[nextIdx], dx < 0 ? 1 : -1);
-    }
-  }, [activeRoute, handleNavigate]);
+  const {
+    containerRef: mainSwipeRef,
+    swipeHint,
+    dragOffsetPx,
+    bindSwipeHandlers,
+  } = useSwipeNavigation({
+    routes: VALID_ROUTES,
+    activeRoute,
+    disabled: Boolean(activeStory || inspectedSymbol || settingsOpen),
+    onNavigate: handleNavigate,
+  });
 
   const handleToggleBadgeMode = useCallback(() => {
     setIsPercentMode((prev) => !prev);
@@ -453,8 +379,7 @@ function StocksTerminalShell() {
         searchQuery={searchQuery}
         onSearchChange={setSearchQuery}
         themeMode={themeMode}
-        onToggleTheme={toggleTheme}
-        onSelectTheme={setThemeMode}
+        onOpenSettings={() => setSettingsOpen(true)}
         isPulseActive={isPulseActive}
         wsConnected={wsConnected || feedsLive}
         onTogglePulse={togglePulse}
@@ -463,8 +388,6 @@ function StocksTerminalShell() {
         assets={assets}
         usMovers={usMovers}
         idxMovers={idxMovers}
-        marketIntelligence={marketIntelligence}
-        economicEvents={economicEvents}
         onSelectAsset={setSelectedAssetId}
         onInspectSymbol={handleInspectSymbol}
         serverDiagnostics={serverDiagnostics}
@@ -477,23 +400,23 @@ function StocksTerminalShell() {
 
       <main
         ref={mainSwipeRef}
-        onTouchStart={handleSwipeTouchStart}
-        onTouchMove={handleSwipeTouchMove}
-        onTouchEnd={handleSwipeTouchEnd}
-        onTouchCancel={handleSwipeTouchEnd}
-        className="flex-1 flex flex-col relative"
+        {...bindSwipeHandlers}
+        className="flex-1 flex flex-col relative pb-[72px] lg:pb-0 touch-pan-y"
       >
-        {/* Tactile Edge Swipe Indicator on Mobile */}
+        {/* Tactile Edge Swipe Indicator on Touch Devices */}
         {swipeHint && (
           <div
             aria-hidden="true"
+            data-testid="swipe-nav-hint"
             style={{
-              opacity: Math.max(0.25, swipeHint.progress),
+              opacity: Math.max(0.3, swipeHint.progress),
               transform: `translateY(-50%) scale(${0.92 + swipeHint.progress * 0.08})`,
             }}
-            className={`fixed top-1/2 z-50 pointer-events-none px-3 py-2 rounded-full liquid-glass-strong shadow-lg flex items-center gap-1.5 text-xs font-bold text-[#1C1C1E] dark:text-white transition-transform duration-75 ${
-              swipeHint.direction === 'next' ? 'right-3' : 'left-3'
-            }`}
+            className={`fixed top-1/2 z-50 pointer-events-none px-3 py-2 rounded-full liquid-glass-strong shadow-lg flex items-center gap-1.5 text-xs font-bold transition-all duration-75 border ${
+              swipeHint.readyToCommit
+                ? 'border-[#1D4ED8] dark:border-[#38BDF8] text-[#1D4ED8] dark:text-[#38BDF8]'
+                : 'border-black/10 dark:border-white/15 text-[#1C1C1E] dark:text-white'
+            } ${swipeHint.direction === 'next' ? 'right-3' : 'left-3'}`}
           >
             {swipeHint.direction === 'prev' && <ChevronLeft className="w-4 h-4" />}
             <span>{ROUTE_SHORT_LABELS[swipeHint.targetRoute]}</span>
@@ -503,7 +426,18 @@ function StocksTerminalShell() {
 
         <div
           key={activeRoute}
-          className={`flex-1 flex flex-col ${swipeSlideDir !== 0 ? 'animate-route-enter' : ''}`}
+          style={
+            dragOffsetPx !== 0
+              ? { transform: `translate3d(${dragOffsetPx}px, 0, 0)`, willChange: 'transform' }
+              : undefined
+          }
+          className={`flex-1 flex flex-col transition-transform duration-150 ease-out ${
+            swipeSlideDir === 1
+              ? 'animate-route-enter-next'
+              : swipeSlideDir === -1
+                ? 'animate-route-enter-prev'
+                : ''
+          }`}
         >
         <Suspense fallback={<MarketSkeleton variant="route" label="Loading terminal view..." />}>
         {activeRoute === 'dashboard' && (
@@ -518,9 +452,6 @@ function StocksTerminalShell() {
             themeMode={themeMode}
             newsStories={newsStories}
             onOpenStory={setActiveStory}
-            marketIntelligence={marketIntelligence}
-            intelligenceLoading={intelligenceLoading}
-            onRefreshIntelligence={refreshMarketIntelligence}
             alerts={alerts}
             unreadAlertCount={unreadCount}
             volatility5mMap={volatility5mMap}
@@ -553,6 +484,7 @@ function StocksTerminalShell() {
           <PortfolioView
             assets={assets}
             fxRates={fxRates}
+            signalHistory={signalHistory}
             searchQuery={searchQuery}
             themeMode={themeMode}
             onInspectSymbol={(sym) => handleInspectSymbol(sym)}
@@ -561,6 +493,7 @@ function StocksTerminalShell() {
 
         {activeRoute === 'stocks' && (
           <TopStocksView
+            assets={assets}
             usBucket={usMoversBucket}
             idxBucket={idxMoversBucket}
             stocksUpdatedAt={stocksUpdatedAt}
@@ -568,6 +501,15 @@ function StocksTerminalShell() {
             marketIntelligence={marketIntelligence}
             searchQuery={searchQuery}
             alerts={alerts}
+            signalHistory={signalHistory}
+            activeSignalBySymbol={activeSignalBySymbol}
+            signalStats={signalHistoryStats}
+            signalCloudSynced={signalCloudSynced}
+            verificationMetrics={signalVerificationMetrics}
+            onAnnotateSignal={annotateSignal}
+            onDeleteSignal={deleteSignal}
+            onClearClosedSignals={clearClosedSignals}
+            onInspectSignal={handleInspectSymbol}
             onRefresh={refreshStocks}
             onScanBandar={scanBandarmologyAlerts}
             onInspectSymbol={(sym) => handleInspectSymbol(sym)}
@@ -603,6 +545,16 @@ function StocksTerminalShell() {
             onMarkAlertRead={markRead}
             onUpdateAlertOutcome={updateAlertOutcome}
             onSyncRadarConfig={setSyncedRadarConfig}
+            signalHistory={signalHistory}
+            signalStats={signalHistoryStats}
+            signalCloudSynced={signalCloudSynced}
+            verificationMetrics={signalVerificationMetrics}
+            onAnnotateSignal={annotateSignal}
+            onDeleteSignal={deleteSignal}
+            onClearClosedSignals={clearClosedSignals}
+            onInspectSignal={handleInspectSymbol}
+            priorityStreamStatus={priorityStreamStatus}
+            prioritySources={prioritySources}
             jumpTarget={radarJumpTarget}
             flashMap={flashMap}
             volatility5mMap={volatility5mMap}
@@ -638,17 +590,6 @@ function StocksTerminalShell() {
             onRefreshCalendar={() => refreshCalendar(true)}
           />
         )}
-
-        {activeRoute === 'extract' && (
-          <MarketExtractShareView
-            assets={assets}
-            marketIntelligence={marketIntelligence}
-            usBucket={usMoversBucket}
-            idxBucket={idxMoversBucket}
-            feedsLive={feedsLive}
-            onRefreshIntelligence={refreshMarketIntelligence}
-          />
-        )}
         </Suspense>
         </div>
       </main>
@@ -658,8 +599,24 @@ function StocksTerminalShell() {
         onNavigate={handleNavigate}
         themeMode={themeMode}
         onToggleTheme={toggleTheme}
+        onSelectTheme={setThemeMode}
+        onOpenSettings={() => setSettingsOpen(true)}
         onPrefetchRoute={prefetchRoute}
       />
+
+      {settingsOpen && (
+        <Suspense fallback={null}>
+          <SettingsModal
+            open={settingsOpen}
+            onClose={() => setSettingsOpen(false)}
+            themeMode={themeMode}
+            onSelectTheme={setThemeMode}
+            isPulseActive={isPulseActive}
+            onTogglePulse={togglePulse}
+            onRefreshAll={refreshAll}
+          />
+        </Suspense>
+      )}
 
       {priorityReady && (
         <Suspense fallback={null}>

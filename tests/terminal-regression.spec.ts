@@ -506,17 +506,22 @@ test.describe('Stocks Terminal E2E & Visual Contrast Regression', () => {
       expect(backdropStyle.position).toBe('fixed');
       expect(backdropStyle.opacity).toBeGreaterThan(0);
 
-      const dockTrigger = page.getByTestId('bottom-dock-trigger');
-      await expect(dockTrigger).toBeVisible();
-      await expect(page.getByTestId('bottom-dock-bar')).toHaveCount(0);
-      await dockTrigger.click();
-      const dockBar = page.getByTestId('bottom-dock-bar');
-      await expect(dockBar).toBeVisible();
-      await dockBar.locator('[data-route-id="portfolio"]').click();
+      const mobileBottomNav = page.getByTestId('mobile-bottom-nav');
+      await expect(mobileBottomNav).toBeVisible();
+      await mobileBottomNav.getByTestId('mobile-nav-portfolio').click();
       await expect
         .poll(() => new URL(page.url()).hash)
         .toBe('#portfolio');
-      await expect(dockTrigger).toBeVisible({ timeout: 3000 });
+
+      const moreTrigger = mobileBottomNav.getByTestId('mobile-more-trigger');
+      await moreTrigger.click();
+      const moreSheet = page.getByTestId('mobile-more-sheet');
+      await expect(moreSheet).toBeVisible();
+      await moreSheet.getByTestId('mobile-more-watchlist').click();
+      await expect
+        .poll(() => new URL(page.url()).hash)
+        .toBe('#watchlist');
+      await expect(moreSheet).toHaveCount(0);
 
       expect(consoleErrors).toEqual([]);
       expect(pageErrors).toEqual([]);

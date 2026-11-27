@@ -23,22 +23,36 @@ import {
 import {
   AppRoute,
   BandarmologyPhase,
+  ChartTradeOverlays,
+  MarketAsset,
   MarketIntelligenceResponse,
   PriceAlertItem,
+  SignalHistoryRecord,
+  SignalUserOutcome,
   StockExecutionAction,
   StockMover,
   StocksMoversBucket,
   StockTradePlan,
+  Timeframe,
 } from '../types/market';
 import { getAllMarketSessions, MarketSessionStatus } from '../utils/marketSessions';
 import {
   buildIdxBuyScannerList,
+  computeCrossSectionalStockContext,
+  computeStockDeskSurvival,
   computeStockTradeStrategy,
+  extractStockMacroContext,
   formatStockCurrencyValue,
   getStockFearGreed,
   getStockSignal,
   IdxScannerCandidate,
+  StockCrossSectionalContext,
+  StockMacroRegimeContext,
 } from '../utils/marketSignals';
+import {
+  computeStockConfluenceExpectancyMatrix,
+  SignalHistoryStats,
+} from '../utils/signalHistoryEngine';
 import { GoogleFinanceDeltaPill, GoogleFinanceMiniChart } from './GoogleFinanceMiniChart';
 import {
   BandarmologyBadge,
@@ -46,8 +60,11 @@ import {
   FearGreedTrendSparkline,
   getFearGreedTextTone,
 } from './MarketUiPrimitives';
+import { SignalVerificationMetrics } from '../hooks/useSignalVerification';
+import { SignalHistoryPanel } from './SignalHistoryPanel';
 
 interface TopStocksViewProps {
+  assets?: MarketAsset[];
   usBucket: StocksMoversBucket;
   idxBucket: StocksMoversBucket;
   stocksUpdatedAt: string | null;
@@ -55,6 +72,24 @@ interface TopStocksViewProps {
   marketIntelligence?: MarketIntelligenceResponse | null;
   searchQuery: string;
   alerts?: PriceAlertItem[];
+  signalHistory?: SignalHistoryRecord[];
+  activeSignalBySymbol?: Map<string, SignalHistoryRecord>;
+  signalStats?: SignalHistoryStats;
+  signalCloudSynced?: boolean;
+  verificationMetrics?: SignalVerificationMetrics;
+  onAnnotateSignal?: (
+    signalId: string,
+    outcome: SignalUserOutcome | null,
+    journalNote?: string
+  ) => void;
+  onDeleteSignal?: (id: string) => void;
+  onClearClosedSignals?: () => void;
+  onInspectSignal?: (
+    yahooSymbol: string,
+    builtInAssetId?: string,
+    overlays?: ChartTradeOverlays | null,
+    initialTf?: Timeframe
+  ) => void;
   onRefresh: () => void;
   onScanBandar?: () => void;
   onInspectSymbol?: (yahooSymbol: string) => void;
@@ -345,38 +380,57 @@ function IdxBuyScannerSection({
                         </div>
                       </td>
                       <td className="py-2.5 px-3">
-                        <span
-                          className={`inline-flex items-center px-2 py-0.5 rounded-md border text-[10px] font-extrabold font-mono whitespace-nowrap ${verdictCls}`}
-                        >
-                          {verdictLabel}
-                        </span>
-                        <div className="text-[10px] font-mono text-[#6C6C70] dark:text-[#9EB5C8] mt-0.5 whitespace-nowrap">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span
+                            className={`inline-flex items-center px-2 py-0.5 rounded-md border text-[10px] font-extrabold font-mono whitespace-nowrap ${verdictCls}`}
+                          >
+                            {verdictLabel}
+                          </span>
+                          {plan.setupGrade && plan.setupGrade !== 'WATCH' && (
+                            <span
+                              className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9.5px] font-mono font-black ${
+                                plan.setupGrade === 'A+'
+                                  ? 'bg-[#16A34A] text-white'
+                                  : plan.setupGrade === 'A'
+                                    ? 'bg-[#0066CC] text-white'
+                                    : 'bg-black/10 dark:bg-white/15 text-[#1C1C1E] dark:text-white'
+                              }`}
+                            >
+                              {plan.setupGrade}
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-[10px] font-mono tabular-nums text-[#6C6C70] dark:text-[#9EB5C8] mt-0.5 whitespace-nowrap">
                           R:R {plan.riskReward} · Conv {plan.conviction}%
+                          {typeof plan.gatesPassed === 'number'
+                            ? ` · ${plan.gatesPassed}/${plan.gatesTotal ?? 7} Gates`
+                            : ''}
+                          {plan.stage ? ` · ${plan.stage}` : ''}
+                          {typeof plan.rsRank === 'number' ? ` · RS ${plan.rsRank}` : ''}
                         </div>
                       </td>
                       <td className="py-2.5 px-3">
                         <div className="flex flex-col items-start gap-0.5">
                           <BandarmologyBadge bandarmology={stock.bandarmology} compact />
-                          <span className="text-[10px] font-mono text-[#6C6C70] dark:text-[#9EB5C8] whitespace-nowrap">
+                          <span className="text-[10px] font-mono tabular-nums text-[#6C6C70] dark:text-[#9EB5C8] whitespace-nowrap">
                             {stock.foreignNetLabel
                               ? `Foreign ${stock.foreignFlowSide ?? ''}: ${stock.foreignNetLabel}`
                               : plan.trendFilterLabel ?? plan.bandarFlowBias}
+                            {typeof plan.accPersistence5d === 'number' ? ` · ${plan.accPersistence5d}/5d Acc` : ''}
                           </span>
                         </div>
                       </td>
-                      <td className="py-2.5 px-3 max-w-[250px]">
-                        <div className="flex flex-wrap gap-1">
-                          {(plan.buyReasons ?? []).slice(0, 3).map((reason) => (
-                            <span
-                              key={reason}
-                              className="px-1.5 py-0.5 rounded bg-black/[0.045] dark:bg-white/[0.07] text-[10px] font-semibold text-[#1C1C1E] dark:text-[#E5E5EA] whitespace-nowrap"
-                            >
-                              {reason}
-                            </span>
-                          ))}
+                      <td className="py-2.5 px-3 max-w-[260px]">
+                        <div className="text-[10.5px] font-semibold text-[#1C1C1E] dark:text-[#E5E5EA] leading-snug">
+                          {(plan.buyReasons ?? []).slice(0, 3).join(' · ')}
+                        </div>
+                        <div className="text-[10px] font-mono tabular-nums text-[#6C6C70] dark:text-[#9EB5C8] mt-0.5 truncate">
+                          {plan.vcpSummary ? `${plan.vcpSummary}` : plan.sector ? `${plan.sector}${plan.isTopSector ? ' (Top-3)' : ''}` : ''}
+                          {plan.adtvLabel && plan.adtvLabel !== 'N/A' ? ` · ADTV ${plan.adtvLabel}` : ''}
+                          {plan.atr14Pct ? ` · ATR ${plan.atr14Pct}%` : ''}
                         </div>
                         {plan.cautionNote && (
-                          <div className="text-[10px] font-semibold text-[#9A5A0A] dark:text-[#FBBF24] mt-1 truncate">
+                          <div className="text-[10px] font-semibold text-[#9A5A0A] dark:text-[#FBBF24] mt-0.5 truncate">
                             {plan.cautionNote}
                           </div>
                         )}
@@ -393,6 +447,11 @@ function IdxBuyScannerSection({
                             SL {formatStockCurrencyValue(plan.stopLoss, 'IDR')}
                           </span>
                         </div>
+                        {plan.ema10Num && (
+                          <div className="text-[9.5px] text-[#6C6C70] dark:text-[#9EB5C8] mt-0.5 whitespace-nowrap">
+                            Runner Trail: 10D EMA {formatStockCurrencyValue(plan.ema10Num, 'IDR')}
+                          </div>
+                        )}
                       </td>
                       <td className="py-2.5 pl-3 pr-5 text-right font-mono tabular-nums">
                         <div className="font-bold text-sm text-[#1C1C1E] dark:text-white">
@@ -449,16 +508,19 @@ function IdxBuyScannerSection({
                     </div>
                   </div>
 
-                  <div className="flex flex-wrap items-center gap-1.5">
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[10.5px] font-mono tabular-nums text-[#4A4D57] dark:text-[#C7CBD6]">
                     <BandarmologyBadge bandarmology={stock.bandarmology} compact />
-                    {(plan.buyReasons ?? []).slice(0, 2).map((r) => (
-                      <span
-                        key={r}
-                        className="px-1.5 py-0.5 rounded bg-black/[0.045] dark:bg-white/[0.07] text-[10px] font-semibold text-[#1C1C1E] dark:text-[#E5E5EA]"
-                      >
-                        {r}
-                      </span>
-                    ))}
+                    <span>
+                      {[
+                        plan.stage,
+                        typeof plan.rsRank === 'number' ? `RS ${plan.rsRank}` : null,
+                        plan.vcpDetected ? 'VCP' : null,
+                        plan.episodicPivot ? 'EP' : null,
+                        typeof plan.accPersistence5d === 'number' ? `${plan.accPersistence5d}/5d Acc` : null,
+                      ]
+                        .filter(Boolean)
+                        .join(' · ')}
+                    </span>
                   </div>
 
                   {plan.cautionNote && (
@@ -578,6 +640,9 @@ function MarketMoversSection({
   foreignSide,
   loading = false,
   searchQuery = '',
+  activeSignalBySymbol,
+  macroCtx,
+  crossCtx,
   onRefresh,
   onClearSearch,
   onInspectSymbol,
@@ -590,6 +655,9 @@ function MarketMoversSection({
   foreignSide?: 'BUY' | 'SELL';
   loading?: boolean;
   searchQuery?: string;
+  activeSignalBySymbol?: Map<string, SignalHistoryRecord>;
+  macroCtx?: StockMacroRegimeContext;
+  crossCtx?: StockCrossSectionalContext;
   onRefresh?: () => void;
   onClearSearch?: () => void;
   onInspectSymbol?: (yahooSymbol: string) => void;
@@ -687,7 +755,7 @@ function MarketMoversSection({
                   const isGain = stock.changePercent >= 0;
                   const isForeignBuy = (stock.foreignNetAmount ?? 0) >= 0;
                   const fearGreed = getStockFearGreed(stock);
-                  const plan = computeStockTradeStrategy(stock);
+                  const plan = computeStockTradeStrategy(stock, macroCtx, crossCtx);
                   const badgeCls = getActionBadgeClasses(plan.action);
 
                   return (
@@ -738,11 +806,37 @@ function MarketMoversSection({
                             >
                               {plan.action} · {plan.conviction}%
                             </span>
+                            {(() => {
+                              const tracked =
+                                activeSignalBySymbol?.get(stock.symbol) ??
+                                activeSignalBySymbol?.get(`${stock.symbol}.JK`);
+                              if (!tracked) return null;
+                              const isRunning =
+                                tracked.status === 'RUNNING' || tracked.status === 'TP1_HIT';
+                              return (
+                                <span
+                                  className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-[10px] font-mono font-bold tabular-nums whitespace-nowrap ${
+                                    tracked.status === 'TP1_HIT'
+                                      ? 'bg-emerald-500/15 text-emerald-800 dark:text-emerald-300 border-emerald-500/35'
+                                      : isRunning
+                                        ? 'bg-sky-500/15 text-sky-800 dark:text-sky-300 border-sky-500/35'
+                                        : 'bg-amber-500/15 text-amber-800 dark:text-amber-300 border-amber-500/35'
+                                  }`}
+                                  title={`Locked signal continuity (${tracked.status})`}
+                                >
+                                  {tracked.status === 'TP1_HIT'
+                                    ? 'TP1 HIT'
+                                    : isRunning
+                                      ? `RUNNING ${tracked.pnlPct >= 0 ? '+' : ''}${tracked.pnlPct.toFixed(1)}%`
+                                      : 'LIMIT ARMED'}
+                                </span>
+                              );
+                            })()}
                             <span className="text-[10px] font-mono font-bold text-[#4A4D57] dark:text-[#C7CBD6] whitespace-nowrap">
                               R:R {plan.riskReward}
                             </span>
                           </div>
-                          <div className="text-[10.5px] font-mono tabular-nums flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                          <div className="text-[11px] font-mono tabular-nums flex flex-wrap items-center gap-x-2 gap-y-0.5">
                             <span className="font-bold text-[#1C1C1E] dark:text-white">
                               {plan.action === 'WAIT' ? 'Wait' : 'Entry'} {formatStockCurrencyValue(plan.entryPrice, stock.currency)}
                             </span>
@@ -753,9 +847,22 @@ function MarketMoversSection({
                               SL {formatStockCurrencyValue(plan.stopLoss, stock.currency)}
                             </span>
                           </div>
-                          <span className="text-[10px] text-[#6C6C70] dark:text-[#9EB5C8] truncate max-w-[235px]">
-                            {plan.strategyTag}
+                          <span className="text-[10px] font-mono tabular-nums text-[#6C6C70] dark:text-[#9EB5C8] truncate max-w-[260px]">
+                            {[
+                              plan.stage,
+                              typeof plan.rsRank === 'number' ? `RS ${plan.rsRank}` : null,
+                              plan.vcpDetected ? `VCP ${plan.vcpContractionPct ?? ''}%` : null,
+                              plan.episodicPivot ? 'EP Catalyst' : null,
+                              plan.sector ? `${plan.sector}${plan.isTopSector ? ' ★' : ''}` : null,
+                            ]
+                              .filter(Boolean)
+                              .join(' · ') || plan.strategyTag}
                           </span>
+                          {plan.ema10Num && (
+                            <span className="text-[9.5px] font-mono tabular-nums text-[#6C6C70] dark:text-[#8E8E93] truncate max-w-[260px]">
+                              Runner Trail &lt; 10D EMA {formatStockCurrencyValue(plan.ema10Num, stock.currency)} · ATR {plan.atrPct ?? 0}%
+                            </span>
+                          )}
                         </div>
                       </td>
                       <td className="py-3 px-3">
@@ -791,7 +898,7 @@ function MarketMoversSection({
                           </span>
                         </td>
                       )}
-                      <td className="py-3 px-3 text-right font-mono font-bold text-sm text-[#1C1C1E] dark:text-white tabular-nums">
+                      <td className="py-3 px-3 text-right num-table font-bold text-[#1C1C1E] dark:text-white">
                         {formatStockPrice(stock)}
                       </td>
                       <td
@@ -827,7 +934,7 @@ function MarketMoversSection({
               const isGain = stock.changePercent >= 0;
               const isForeignBuy = (stock.foreignNetAmount ?? 0) >= 0;
               const fearGreed = getStockFearGreed(stock);
-              const plan = computeStockTradeStrategy(stock);
+              const plan = computeStockTradeStrategy(stock, macroCtx, crossCtx);
               const badgeCls = getActionBadgeClasses(plan.action);
 
               return (
@@ -912,7 +1019,7 @@ function MarketMoversSection({
                     </div>
 
                     <div className="text-right shrink-0">
-                      <div className="text-sm font-bold font-mono text-[#1C1C1E] dark:text-white tabular-nums">
+                      <div className="num-table font-bold text-[#1C1C1E] dark:text-white">
                         {formatStockPrice(stock)}
                       </div>
                       <div className="mt-0.5 flex justify-end">
@@ -922,30 +1029,43 @@ function MarketMoversSection({
                   </div>
 
                   {/* Mobile Execution Plan Strip */}
-                  <div className="rounded-xl liquid-glass-inset px-3 py-2 grid grid-cols-3 gap-2 text-[10.5px] font-mono tabular-nums">
-                    <div>
-                      <span className="text-[#6C6C70] dark:text-[#9EB5C8] block text-[9.5px] font-sans uppercase">
-                        {plan.action === 'WAIT' ? 'Trigger Entry' : `${plan.action} Entry`}
-                      </span>
-                      <span className="font-bold text-[#1C1C1E] dark:text-white">
-                        {formatStockCurrencyValue(plan.entryPrice, stock.currency)}
-                      </span>
+                  <div className="rounded-xl liquid-glass-inset px-3 py-2 flex flex-col gap-1.5 text-[10.5px] font-mono tabular-nums">
+                    <div className="grid grid-cols-3 gap-2">
+                      <div>
+                        <span className="text-[#6C6C70] dark:text-[#9EB5C8] block text-[9.5px] font-sans uppercase">
+                          {plan.action === 'WAIT' ? 'Trigger Entry' : `${plan.action} Entry`}
+                        </span>
+                        <span className="font-bold text-[#1C1C1E] dark:text-white">
+                          {formatStockCurrencyValue(plan.entryPrice, stock.currency)}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-[#6C6C70] dark:text-[#9EB5C8] block text-[9.5px] font-sans uppercase">
+                          TP1 / TP2
+                        </span>
+                        <span className="font-bold text-[#0F7033] dark:text-[#4ADE80]">
+                          {formatStockCurrencyValue(plan.takeProfit1, stock.currency)}
+                        </span>
+                      </div>
+                      <div className="text-right">
+                        <span className="text-[#6C6C70] dark:text-[#9EB5C8] block text-[9.5px] font-sans uppercase">
+                          SL · {plan.riskReward}
+                        </span>
+                        <span className="font-bold text-[#C41C16] dark:text-[#FF6B63]">
+                          {formatStockCurrencyValue(plan.stopLoss, stock.currency)}
+                        </span>
+                      </div>
                     </div>
-                    <div>
-                      <span className="text-[#6C6C70] dark:text-[#9EB5C8] block text-[9.5px] font-sans uppercase">
-                        TP1 / TP2
-                      </span>
-                      <span className="font-bold text-[#0F7033] dark:text-[#4ADE80]">
-                        {formatStockCurrencyValue(plan.takeProfit1, stock.currency)}
-                      </span>
-                    </div>
-                    <div className="text-right">
-                      <span className="text-[#6C6C70] dark:text-[#9EB5C8] block text-[9.5px] font-sans uppercase">
-                        SL · {plan.riskReward}
-                      </span>
-                      <span className="font-bold text-[#C41C16] dark:text-[#FF6B63]">
-                        {formatStockCurrencyValue(plan.stopLoss, stock.currency)}
-                      </span>
+                    <div className="text-[9.5px] text-[#6C6C70] dark:text-[#9EB5C8] border-t border-black/5 dark:border-white/8 pt-1 truncate">
+                      {[
+                        plan.stage ? `${plan.stage} (${plan.minerviniPassedCount ?? 0}/8)` : null,
+                        typeof plan.rsRank === 'number' ? `RS ${plan.rsRank}` : null,
+                        plan.vcpDetected ? 'VCP' : null,
+                        plan.episodicPivot ? 'EP' : null,
+                        plan.ema10Num ? `10D EMA ${formatStockCurrencyValue(plan.ema10Num, stock.currency)}` : null,
+                      ]
+                        .filter(Boolean)
+                        .join(' · ')}
                     </div>
                   </div>
                 </div>
@@ -959,6 +1079,7 @@ function MarketMoversSection({
 }
 
 export const TopStocksView: React.FC<TopStocksViewProps> = ({
+  assets = [],
   usBucket,
   idxBucket,
   stocksUpdatedAt,
@@ -966,6 +1087,15 @@ export const TopStocksView: React.FC<TopStocksViewProps> = ({
   marketIntelligence = null,
   searchQuery,
   alerts = [],
+  signalHistory = [],
+  activeSignalBySymbol,
+  signalStats,
+  signalCloudSynced = false,
+  verificationMetrics,
+  onAnnotateSignal,
+  onDeleteSignal,
+  onClearClosedSignals,
+  onInspectSignal,
   onRefresh,
   onScanBandar,
   onInspectSymbol,
@@ -998,7 +1128,36 @@ export const TopStocksView: React.FC<TopStocksViewProps> = ({
     }
   }, [marketFilter, directionFilter]);
 
-  const filterSearchAndSetup = (list: StockMover[]) => {
+  // Phase 1-3 Institutional Macro & Cross-Sectional Relative Strength Context
+  const macroCtx = useMemo(() => extractStockMacroContext(assets), [assets]);
+
+  const usCrossCtx = useMemo(
+    () =>
+      computeCrossSectionalStockContext(
+        [...usBucket.impact, ...usBucket.gainers, ...usBucket.losers],
+        'US',
+        macroCtx.spxChgPct
+      ),
+    [usBucket, macroCtx.spxChgPct]
+  );
+
+  const idxCrossCtx = useMemo(
+    () =>
+      computeCrossSectionalStockContext(
+        [
+          ...idxBucket.impact,
+          ...idxBucket.gainers,
+          ...idxBucket.losers,
+          ...(idxBucket.foreignBuy ?? []),
+          ...(idxBucket.foreignSell ?? []),
+        ],
+        'ID',
+        macroCtx.ihsgChgPct
+      ),
+    [idxBucket, macroCtx.ihsgChgPct]
+  );
+
+  const filterSearchAndSetup = (list: StockMover[], crossCtx: StockCrossSectionalContext) => {
     const q = searchQuery.toLowerCase().trim();
     const base = !q
       ? list.slice(0, 10)
@@ -1013,7 +1172,7 @@ export const TopStocksView: React.FC<TopStocksViewProps> = ({
         ? base
         : base.filter((s) => (s.bandarmology?.phase ?? 'Neutral') === bandarFilter);
     if (actionFilter === 'all') return byBandar;
-    return byBandar.filter((s) => computeStockTradeStrategy(s).action === actionFilter);
+    return byBandar.filter((s) => computeStockTradeStrategy(s, macroCtx, crossCtx).action === actionFilter);
   };
 
   const activeUsList = useMemo(() => {
@@ -1023,8 +1182,8 @@ export const TopStocksView: React.FC<TopStocksViewProps> = ({
         : directionFilter === 'losers'
           ? usBucket.losers
           : usBucket.impact;
-    return filterSearchAndSetup(raw);
-  }, [usBucket, directionFilter, searchQuery, bandarFilter, actionFilter]);
+    return filterSearchAndSetup(raw, usCrossCtx);
+  }, [usBucket, directionFilter, searchQuery, bandarFilter, actionFilter, macroCtx, usCrossCtx]);
 
   const activeIdxList = useMemo(() => {
     const raw =
@@ -1037,8 +1196,8 @@ export const TopStocksView: React.FC<TopStocksViewProps> = ({
             : directionFilter === 'foreignSell'
               ? idxBucket.foreignSell ?? []
               : idxBucket.impact;
-    return filterSearchAndSetup(raw);
-  }, [idxBucket, directionFilter, searchQuery, bandarFilter, actionFilter]);
+    return filterSearchAndSetup(raw, idxCrossCtx);
+  }, [idxBucket, directionFilter, searchQuery, bandarFilter, actionFilter, macroCtx, idxCrossCtx]);
 
   const combinedSignalTally = useMemo(() => {
     let bull = 0;
@@ -1046,17 +1205,26 @@ export const TopStocksView: React.FC<TopStocksViewProps> = ({
     let buy = 0;
     let sell = 0;
     let wait = 0;
-    for (const s of [...activeUsList, ...activeIdxList]) {
+    for (const s of activeUsList) {
       const sig = getStockSignal(s);
       if (sig.direction === 'bull') bull += 1;
       else if (sig.direction === 'bear') bear += 1;
-      const plan = computeStockTradeStrategy(s);
+      const plan = computeStockTradeStrategy(s, macroCtx, usCrossCtx);
+      if (plan.action === 'BUY') buy += 1;
+      else if (plan.action === 'SELL') sell += 1;
+      else wait += 1;
+    }
+    for (const s of activeIdxList) {
+      const sig = getStockSignal(s);
+      if (sig.direction === 'bull') bull += 1;
+      else if (sig.direction === 'bear') bear += 1;
+      const plan = computeStockTradeStrategy(s, macroCtx, idxCrossCtx);
       if (plan.action === 'BUY') buy += 1;
       else if (plan.action === 'SELL') sell += 1;
       else wait += 1;
     }
     return { bull, bear, buy, sell, wait };
-  }, [activeUsList, activeIdxList]);
+  }, [activeUsList, activeIdxList, macroCtx, usCrossCtx, idxCrossCtx]);
 
   const idxBandarSummary = useMemo(() => {
     let acc = 0;
@@ -1070,8 +1238,18 @@ export const TopStocksView: React.FC<TopStocksViewProps> = ({
   }, [idxBucket.impact]);
 
   const idxScannerCandidates = useMemo(
-    () => buildIdxBuyScannerList(idxBucket),
-    [idxBucket]
+    () => buildIdxBuyScannerList(idxBucket, macroCtx, idxCrossCtx),
+    [idxBucket, macroCtx, idxCrossCtx]
+  );
+
+  const survivalStatus = useMemo(
+    () => computeStockDeskSurvival(assets, idxBucket, usBucket, signalHistory),
+    [assets, idxBucket, usBucket, signalHistory]
+  );
+
+  const stockExpectancyMatrix = useMemo(
+    () => computeStockConfluenceExpectancyMatrix(signalHistory),
+    [signalHistory]
   );
 
   const handleManualRefresh = () => {
@@ -1189,6 +1367,155 @@ export const TopStocksView: React.FC<TopStocksViewProps> = ({
             </button>
           </div>
         )}
+      </section>
+
+      {/* Combined Strategy + Data Validity + Capital Survival Risk Desk */}
+      <section
+        data-testid="stocks-survival-desk"
+        className="rounded-2xl liquid-glass-card p-4 flex flex-col gap-3"
+      >
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <ShieldAlert
+                className={`w-4 h-4 shrink-0 ${
+                  survivalStatus.mode === 'NORMAL'
+                    ? 'text-[#0F7033] dark:text-[#4ADE80]'
+                    : survivalStatus.mode === 'CAUTION'
+                      ? 'text-[#B45309] dark:text-[#FBBF24]'
+                      : 'text-[#C41C16] dark:text-[#FF6B63]'
+                }`}
+              />
+              <h2 className="text-sm font-extrabold text-[#1C1C1E] dark:text-white">
+                Strategy &amp; Survival Risk Desk
+              </h2>
+              <span
+                data-testid="stocks-survival-mode"
+                className={`inline-flex items-center px-2 py-0.5 rounded-md border text-[10.5px] font-mono font-black uppercase tracking-wider ${
+                  survivalStatus.mode === 'NORMAL'
+                    ? 'bg-[#16A34A]/16 text-[#0B5D2A] dark:bg-[#22C55E]/18 dark:text-[#4ADE80] border-[#16A34A]/45'
+                    : survivalStatus.mode === 'CAUTION'
+                      ? 'bg-[#D97706]/16 text-[#9A5A0A] dark:bg-[#F59E0B]/18 dark:text-[#FBBF24] border-[#D97706]/45'
+                      : 'bg-[#DC2626]/16 text-[#B91C1C] dark:bg-[#EF4444]/18 dark:text-[#FF6B63] border-[#DC2626]/45'
+                }`}
+              >
+                {survivalStatus.mode} MODE
+              </span>
+              <span className="text-[11px] font-mono font-bold tabular-nums text-[#005BB8] dark:text-[#7DD3FC]">
+                Risk {survivalStatus.riskPerTradePct.toFixed(2)}%/Trade · Max {survivalStatus.maxConcurrentPositions} Open · Min Conv {survivalStatus.minConvictionRequired}%
+              </span>
+            </div>
+            <p className="text-xs text-[#3A3A3C] dark:text-[#D1D1D6] mt-1 leading-relaxed">
+              {survivalStatus.headline}
+            </p>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
+          {survivalStatus.rules.map((rule) => (
+            <div
+              key={rule.id}
+              className="rounded-xl liquid-glass-inset px-3 py-2 flex flex-col gap-0.5"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[10.5px] font-bold uppercase tracking-wider text-[#6C6C70] dark:text-[#9EB5C8]">
+                  {rule.label}
+                </span>
+                <span
+                  className={`text-[9.5px] font-mono font-black uppercase px-1.5 py-0.5 rounded ${
+                    rule.passed
+                      ? 'bg-[#16A34A]/15 text-[#0B5D2A] dark:text-[#4ADE80]'
+                      : 'bg-[#D97706]/18 text-[#9A5A0A] dark:text-[#FBBF24]'
+                  }`}
+                >
+                  {rule.passed ? 'PASS' : 'GUARD'}
+                </span>
+              </div>
+              <span className="text-[11px] font-mono font-semibold text-[#1C1C1E] dark:text-white leading-snug">
+                {rule.detail}
+              </span>
+            </div>
+          ))}
+        </div>
+
+        {/* Phase 2 & 3 Macro Regime Throttle + Top-3 Sector Leadership Strip */}
+        <div className="pt-2 border-t border-black/8 dark:border-white/10 grid grid-cols-1 lg:grid-cols-2 gap-3 text-xs">
+          <div className="flex flex-col gap-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[10.5px] font-bold uppercase tracking-wider text-[#6C6C70] dark:text-[#9EB5C8]">
+                Top-3 Leading Sectors · US Market
+              </span>
+              <span
+                className={`text-[10px] font-mono font-bold ${
+                  macroCtx.usThrottled
+                    ? 'text-[#B45309] dark:text-[#FBBF24]'
+                    : 'text-[#0F7033] dark:text-[#4ADE80]'
+                }`}
+              >
+                {macroCtx.usThrottled ? 'SPX/DXY Throttled' : 'SPX Constructive'}
+              </span>
+            </div>
+            <div className="grid grid-cols-3 gap-2">
+              {usCrossCtx.sectorLeaderboard.slice(0, 3).map((sec) => (
+                <button
+                  key={`us-sec-${sec.sector}`}
+                  type="button"
+                  onClick={() => onInspectSymbol?.(sec.topSymbol)}
+                  className="text-left rounded-xl liquid-glass-inset px-2.5 py-2 hover:border-[#0071E3] transition-colors"
+                >
+                  <div className="text-[10px] font-mono font-bold text-[#005BB8] dark:text-[#7DD3FC] tabular-nums">
+                    #{sec.rank} · RS {sec.avgRsRank}
+                  </div>
+                  <div className="text-[11px] font-bold text-[#1C1C1E] dark:text-white truncate">
+                    {sec.sector}
+                  </div>
+                  <div className="text-[10px] font-mono tabular-nums text-[#6C6C70] dark:text-[#9EB5C8] truncate">
+                    {sec.topSymbol} · {sec.avgChangePct >= 0 ? '+' : ''}
+                    {sec.avgChangePct.toFixed(1)}%
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[10.5px] font-bold uppercase tracking-wider text-[#6C6C70] dark:text-[#9EB5C8]">
+                Top-3 Leading Sectors · IDX / BEI
+              </span>
+              <span
+                className={`text-[10px] font-mono font-bold ${
+                  macroCtx.idxThrottled
+                    ? 'text-[#B45309] dark:text-[#FBBF24]'
+                    : 'text-[#0F7033] dark:text-[#4ADE80]'
+                }`}
+              >
+                {macroCtx.idxThrottled ? 'IHSG/IDR Throttled' : 'IHSG Constructive'}
+              </span>
+            </div>
+            <div className="grid grid-cols-3 gap-2">
+              {idxCrossCtx.sectorLeaderboard.slice(0, 3).map((sec) => (
+                <button
+                  key={`idx-sec-${sec.sector}`}
+                  type="button"
+                  onClick={() => onInspectSymbol?.(`${sec.topSymbol}.JK`)}
+                  className="text-left rounded-xl liquid-glass-inset px-2.5 py-2 hover:border-[#0071E3] transition-colors"
+                >
+                  <div className="text-[10px] font-mono font-bold text-[#0F7033] dark:text-[#4ADE80] tabular-nums">
+                    #{sec.rank} · RS {sec.avgRsRank}
+                  </div>
+                  <div className="text-[11px] font-bold text-[#1C1C1E] dark:text-white truncate">
+                    {sec.sector}
+                  </div>
+                  <div className="text-[10px] font-mono tabular-nums text-[#6C6C70] dark:text-[#9EB5C8] truncate">
+                    {sec.topSymbol} · {sec.avgChangePct >= 0 ? '+' : ''}
+                    {sec.avgChangePct.toFixed(1)}%
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
       </section>
 
       {/* Market, Category & Action Setup Filter Bar */}
@@ -1387,11 +1714,14 @@ export const TopStocksView: React.FC<TopStocksViewProps> = ({
       {showUsSection && (
         <MarketMoversSection
           title={`United States · ${directionTitleSuffix}`}
-          subtitle="Institutional Accumulation/Flow + Supply/Demand Execution Prices (USD)"
+          subtitle="Stage 2 Minervini + RS Rank + VCP/EP + 1Y Supply/Demand & 10D EMA Runner Exit (USD)"
           session={sessions.us}
           stocks={activeUsList}
           loading={stocksLoading}
           searchQuery={searchQuery}
+          activeSignalBySymbol={activeSignalBySymbol}
+          macroCtx={macroCtx}
+          crossCtx={usCrossCtx}
           onRefresh={handleManualRefresh}
           onClearSearch={onClearSearch}
           onInspectSymbol={onInspectSymbol}
@@ -1403,10 +1733,10 @@ export const TopStocksView: React.FC<TopStocksViewProps> = ({
           title={`Indonesia (IDX / BEI) · ${directionTitleSuffix}`}
           subtitle={
             directionFilter === 'foreignBuy'
-              ? 'Top 10 Indonesian equities by net foreign institutional buy value (IDR) with Supply/Demand levels'
+              ? 'Top 10 Indonesian equities by net foreign institutional buy value (IDR) with Stage 2, RS Rank & ARA/ARB Guard'
               : directionFilter === 'foreignSell'
                 ? 'Top 10 Indonesian equities by net foreign institutional sell value (IDR) with Supply/Demand levels'
-                : 'Bandarmology + Foreign Flow + BEI Supply/Demand execution prices (Fraksi Harga IDR)'
+                : 'Bandarmology + Foreign Flow + Stage 2 + RS Rank + 20D ADTV & ARA/ARB Guard (Fraksi Harga IDR)'
           }
           session={sessions.idx}
           stocks={activeIdxList}
@@ -1414,9 +1744,169 @@ export const TopStocksView: React.FC<TopStocksViewProps> = ({
           foreignSide={directionFilter === 'foreignBuy' ? 'BUY' : directionFilter === 'foreignSell' ? 'SELL' : undefined}
           loading={stocksLoading}
           searchQuery={searchQuery}
+          activeSignalBySymbol={activeSignalBySymbol}
+          macroCtx={macroCtx}
+          crossCtx={idxCrossCtx}
           onRefresh={handleManualRefresh}
           onClearSearch={onClearSearch}
           onInspectSymbol={onInspectSymbol}
+        />
+      )}
+
+      {/* Phase 3 Stocks Triple-Barrier & Institutional Meta-Labeling Expectancy Matrix */}
+      <section
+        data-testid="stocks-expectancy-matrix"
+        className="rounded-2xl liquid-glass-card p-4 sm:p-5 flex flex-col gap-3.5"
+      >
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+          <div>
+            <div className="flex items-center gap-2">
+              <Target className="w-4 h-4 text-[#0071E3] dark:text-[#7DD3FC]" />
+              <h2 className="text-sm sm:text-base font-extrabold text-[#1C1C1E] dark:text-white">
+                Stocks Triple-Barrier &amp; Confluence Expectancy Matrix
+              </h2>
+            </div>
+            <p className="text-xs text-[#6C6C70] dark:text-[#9EB5C8] mt-0.5">
+              {stockExpectancyMatrix.driftMessage}
+            </p>
+          </div>
+          <div className="flex items-center gap-3 text-[11px] font-mono tabular-nums text-[#4A4D57] dark:text-[#C7CBD6]">
+            <span>
+              TP: <strong className="text-[#0F7033] dark:text-[#4ADE80]">{stockExpectancyMatrix.barrierBreakdown.upperTp}</strong>
+            </span>
+            <span>
+              SL: <strong className="text-[#C41C16] dark:text-[#FF6B63]">{stockExpectancyMatrix.barrierBreakdown.lowerSl}</strong>
+            </span>
+            <span>
+              Time: <strong>{stockExpectancyMatrix.barrierBreakdown.timeBarrier}</strong>
+            </span>
+            <span>
+              Open: <strong className="text-[#005BB8] dark:text-[#7DD3FC]">{stockExpectancyMatrix.barrierBreakdown.open}</strong>
+            </span>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs font-mono tabular-nums">
+          <div className="rounded-xl liquid-glass-inset px-3 py-2">
+            <span className="text-[10px] font-sans uppercase text-[#6C6C70] dark:text-[#9EB5C8] block">
+              Overall Expectancy
+            </span>
+            <span className="text-sm font-extrabold text-[#1C1C1E] dark:text-white">
+              {stockExpectancyMatrix.overallExpectancyR !== null
+                ? `${stockExpectancyMatrix.overallExpectancyR >= 0 ? '+' : ''}${stockExpectancyMatrix.overallExpectancyR}R`
+                : 'Calibrating'}
+            </span>
+          </div>
+          <div className="rounded-xl liquid-glass-inset px-3 py-2">
+            <span className="text-[10px] font-sans uppercase text-[#6C6C70] dark:text-[#9EB5C8] block">
+              Rolling 20-Trade
+            </span>
+            <span
+              className={`text-sm font-extrabold ${
+                stockExpectancyMatrix.driftWarning
+                  ? 'text-[#C41C16] dark:text-[#FF6B63]'
+                  : 'text-[#0F7033] dark:text-[#4ADE80]'
+              }`}
+            >
+              {stockExpectancyMatrix.rolling20ExpectancyR !== null
+                ? `${stockExpectancyMatrix.rolling20ExpectancyR >= 0 ? '+' : ''}${stockExpectancyMatrix.rolling20ExpectancyR}R`
+                : '0 Closed'}
+            </span>
+          </div>
+          <div className="rounded-xl liquid-glass-inset px-3 py-2">
+            <span className="text-[10px] font-sans uppercase text-[#6C6C70] dark:text-[#9EB5C8] block">
+              Avg MFE / MAE
+            </span>
+            <span className="text-sm font-extrabold text-[#1C1C1E] dark:text-white">
+              {stockExpectancyMatrix.avgMfeR !== null ? `+${stockExpectancyMatrix.avgMfeR}R` : '—'} /{' '}
+              {stockExpectancyMatrix.avgMaeR !== null ? `-${stockExpectancyMatrix.avgMaeR}R` : '—'}
+            </span>
+          </div>
+          <div className="rounded-xl liquid-glass-inset px-3 py-2">
+            <span className="text-[10px] font-sans uppercase text-[#6C6C70] dark:text-[#9EB5C8] block">
+              Edge Capture
+            </span>
+            <span className="text-sm font-extrabold text-[#005BB8] dark:text-[#7DD3FC]">
+              {stockExpectancyMatrix.edgeCaptureRatioPct !== null
+                ? `${stockExpectancyMatrix.edgeCaptureRatioPct}%`
+                : '—'}
+            </span>
+          </div>
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-left border-collapse text-xs">
+            <thead>
+              <tr className="border-b border-black/10 dark:border-white/10 text-[10.5px] font-bold uppercase tracking-wider text-[#6C6C70] dark:text-[#9EB5C8]">
+                <th className="py-2 pr-3">Meta-Labeling Factor</th>
+                <th className="py-2 px-2 text-right">Sample</th>
+                <th className="py-2 px-2 text-right">Win Rate</th>
+                <th className="py-2 px-2 text-right">Expectancy</th>
+                <th className="py-2 px-2 text-right">Net R</th>
+                <th className="py-2 pl-2 text-right">Edge Grade</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-black/6 dark:divide-white/8 font-mono tabular-nums">
+              {stockExpectancyMatrix.rows.map((row) => (
+                <tr key={row.id}>
+                  <td className="py-2 pr-3 font-sans font-semibold text-[#1C1C1E] dark:text-white">
+                    {row.label}
+                  </td>
+                  <td className="py-2 px-2 text-right text-[#6C6C70] dark:text-[#9EB5C8]">
+                    {row.sampleSize}
+                  </td>
+                  <td className="py-2 px-2 text-right text-[#1C1C1E] dark:text-white">
+                    {row.winRatePct !== null ? `${row.winRatePct}%` : '—'}
+                  </td>
+                  <td
+                    className={`py-2 px-2 text-right font-bold ${
+                      row.expectancyR === null
+                        ? 'text-[#6C6C70] dark:text-[#8E8E93]'
+                        : row.expectancyR >= 0
+                          ? 'text-[#0F7033] dark:text-[#4ADE80]'
+                          : 'text-[#C41C16] dark:text-[#FF6B63]'
+                    }`}
+                  >
+                    {row.expectancyR !== null
+                      ? `${row.expectancyR >= 0 ? '+' : ''}${row.expectancyR}R`
+                      : '—'}
+                  </td>
+                  <td className="py-2 px-2 text-right text-[#1C1C1E] dark:text-white">
+                    {row.sampleSize > 0 ? `${row.netR >= 0 ? '+' : ''}${row.netR}R` : '—'}
+                  </td>
+                  <td className="py-2 pl-2 text-right font-sans text-[10.5px] font-bold text-[#4A4D57] dark:text-[#C7CBD6]">
+                    {row.edgeGrade}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p className="text-[11px] text-[#6C6C70] dark:text-[#9EB5C8]">
+          {stockExpectancyMatrix.stopCalibrationNote}
+        </p>
+      </section>
+
+      {/* Unified Persistent Signal History & Continuity Ledger */}
+      {signalStats && onDeleteSignal && onClearClosedSignals && (
+        <SignalHistoryPanel
+          records={signalHistory}
+          stats={signalStats}
+          cloudSynced={signalCloudSynced}
+          verificationMetrics={verificationMetrics}
+          defaultCategory="stocks"
+          title="Stock & Multi-Asset Signal Continuity Ledger"
+          subtitle="Tracks every qualified IDX, US, BTC, and XAU signal from first-shown price through live running P&L, TP1/TP2 hits, or SL — locked in database so live ticks never reset your active setups."
+          onInspectSignal={(sym, builtInId, overlays, tf) => {
+            if (onInspectSignal) {
+              onInspectSignal(sym, builtInId, overlays, tf);
+            } else {
+              onInspectSymbol?.(sym);
+            }
+          }}
+          onAnnotateSignal={onAnnotateSignal}
+          onDeleteSignal={onDeleteSignal}
+          onClearClosedSignals={onClearClosedSignals}
         />
       )}
     </div>

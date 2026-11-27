@@ -43,6 +43,7 @@ import {
   PortfolioPurchaseLot,
   PortfolioQuoteItem,
   PortfolioTransaction,
+  SignalHistoryRecord,
   StockSearchResult,
   ThemeMode,
 } from '../types/market';
@@ -50,10 +51,12 @@ import { computeTechnicalSignal } from '../utils/marketSignals';
 import { GoogleFinanceDeltaPill } from './GoogleFinanceMiniChart';
 import { AssetCategoryMiniIcon, BandarmologyBadge, SignalBadge } from './MarketUiPrimitives';
 import { PortfolioSectorPieChart } from './PortfolioSectorPieChart';
+import { D3PortfolioPerformanceChart } from './D3PortfolioPerformanceChart';
 
 interface PortfolioViewProps {
   assets: MarketAsset[];
   fxRates: Record<CurrencyCode, number>;
+  signalHistory?: SignalHistoryRecord[];
   searchQuery?: string;
   themeMode?: ThemeMode;
   onInspectSymbol?: (yahooSymbol: string) => void;
@@ -613,6 +616,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
   fxRates,
   searchQuery = '',
   themeMode = 'arctic',
+  signalHistory = [],
   onInspectSymbol,
 }) => {
   const chartUid = useId().replace(/:/g, '');
@@ -2981,9 +2985,16 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
         })}
       </div>
 
-      {/* TAB 1: HOLDINGS (with Swipe-to-Edit/Delete + Expandable Lots with ⋮ menu) */}
+      {/* TAB 1: HOLDINGS (with D3 Daily Performance Trend + Swipe-to-Edit/Delete Lots) */}
       {subTab === 'holdings' && (
-        <section className="flex flex-col gap-3">
+        <section className="flex flex-col gap-4">
+          <D3PortfolioPerformanceChart
+            signalHistory={signalHistory}
+            basePortfolioValue={summary.totalValue}
+            displayCurrency={activePortfolio.displayCurrency}
+            formatMoney={(val, cur) => formatMoney(val, cur, true)}
+            themeMode={themeMode}
+          />
           <div className="rounded-2xl liquid-glass-card overflow-hidden">
             {enrichedHoldings.length > 0 && (
               <div className="px-4 sm:px-5 py-2.5 border-b border-black/8 dark:border-white/10 bg-black/[0.02] dark:bg-white/[0.02] flex flex-wrap items-center justify-between gap-2 text-xs">

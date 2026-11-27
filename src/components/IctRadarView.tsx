@@ -9,12 +9,15 @@ import {
   Bell,
   BellOff,
   BellRing,
+  BookOpen,
   CandlestickChart,
   Check,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
   Clock,
+  Cloud,
+  CloudOff,
   Copy,
   Crosshair,
   HelpCircle,
@@ -23,8 +26,10 @@ import {
   Newspaper,
   RefreshCw,
   ShieldAlert,
+  ShieldCheck,
   Sparkles,
   Target,
+  Wifi,
 } from 'lucide-react';
 import {
   Asset5mVolatility,
@@ -34,9 +39,12 @@ import {
   IctSignalAnalysis,
   MarketAsset,
   PriceAlertItem,
+  PriorityStreamStatus,
   SdCandleVolumeSignal,
   SignalBiasVerdict,
   SignalClearanceGate,
+  SignalHistoryRecord,
+  SignalUserOutcome,
   SyncedRadarConfig,
   Timeframe,
 } from '../types/market';
@@ -51,6 +59,17 @@ import {
   computeSdCandleVolumeSignal,
   scanAllSdCandleVolumeSignals,
 } from '../utils/sdCandleVolumeSignals';
+import {
+  computeConfluenceExpectancyMatrix,
+  computeExecutionTypePerformance,
+  formatSignalPrice,
+  SignalHistoryStats,
+} from '../utils/signalHistoryEngine';
+import { SignalVerificationMetrics } from '../hooks/useSignalVerification';
+import { SignalHistoryPanel } from './SignalHistoryPanel';
+import { IctPositionSizer } from './IctPositionSizer';
+import { MetaLabelValidatorPanel } from './MetaLabelValidatorPanel';
+import { evaluateTwoStageMetaLabel } from '../utils/metaLabelValidator';
 
 interface IctRadarViewProps {
   assets: MarketAsset[];
@@ -71,6 +90,25 @@ interface IctRadarViewProps {
   onMarkAlertRead?: (id: string) => void;
   onUpdateAlertOutcome?: (id: string, outcome: 'pending' | 'win' | 'be' | 'loss') => void;
   onSyncRadarConfig?: (config: SyncedRadarConfig) => void;
+  signalHistory?: SignalHistoryRecord[];
+  signalStats?: SignalHistoryStats;
+  signalCloudSynced?: boolean;
+  verificationMetrics?: SignalVerificationMetrics;
+  onAnnotateSignal?: (
+    signalId: string,
+    outcome: SignalUserOutcome | null,
+    journalNote?: string
+  ) => void;
+  onDeleteSignal?: (id: string) => void;
+  onClearClosedSignals?: () => void;
+  onInspectSignal?: (
+    yahooSymbol: string,
+    builtInAssetId?: string,
+    overlays?: ChartTradeOverlays | null,
+    initialTf?: Timeframe
+  ) => void;
+  priorityStreamStatus?: PriorityStreamStatus;
+  prioritySources?: Record<string, string>;
   jumpTarget?: {
     assetId: string;
     strategy?: 'ict' | 'sdcv';
@@ -1020,9 +1058,17 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
   onTriggerIctAlert,
   onLoadTimeframe,
   onInspectChart,
-  onMarkAlertRead,
-  onUpdateAlertOutcome,
   onSyncRadarConfig,
+  signalHistory = [],
+  signalStats,
+  signalCloudSynced = false,
+  verificationMetrics,
+  onAnnotateSignal,
+  onDeleteSignal,
+  onClearClosedSignals,
+  onInspectSignal,
+  priorityStreamStatus = 'http-fallback',
+  prioritySources = {},
   jumpTarget,
   flashMap = {},
   volatility5mMap = {},
@@ -1392,44 +1438,193 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
     newsBlackoutEnabled,
   ]);
 
-  const ictAlertHistory = useMemo(
-    () => alerts.filter((a) => a.alertKind === 'ict'),
-    [alerts]
+  const persistentRadarSignals = useMemo(
+    () =>
+      signalHistory.filter(
+        (r) =>
+          r.sourceEngine === 'ict_radar' ||
+          r.sourceEngine === 'sdcv_radar' ||
+          r.assetClass === 'crypto' ||
+          r.assetClass === 'commodity'
+      ),
+    [signalHistory]
   );
 
-  const alertOutcomeSummary = useMemo(() => {
-    let win = 0;
-    let be = 0;
-    let loss = 0;
-    let awaitingFill = 0;
-    let expiredUnfilled = 0;
-    for (const a of ictAlertHistory) {
-      if (a.fillStatus === 'expired_unfilled') {
-        expiredUnfilled += 1;
-        continue;
-      }
-      if (a.fillStatus === 'awaiting_fill' && a.outcomeStatus === 'pending') {
-        awaitingFill += 1;
-      }
-      if (a.outcomeStatus === 'win') win += 1;
-      else if (a.outcomeStatus === 'be') be += 1;
-      else if (a.outcomeStatus === 'loss') loss += 1;
+  const executionPerf = useMemo(
+    () => computeExecutionTypePerformance(signalHistory, alerts),
+    [signalHistory, alerts]
+  );
+
+  const expectancyMatrix = useMemo(
+    () => computeConfluenceExpectancyMatrix(signalHistory),
+    [signalHistory]
+  );
+
+  const sizerSurvival = useMemo(() => {
+    const closed = persistentRadarSignals
+      .filter(
+        (r) =>
+          r.status === 'SL_HIT' ||
+          r.status === 'TP1_HIT' ||
+          r.status === 'TP2_HIT' ||
+          r.userOutcome === 'LOSS' ||
+          r.userOutcome === 'WIN'
+      )
+      .sort((a, b) => (b.closedAtMs ?? b.createdAtMs) - (a.closedAtMs ?? a.createdAtMs));
+    let lossStreak = 0;
+    for (const r of closed) {
+      if (r.userOutcome === 'LOSS' || r.status === 'SL_HIT') lossStreak++;
+      else break;
     }
-    const decided = win + loss;
-    const winRate = decided > 0 ? Math.round((win / decided) * 100) : null;
-    const netR = win * 2 - loss;
+    if (lossStreak >= 3) return { multiplier: 0, mode: 'LOCKDOWN (3L Streak)' };
+    if (lossStreak >= 2 || expectancyMatrix.driftWarning) {
+      return { multiplier: 0.5, mode: lossStreak >= 2 ? 'CAUTION (2L Streak)' : 'CAUTION (Drift)' };
+    }
+    return { multiplier: 1.0, mode: 'NORMAL' };
+  }, [persistentRadarSignals, expectancyMatrix.driftWarning]);
+
+  const [enforceValidationDiscipline, setEnforceValidationDiscipline] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('stocks-enforce-validation-discipline');
+      return saved === null ? true : saved === 'true';
+    } catch {
+      return true;
+    }
+  });
+
+  const handleToggleValidationDiscipline = () => {
+    setEnforceValidationDiscipline((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem('stocks-enforce-validation-discipline', String(next));
+      } catch {
+        // ignore storage errors
+      }
+      return next;
+    });
+  };
+
+  const focusedIctMetaEval = useMemo(
+    () =>
+      evaluateTwoStageMetaLabel(
+        focusedSignal ?? null,
+        signalHistory,
+        expectancyMatrix,
+        enforceValidationDiscipline
+      ),
+    [focusedSignal, signalHistory, expectancyMatrix, enforceValidationDiscipline]
+  );
+
+  const focusedSdcvMetaEval = useMemo(
+    () =>
+      evaluateTwoStageMetaLabel(
+        focusedSdcvSignal ?? null,
+        signalHistory,
+        expectancyMatrix,
+        enforceValidationDiscipline
+      ),
+    [focusedSdcvSignal, signalHistory, expectancyMatrix, enforceValidationDiscipline]
+  );
+
+  const effectiveIctSizer = useMemo(() => {
+    const baseMult = sizerSurvival.multiplier;
+    const metaMult = focusedIctMetaEval.effectiveSizeMultiplier;
+    if (!enforceValidationDiscipline) {
+      return { multiplier: baseMult, mode: sizerSurvival.mode };
+    }
+    if (baseMult === 0 || metaMult === 0) {
+      return {
+        multiplier: 0,
+        mode:
+          focusedIctMetaEval.discipline.status === 'HALT_RECALIBRATE'
+            ? focusedIctMetaEval.discipline.statusLabel
+            : focusedIctMetaEval.verdict === 'FILTER_PASS'
+              ? 'META-FILTER PASS (0x)'
+              : sizerSurvival.mode,
+      };
+    }
+    const combined = Number(Math.min(baseMult, metaMult).toFixed(2));
+    const modeLabel =
+      metaMult < baseMult
+        ? `META ${metaMult.toFixed(2)}x · ${focusedIctMetaEval.discipline.statusLabel}`
+        : metaMult > 1 && baseMult >= 1
+          ? `META ${metaMult.toFixed(2)}x · Validated`
+          : sizerSurvival.mode;
     return {
-      win,
-      be,
-      loss,
-      total: win + be + loss,
-      decided,
-      winRate,
-      netR,
-      awaitingFill,
-      expiredUnfilled,
+      multiplier: baseMult >= 1 ? metaMult : combined,
+      mode: modeLabel,
     };
-  }, [ictAlertHistory]);
+  }, [sizerSurvival, focusedIctMetaEval, enforceValidationDiscipline]);
+
+  const topSwitchAssets = useMemo(() => {
+    const ids = ['XAUUSD', 'BTCUSD'] as const;
+    return ids.map((id) => {
+      const asset = assetById.get(id);
+      const ictSig = allSignals.find((s) => s.assetId === id);
+      const sdSig = allSdcvSignals.find((s) => s.assetId === id);
+      const activeSig = strategyMode === 'ict' ? ictSig : sdSig;
+      const dir = activeSig?.direction ?? 'NEUTRAL';
+      const posture = activeSig?.executionPosture;
+      const badge = getDirectionBadgeStyle(
+        dir,
+        activeSig
+          ? strategyMode === 'ict'
+            ? resolveIctExpectedBias(activeSig as IctSignalAnalysis)
+            : resolveSdcvExpectedBias(activeSig as SdCandleVolumeSignal)
+          : 'NEUTRAL',
+        posture
+      );
+      return {
+        id,
+        label: id === 'BTCUSD' ? 'BTC/USD' : 'XAU/USD',
+        subLabel: id === 'BTCUSD' ? 'Bitcoin Spot' : 'Gold Spot',
+        asset,
+        badge,
+        confidence: activeSig?.confidence ?? null,
+      };
+    });
+  }, [assetById, allSignals, allSdcvSignals, strategyMode]);
+
+  const radarLogSummary = useMemo(() => {
+    let filled = 0;
+    let wins = 0;
+    let losses = 0;
+    let bes = 0;
+    let journalWins = 0;
+    let journalLosses = 0;
+    for (const r of persistentRadarSignals) {
+      const isFilled =
+        r.zoneFillVerified === true ||
+        r.status === 'RUNNING' ||
+        r.status === 'TP1_HIT' ||
+        r.status === 'TP2_HIT' ||
+        r.status === 'SL_HIT' ||
+        r.status === 'BE_CLOSED';
+      if (isFilled) filled += 1;
+      if (r.status === 'TP1_HIT' || r.status === 'TP2_HIT') wins += 1;
+      else if (r.status === 'SL_HIT') losses += 1;
+      else if (r.status === 'BE_CLOSED') bes += 1;
+      if (r.userOutcome === 'WIN') journalWins += 1;
+      else if (r.userOutcome === 'LOSS') journalLosses += 1;
+    }
+    const decided = wins + losses;
+    const hitRate = decided > 0 ? Math.round((wins / decided) * 100) : null;
+    const journalDecided = journalWins + journalLosses;
+    const journalWr =
+      journalDecided > 0 ? Math.round((journalWins / journalDecided) * 100) : null;
+    return {
+      total: persistentRadarSignals.length,
+      filled,
+      wins,
+      losses,
+      bes,
+      hitRate,
+      journalWins,
+      journalLosses,
+      journalDecided,
+      journalWr,
+    };
+  }, [persistentRadarSignals]);
 
   const actionableCounts = useMemo(() => {
     let buys = 0;
@@ -1808,6 +2003,111 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
               <span>{strategyMode === 'ict' ? 'Scan ICT Signals' : 'Scan S&D Signals'}</span>
             </button>
           </div>
+        </div>
+
+        {/* Top Quick Asset Switcher: Instant XAU/USD <-> BTC/USD Toggle with Priority Live Spot */}
+        <div
+          data-testid="ict-top-asset-toggle"
+          role="tablist"
+          aria-label="Switch focused radar instrument between XAU/USD and BTC/USD"
+          className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-3 border-t border-black/8 dark:border-white/10"
+        >
+          {topSwitchAssets.map((item) => {
+            const isSelected = focusedAssetId === item.id;
+            const liveFlash = flashMap?.[item.id] ?? localFlashMap[item.id];
+            const chgPct = item.asset?.changePercent ?? 0;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                role="tab"
+                data-testid={`ict-toggle-${item.id.toLowerCase()}`}
+                aria-selected={isSelected}
+                onClick={() => {
+                  setFocusedAssetId(item.id);
+                  if (
+                    (scopeFilter === 'btcusd' && item.id !== 'BTCUSD') ||
+                    (scopeFilter === 'xauusd' && item.id !== 'XAUUSD')
+                  ) {
+                    setScopeFilter('all');
+                  }
+                }}
+                className={`w-full text-left rounded-xl px-3.5 py-2.5 border transition-all flex items-center justify-between gap-3 ${
+                  isSelected
+                    ? 'bg-[#0066CC]/10 dark:bg-[#F59E0B]/14 border-[#0066CC]/55 dark:border-[#F59E0B]/60 ring-1 ring-[#0066CC]/25 dark:ring-[#F59E0B]/30 shadow-xs'
+                    : 'liquid-glass-inset hover:border-[#0066CC]/40 dark:hover:border-[#F59E0B]/40'
+                }`}
+              >
+                <div className="min-w-0 flex flex-col gap-0.5">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span
+                      className={`w-2 h-2 rounded-full shrink-0 ${
+                        isSelected
+                          ? 'bg-[#16A34A] dark:bg-[#4ADE80] animate-pulse'
+                          : 'bg-[#8E8E93]/60'
+                      }`}
+                    />
+                    <span className="text-sm font-extrabold tracking-tight text-[#1C1C1E] dark:text-white">
+                      {item.label}
+                    </span>
+                    <span
+                      data-testid="ict-priority-stream-badge"
+                      className={`inline-flex items-center gap-1 text-[10px] font-mono font-bold uppercase px-1.5 py-0.5 rounded ${
+                        priorityStreamStatus === 'ws-live'
+                          ? 'bg-[#16A34A]/14 text-[#0B5D2A] dark:bg-[#22C55E]/16 dark:text-[#4ADE80]'
+                          : priorityStreamStatus === 'reconnecting'
+                            ? 'bg-[#D97706]/16 text-[#9A5A0A] dark:text-[#FBBF24]'
+                            : 'bg-black/[0.05] dark:bg-white/[0.08] text-[#4A4D57] dark:text-[#9EB5C8]'
+                      }`}
+                    >
+                      <Wifi className="w-2.5 h-2.5 shrink-0" />
+                      {priorityStreamStatus === 'ws-live'
+                        ? `WS Live${prioritySources[item.id] ? ` · ${prioritySources[item.id]}` : ''}`
+                        : priorityStreamStatus === 'reconnecting'
+                          ? 'WS Reconnecting'
+                          : 'HTTP 2s Fallback'}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <span
+                      className={`inline-flex items-center px-1.5 py-0.5 rounded border text-[9.5px] font-extrabold uppercase whitespace-nowrap ${item.badge.classes}`}
+                    >
+                      {item.badge.label}
+                    </span>
+                    {typeof item.confidence === 'number' && (
+                      <span className="text-[10.5px] font-mono font-bold tabular-nums text-[#6C6C70] dark:text-[#9EB5C8]">
+                        {item.confidence}% Conf
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                <div className="text-right shrink-0 font-mono tabular-nums">
+                  <div
+                    className={`text-base sm:text-lg font-extrabold tracking-tight transition-colors ${
+                      liveFlash === 'gain'
+                        ? 'text-[#0F7033] dark:text-[#4ADE80]'
+                        : liveFlash === 'loss'
+                          ? 'text-[#C41C16] dark:text-[#FF6B63]'
+                          : 'text-[#1C1C1E] dark:text-white'
+                    }`}
+                  >
+                    {item.asset ? formatAssetPrice(item.asset) : '—'}
+                  </div>
+                  <div
+                    className={`text-[11px] font-bold ${
+                      chgPct >= 0
+                        ? 'text-[#0F7033] dark:text-[#4ADE80]'
+                        : 'text-[#C41C16] dark:text-[#FF6B63]'
+                    }`}
+                  >
+                    {chgPct >= 0 ? '+' : ''}
+                    {chgPct.toFixed(2)}%
+                  </div>
+                </div>
+              </button>
+            );
+          })}
         </div>
 
         {/* Strategy System Switcher Bar (Cleanly separates ICT vs Supply/Demand + Candle + Volume) */}
@@ -2436,6 +2736,131 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
                 ))}
               </div>
 
+              {/* Phase 1 Institutional Telemetry: PO3 Midnight Open, SMT Divergence, Vol Regime & Net-of-Friction R:R */}
+              <div
+                data-testid="ict-phase1-telemetry"
+                className="grid grid-cols-2 lg:grid-cols-4 gap-2 text-[11px]"
+              >
+                <div className="rounded-xl liquid-glass-inset p-2.5 min-w-0">
+                  <div className="flex items-center justify-between gap-1">
+                    <span className="text-[9.5px] font-extrabold uppercase tracking-wider text-[#6C6C70] dark:text-[#9EB5C8]">
+                      PO3 / NY 00:00
+                    </span>
+                    <span
+                      className={`text-[9.5px] font-bold px-1.5 py-0.5 rounded ${
+                        focusedSignal.po3Aligned
+                          ? 'bg-[#16A34A]/15 text-[#0B5D2A] dark:text-[#4ADE80]'
+                          : 'bg-black/[0.06] dark:bg-white/[0.08] text-[#4A4D57] dark:text-[#C7CBD6]'
+                      }`}
+                    >
+                      {focusedSignal.po3Phase ?? 'Session'}
+                    </span>
+                  </div>
+                  <div className="font-mono font-bold tabular-nums text-[#1C1C1E] dark:text-white mt-1 truncate">
+                    {typeof focusedSignal.midnightOpen === 'number'
+                      ? formatNumericWithAsset(
+                          focusedSignal.midnightOpen,
+                          focusedSpotAsset,
+                          focusedSignal.decimals
+                        )
+                      : 'Syncing Open'}
+                  </div>
+                  <div className="text-[10px] text-[#4A4D57] dark:text-[#9EB5C8] truncate">
+                    {focusedSignal.po3Aligned ? 'Aligned w/ Midnight Open' : 'Monitor AMD side'}
+                  </div>
+                </div>
+
+                <div className="rounded-xl liquid-glass-inset p-2.5 min-w-0">
+                  <div className="flex items-center justify-between gap-1">
+                    <span className="text-[9.5px] font-extrabold uppercase tracking-wider text-[#6C6C70] dark:text-[#9EB5C8]">
+                      SMT Divergence
+                    </span>
+                    <span
+                      className={`text-[9.5px] font-bold px-1.5 py-0.5 rounded ${
+                        focusedSignal.smtStatus === 'Bullish SMT'
+                          ? 'bg-[#16A34A]/15 text-[#0B5D2A] dark:text-[#4ADE80]'
+                          : focusedSignal.smtStatus === 'Bearish SMT'
+                            ? 'bg-[#DC2626]/15 text-[#B91C1C] dark:text-[#FF6B63]'
+                            : 'bg-black/[0.06] dark:bg-white/[0.08] text-[#4A4D57] dark:text-[#C7CBD6]'
+                      }`}
+                    >
+                      {focusedSignal.smtStatus ?? 'Checking'}
+                    </span>
+                  </div>
+                  <div className="font-mono font-bold text-[#1C1C1E] dark:text-white mt-1 truncate">
+                    {focusedSignal.smtPair ?? 'Macro Pair'}
+                  </div>
+                  <div className="text-[10px] text-[#4A4D57] dark:text-[#9EB5C8] truncate" title={focusedSignal.smtDetail}>
+                    {focusedSignal.smtDetail ?? 'Comparing structural swings'}
+                  </div>
+                </div>
+
+                <div className="rounded-xl liquid-glass-inset p-2.5 min-w-0">
+                  <div className="flex items-center justify-between gap-1">
+                    <span className="text-[9.5px] font-extrabold uppercase tracking-wider text-[#6C6C70] dark:text-[#9EB5C8]">
+                      Vol Regime
+                    </span>
+                    <span
+                      className={`text-[9.5px] font-bold px-1.5 py-0.5 rounded ${
+                        focusedSignal.volatilityRegime === 'R2_EXPANSION'
+                          ? 'bg-[#D97706]/15 text-[#9A5A0A] dark:text-[#FBBF24]'
+                          : focusedSignal.volatilityRegime === 'R1_COMPRESSION'
+                            ? 'bg-[#0066CC]/15 text-[#005BB8] dark:text-[#60A5FA]'
+                            : 'bg-[#16A34A]/15 text-[#0B5D2A] dark:text-[#4ADE80]'
+                      }`}
+                    >
+                      {focusedSignal.volatilityRegime === 'R2_EXPANSION'
+                        ? 'R2 Expand'
+                        : focusedSignal.volatilityRegime === 'R1_COMPRESSION'
+                          ? 'R1 Compress'
+                          : 'Normal'}
+                    </span>
+                  </div>
+                  <div className="font-mono font-bold tabular-nums text-[#1C1C1E] dark:text-white mt-1">
+                    {(focusedSignal.atrBaselineRatio ?? 1).toFixed(2)}x Baseline ATR
+                  </div>
+                  <div className="text-[10px] text-[#4A4D57] dark:text-[#9EB5C8] truncate">
+                    {focusedSignal.sweptPoolLabel
+                      ? `Pool: ${focusedSignal.sweptPoolLabel}`
+                      : 'EQH/EQL + Session Pools'}
+                  </div>
+                </div>
+
+                <div className="rounded-xl liquid-glass-inset p-2.5 min-w-0">
+                  <div className="flex items-center justify-between gap-1">
+                    <span className="text-[9.5px] font-extrabold uppercase tracking-wider text-[#6C6C70] dark:text-[#9EB5C8]">
+                      Net R:R &amp; RVOL
+                    </span>
+                    <span className="text-[9.5px] font-mono font-bold px-1.5 py-0.5 rounded bg-black/[0.06] dark:bg-white/[0.08] text-[#1C1C1E] dark:text-white tabular-nums">
+                      {(focusedSignal.displacementRvol ?? 1).toFixed(2)}x Vol
+                    </span>
+                  </div>
+                  <div className="font-mono font-bold tabular-nums text-[#1C1C1E] dark:text-white mt-1">
+                    Net 1:{(focusedSignal.netRr ?? 0).toFixed(1)} R:R
+                  </div>
+                  <div className="text-[10px] text-[#4A4D57] dark:text-[#9EB5C8] truncate">
+                    After {focusedSignal.frictionLabel ?? 'spread/fee'}
+                  </div>
+                </div>
+              </div>
+
+              {/* 2-Stage Meta-Labeling Confluence Validator + Validation Discipline */}
+              <MetaLabelValidatorPanel
+                evaluation={focusedIctMetaEval}
+                assetLabel={focusedSignal.symbol}
+                strategyLabel={`ICT 2022 · ${focusedSignal.timeframe}`}
+                enforceDiscipline={enforceValidationDiscipline}
+                onToggleEnforceDiscipline={handleToggleValidationDiscipline}
+              />
+
+              {/* Phase 2 Volatility-, Survival-, & Correlation-Adjusted Position Sizer */}
+              <IctPositionSizer
+                signal={focusedSignal}
+                survivalRiskMultiplier={effectiveIctSizer.multiplier}
+                survivalModeLabel={effectiveIctSizer.mode}
+                usdCorrelationOverlap={Boolean(actionableCounts.usdCorrelationWarning)}
+              />
+
               {/* Unified Numbered 1-4 Execution Ticket */}
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 pt-2 border-t border-black/8 dark:border-white/10 text-xs">
                 <div className="rounded-xl liquid-glass-inset p-3 min-w-0">
@@ -3011,6 +3436,15 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
                 ))}
               </div>
 
+              {/* 2-Stage Meta-Labeling Confluence Validator + Validation Discipline */}
+              <MetaLabelValidatorPanel
+                evaluation={focusedSdcvMetaEval}
+                assetLabel={focusedSdcvSignal.symbol}
+                strategyLabel={`S&D Candle+Volume · ${focusedSdcvSignal.timeframe}`}
+                enforceDiscipline={enforceValidationDiscipline}
+                onToggleEnforceDiscipline={handleToggleValidationDiscipline}
+              />
+
               {/* Numbered 1-4 Execution Ticket */}
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 pt-2 border-t border-black/8 dark:border-white/10 text-xs">
                 <div className="rounded-xl liquid-glass-inset p-3 min-w-0">
@@ -3550,74 +3984,130 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
           </section>
         </div>
 
-        {/* Right: Persistent Timestamped ICT Alert Feed (Retained even when Pop-ups are Deactivated) */}
+        {/* Right: Unified Persistent ICT Signal Log & Quick Trade Journal (Database-Backed) */}
         <aside
           data-testid="ict-alert-log"
           className="rounded-2xl liquid-glass-card p-4 sm:p-5 flex flex-col gap-3.5"
         >
           <div className="flex items-start justify-between gap-2 pb-2.5 border-b border-black/8 dark:border-white/10">
-            <div>
+            <div className="min-w-0">
               <div className="flex items-center gap-2 flex-wrap">
-                <Clock className="w-4 h-4 text-[#0071E3] dark:text-[#FBBF24]" />
+                <BookOpen className="w-4 h-4 text-[#0071E3] dark:text-[#FBBF24] shrink-0" />
                 <h2 className="text-sm sm:text-base font-bold text-[#1C1C1E] dark:text-white">
-                  Radar Signal Alert Log
+                  Persistent ICT Signal Log &amp; Journal
                 </h2>
-                {(alertOutcomeSummary.total > 0 || alertOutcomeSummary.expiredUnfilled > 0) && (
-                  <span
-                    data-testid="ict-alert-expectancy"
-                    className="text-[10.5px] font-mono font-bold tabular-nums text-[#0B5D2A] dark:text-[#4ADE80]"
-                  >
-                    48h: {alertOutcomeSummary.win}W · {alertOutcomeSummary.be}BE · {alertOutcomeSummary.loss}L
-                    {alertOutcomeSummary.winRate !== null
-                      ? ` (${alertOutcomeSummary.winRate}% WR · ${alertOutcomeSummary.netR >= 0 ? '+' : ''}${alertOutcomeSummary.netR}R)`
-                      : ''}
-                    {alertOutcomeSummary.expiredUnfilled > 0
-                      ? ` · ${alertOutcomeSummary.expiredUnfilled} Unfilled`
-                      : ''}
+                <span
+                  className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9.5px] font-bold ${
+                    signalCloudSynced
+                      ? 'bg-[#16A34A]/14 text-[#0B5D2A] dark:text-[#4ADE80]'
+                      : 'bg-black/[0.06] dark:bg-white/[0.08] text-[#4A4D57] dark:text-[#C7CBD6]'
+                  }`}
+                >
+                  {signalCloudSynced ? (
+                    <Cloud className="w-2.5 h-2.5" />
+                  ) : (
+                    <CloudOff className="w-2.5 h-2.5" />
+                  )}
+                  {signalCloudSynced ? 'DB Synced' : 'Local DB'}
+                </span>
+              </div>
+              <div className="flex items-center gap-2 flex-wrap mt-1 text-[10.5px] font-mono tabular-nums text-[#6C6C70] dark:text-[#9EB5C8]">
+                <span data-testid="ict-alert-expectancy">
+                  {radarLogSummary.filled}/{radarLogSummary.total} Filled
+                  {radarLogSummary.wins + radarLogSummary.losses > 0
+                    ? ` · Auto ${radarLogSummary.wins}W/${radarLogSummary.losses}L (${radarLogSummary.hitRate}%)`
+                    : ''}
+                </span>
+                {radarLogSummary.journalDecided > 0 && (
+                  <span className="text-[#0B5D2A] dark:text-[#4ADE80] font-bold">
+                    · Journal {radarLogSummary.journalWins}W/{radarLogSummary.journalLosses}L ({radarLogSummary.journalWr}%)
                   </span>
                 )}
               </div>
               <p className="text-[11px] text-[#6C6C70] dark:text-[#9EB5C8] mt-0.5">
-                {ictPopupsEnabled
-                  ? 'Pop-up notifications Active — fills are verified against Entry Zone before Win/Loss grading.'
-                  : 'Pop-up notifications Deactivated — signals persist 48h silently with fill verification.'}
+                Auto-captures Entry Zone, Timeframe &amp; Strategy with Zone-Fill verification. Tag your actual Win/Loss directly below.
               </p>
             </div>
-            <span className="text-xs font-mono font-bold tabular-nums px-2 py-0.5 rounded-lg liquid-glass-inset text-[#1C1C1E] dark:text-white shrink-0">
-              {ictAlertHistory.length}
-            </span>
+            <div className="flex flex-col items-end gap-1 shrink-0">
+              <span className="text-xs font-mono font-bold tabular-nums px-2 py-0.5 rounded-lg liquid-glass-inset text-[#1C1C1E] dark:text-white">
+                {persistentRadarSignals.length}
+              </span>
+              {persistentRadarSignals.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    document
+                      .getElementById('signal-history-ledger')
+                      ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                  }}
+                  className="text-[10px] font-bold text-[#0066CC] dark:text-[#FBBF24] hover:underline whitespace-nowrap"
+                >
+                  Full Journal ↓
+                </button>
+              )}
+            </div>
           </div>
 
-          {ictAlertHistory.length === 0 ? (
+          {persistentRadarSignals.length === 0 ? (
             <div className="py-8 px-3 text-center flex flex-col items-center gap-2">
               <Crosshair className="w-6 h-6 text-[#6C6C70] dark:text-[#9EB5C8]" />
               <p className="text-xs font-semibold text-[#1C1C1E] dark:text-white">
-                No ICT or S&amp;D setups triggered yet
+                No persistent ICT / S&amp;D signals logged yet
               </p>
               <p className="text-[11px] text-[#6C6C70] dark:text-[#9EB5C8] max-w-xs">
-                Setups trigger automatically for BTC/USD &amp; XAU/USD on ICT 2022 (Sweep + MSS + FVG CE) and Canonical S&amp;D (ERC + Candle + Volume), or click Scan now.
+                When BTC/USD or XAU/USD prints a qualified ICT 2022 or Canonical S&amp;D setup, its exact entry zone, timeframe, strategy, and zone-fill status are locked here automatically.
               </p>
             </div>
           ) : (
             <div className="flex flex-col gap-2 max-h-[620px] overflow-y-auto pr-0.5">
-              {ictAlertHistory.map((item) => {
-                const isBuy = item.ictAction === 'BUY';
-                const isSell = item.ictAction === 'SELL';
-                const stratPrefix = item.ictStrategy === 'sdcv' ? 'S&D' : 'ICT';
-                const curOutcome = item.outcomeStatus ?? 'pending';
+              {persistentRadarSignals.slice(0, 18).map((rec) => {
+                const isBuy = rec.direction === 'BUY';
+                const stratPrefix = rec.sourceEngine === 'sdcv_radar' ? 'S&D' : 'ICT';
+                const isFilled =
+                  rec.zoneFillVerified === true ||
+                  rec.status === 'RUNNING' ||
+                  rec.status === 'TP1_HIT' ||
+                  rec.status === 'TP2_HIT' ||
+                  rec.status === 'SL_HIT' ||
+                  rec.status === 'BE_CLOSED';
+                const isExpired = rec.status === 'EXPIRED';
+                const isEnterNow =
+                  rec.executionPosture === 'enter_now' ||
+                  (rec.filledOnFirstSight &&
+                    rec.executionPosture !== 'limit_pullback_only' &&
+                    rec.executionPosture !== 'armed_limit');
+                const statusLabel =
+                  rec.status === 'TP2_HIT'
+                    ? 'TP2 Hit'
+                    : rec.status === 'TP1_HIT'
+                      ? 'TP1 · BE'
+                      : rec.status === 'SL_HIT'
+                        ? 'SL Hit'
+                        : rec.status === 'BE_CLOSED'
+                          ? 'Closed BE'
+                          : rec.status === 'RUNNING'
+                            ? 'Running'
+                            : rec.status === 'EXPIRED'
+                              ? 'Unfilled'
+                              : 'Pending Limit';
+                const statusBadgeCls =
+                  rec.status === 'TP2_HIT' || rec.status === 'TP1_HIT'
+                    ? 'bg-[#16A34A]/18 text-[#0B5D2A] dark:text-[#4ADE80]'
+                    : rec.status === 'SL_HIT'
+                      ? 'bg-[#DC2626]/18 text-[#B91C1C] dark:text-[#FF6B63]'
+                      : rec.status === 'RUNNING'
+                        ? 'bg-[#0071E3]/16 text-[#005BB8] dark:bg-[#F59E0B]/18 dark:text-[#FBBF24]'
+                        : 'bg-black/[0.06] dark:bg-white/[0.08] text-[#4A4D57] dark:text-[#C7CBD6]';
+                const tfCandidate = rec.timeframe as Timeframe | undefined;
                 return (
                   <div
-                    key={item.id}
+                    key={rec.id}
+                    data-testid="ict-persistent-log-row"
                     onClick={() => {
-                      onMarkAlertRead?.(item.id);
-                      setFocusedAssetId(item.assetId);
-                      if (item.ictStrategy === 'sdcv') {
-                        setStrategyMode('sdcv');
-                      } else if (item.ictStrategy === 'ict') {
-                        setStrategyMode('ict');
-                      }
-                      if (item.ictTimeframe && ICT_TIMEFRAMES.includes(item.ictTimeframe)) {
-                        setSelectedTf(item.ictTimeframe);
+                      if (rec.assetId) setFocusedAssetId(rec.assetId);
+                      setStrategyMode(rec.sourceEngine === 'sdcv_radar' ? 'sdcv' : 'ict');
+                      if (tfCandidate && ICT_TIMEFRAMES.includes(tfCandidate)) {
+                        setSelectedTf(tfCandidate);
                       }
                     }}
                     role="button"
@@ -3625,12 +4115,11 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
                     onKeyDown={(e) => {
                       if (e.key === 'Enter' || e.key === ' ') {
                         e.preventDefault();
-                        onMarkAlertRead?.(item.id);
-                        setFocusedAssetId(item.assetId);
+                        if (rec.assetId) setFocusedAssetId(rec.assetId);
                       }
                     }}
                     className={`w-full text-left rounded-xl p-3 border transition-colors flex flex-col gap-1.5 cursor-pointer ${
-                      activeFocusedId === item.assetId
+                      activeFocusedId === rec.assetId
                         ? 'bg-[#0071E3]/8 dark:bg-[#F59E0B]/10 border-[#0071E3]/45 dark:border-[#F59E0B]/45'
                         : 'liquid-glass-inset hover:border-[#0071E3]/40 dark:hover:border-[#F59E0B]/40'
                     }`}
@@ -3638,55 +4127,42 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 sm:gap-2">
                       <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
                         <span className="text-xs font-extrabold text-[#1C1C1E] dark:text-white">
-                          {item.symbol}
+                          {rec.symbol}
                         </span>
                         <span
                           className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-extrabold uppercase whitespace-nowrap ${
                             isBuy
                               ? 'bg-[#16A34A]/18 text-[#0B5D2A] dark:text-[#4ADE80]'
-                              : isSell
-                                ? 'bg-[#DC2626]/18 text-[#B91C1C] dark:text-[#FF6B63]'
-                                : 'bg-[#D97706]/18 text-[#9A5A0A] dark:text-[#FBBF24]'
+                              : 'bg-[#DC2626]/18 text-[#B91C1C] dark:text-[#FF6B63]'
                           }`}
                         >
                           {isBuy ? (
                             <ArrowUp className="w-2.5 h-2.5 stroke-[2.5]" />
-                          ) : isSell ? (
-                            <ArrowDown className="w-2.5 h-2.5 stroke-[2.5]" />
                           ) : (
-                            <Clock className="w-2.5 h-2.5" />
+                            <ArrowDown className="w-2.5 h-2.5 stroke-[2.5]" />
                           )}
-                          {stratPrefix} {item.ictAction ?? 'WAIT'} · {item.ictTimeframe ?? '15m'}
+                          {stratPrefix} {rec.direction} · {rec.timeframe ?? '15m'}
                         </span>
-                        {item.ictStage && (
-                          <span className="px-1.5 py-0.5 rounded bg-black/[0.05] dark:bg-white/[0.08] text-[9.5px] font-bold uppercase text-[#4A4D57] dark:text-[#C7CBD6] whitespace-nowrap">
-                            {item.ictStage === 'triggered'
-                              ? 'In Zone'
-                              : item.ictStage === 'pullback_limit'
-                                ? 'Pullback Limit'
-                                : 'Armed Limit'}
-                          </span>
-                        )}
-                        {item.fillStatus && (
-                          <span
-                            data-testid="ict-alert-fill-status"
-                            className={`px-1.5 py-0.5 rounded text-[9.5px] font-bold uppercase whitespace-nowrap ${
-                              item.fillStatus === 'filled'
-                                ? 'bg-[#16A34A]/14 text-[#0B5D2A] dark:text-[#4ADE80]'
-                                : item.fillStatus === 'expired_unfilled'
-                                  ? 'bg-black/[0.08] dark:bg-white/[0.12] text-[#6C6C70] dark:text-[#9CA3AF]'
-                                  : 'bg-[#D97706]/14 text-[#9A5A0A] dark:text-[#FBBF24]'
-                            }`}
-                          >
-                            {item.fillStatus === 'filled'
-                              ? 'Filled'
-                              : item.fillStatus === 'expired_unfilled'
-                                ? 'Expired Unfilled'
-                                : 'Awaiting Fill'}
-                          </span>
-                        )}
-                        <span className="text-[10px] font-mono font-bold tabular-nums text-[#4A4D57] dark:text-[#C7CBD6]">
-                          {item.confidence ?? 45}%
+                        <span className="px-1.5 py-0.5 rounded bg-black/[0.05] dark:bg-white/[0.08] text-[9.5px] font-bold uppercase text-[#4A4D57] dark:text-[#C7CBD6] whitespace-nowrap">
+                          {isEnterNow ? 'Enter Now' : 'Limit Pullback'}
+                        </span>
+                        <span
+                          data-testid="ict-alert-fill-status"
+                          className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[9.5px] font-bold uppercase whitespace-nowrap ${
+                            isFilled
+                              ? 'bg-[#16A34A]/14 text-[#0B5D2A] dark:text-[#4ADE80]'
+                              : isExpired
+                                ? 'bg-black/[0.08] dark:bg-white/[0.12] text-[#6C6C70] dark:text-[#9CA3AF]'
+                                : 'bg-[#D97706]/14 text-[#9A5A0A] dark:text-[#FBBF24]'
+                          }`}
+                        >
+                          {isFilled && <ShieldCheck className="w-2.5 h-2.5" />}
+                          {isFilled ? 'Zone Filled' : isExpired ? 'Unfilled' : 'Awaiting Fill'}
+                        </span>
+                        <span
+                          className={`px-1.5 py-0.5 rounded text-[9.5px] font-extrabold uppercase whitespace-nowrap ${statusBadgeCls}`}
+                        >
+                          {statusLabel}
                         </span>
                       </div>
 
@@ -3695,60 +4171,76 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
                           data-testid="ict-alert-relative-time"
                           className="text-[10px] font-mono font-bold tabular-nums text-[#005BB8] dark:text-[#FBBF24]"
                         >
-                          {formatRelativeTime(item.triggeredAt, nowTick)}
+                          {formatRelativeTime(rec.createdAtMs, nowTick)}
                         </span>
                         <span
                           data-testid="ict-alert-timestamp"
                           className="text-[9.5px] font-mono tabular-nums text-[#6C6C70] dark:text-[#9EB5C8]"
                         >
-                          {formatWibDateTime(item.triggeredAt)}
+                          {formatWibDateTime(rec.createdAtMs)}
                         </span>
                       </div>
                     </div>
 
-                    <p className="text-[11px] font-semibold text-[#1C1C1E] dark:text-[#E5E5EA] truncate">
-                      {item.ictSetup}
-                    </p>
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-[11px] font-semibold text-[#1C1C1E] dark:text-[#E5E5EA] truncate">
+                        {rec.strategyTag}
+                      </p>
+                      <span
+                        className={`text-[10.5px] font-mono font-extrabold tabular-nums shrink-0 ${
+                          rec.pnlPct > 0
+                            ? 'text-[#0F7033] dark:text-[#4ADE80]'
+                            : rec.pnlPct < 0
+                              ? 'text-[#C41C16] dark:text-[#FF6B63]'
+                              : 'text-[#6C6C70] dark:text-[#9EB5C8]'
+                        }`}
+                      >
+                        {rec.pnlPct >= 0 ? '+' : ''}
+                        {rec.pnlPct.toFixed(2)}% ({rec.rMultiple >= 0 ? '+' : ''}
+                        {rec.rMultiple.toFixed(2)}R)
+                      </span>
+                    </div>
 
                     <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
                       <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[10px] font-mono tabular-nums text-[#4A4D57] dark:text-[#9EB5C8]">
-                        <span>Entry {item.entryZone}</span>
-                        <span className="text-[#C41C16] dark:text-[#FF6B63]">SL {item.stopLoss}</span>
-                        <span className="text-[#0F7033] dark:text-[#4ADE80]">TP2 {item.targetPrice}</span>
+                        <span>
+                          Entry {formatSignalPrice(rec.entryLow, rec.currency, rec.decimals)}–{formatSignalPrice(rec.entryHigh, rec.currency, rec.decimals)}
+                        </span>
+                        <span className="text-[#C41C16] dark:text-[#FF6B63]">
+                          SL {formatSignalPrice(rec.stopLoss, rec.currency, rec.decimals)}
+                        </span>
+                        <span className="text-[#0F7033] dark:text-[#4ADE80]">
+                          TP2 {formatSignalPrice(rec.tp2, rec.currency, rec.decimals)}
+                        </span>
                       </div>
 
-                      {onUpdateAlertOutcome && (
+                      {onAnnotateSignal && (
                         <div
                           data-testid="alert-outcome-controls"
                           className="inline-flex items-center gap-1 shrink-0"
                           onClick={(e) => e.stopPropagation()}
                         >
-                          {item.autoGraded && curOutcome !== 'pending' && (
-                            <span
-                              data-testid="alert-auto-graded-badge"
-                              className="px-1.5 py-0.5 rounded bg-[#0071E3]/12 dark:bg-[#FBBF24]/15 text-[9px] font-mono font-extrabold text-[#005BB8] dark:text-[#FBBF24]"
-                              title="Automatically graded from live price / 15m candle hits"
-                            >
-                              Auto
-                            </span>
-                          )}
+                          <span className="text-[9px] font-bold uppercase tracking-wider text-[#6C6C70] dark:text-[#9EB5C8] mr-0.5">
+                            Journal:
+                          </span>
                           {(
                             [
-                              { id: 'win', label: 'Win', activeClass: 'bg-[#16A34A] text-white' },
-                              { id: 'be', label: 'BE', activeClass: 'bg-[#D97706] text-white' },
-                              { id: 'loss', label: 'Loss', activeClass: 'bg-[#DC2626] text-white' },
+                              { id: 'WIN', label: 'Win', activeClass: 'bg-[#16A34A] text-white' },
+                              { id: 'LOSS', label: 'Loss', activeClass: 'bg-[#DC2626] text-white' },
+                              { id: 'BE', label: 'BE', activeClass: 'bg-[#D97706] text-white' },
                             ] as const
                           ).map((btn) => {
-                            const selectedOutcome = curOutcome === btn.id;
+                            const selectedOutcome = rec.userOutcome === btn.id;
                             return (
                               <button
                                 key={btn.id}
                                 type="button"
                                 aria-pressed={selectedOutcome}
                                 onClick={() =>
-                                  onUpdateAlertOutcome(
-                                    item.id,
-                                    selectedOutcome ? 'pending' : btn.id
+                                  onAnnotateSignal(
+                                    rec.id,
+                                    selectedOutcome ? null : btn.id,
+                                    rec.journalNote
                                   )
                                 }
                                 className={`px-1.5 py-0.5 rounded text-[9.5px] font-extrabold transition-colors whitespace-nowrap ${
@@ -3764,6 +4256,12 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
                         </div>
                       )}
                     </div>
+
+                    {rec.journalNote && (
+                      <p className="text-[10.5px] italic text-[#4A4D57] dark:text-[#C7CBD6] bg-black/[0.03] dark:bg-white/[0.05] rounded-lg px-2 py-1">
+                        “{rec.journalNote}”
+                      </p>
+                    )}
                   </div>
                 );
               })}
@@ -3771,6 +4269,345 @@ export const IctRadarView: React.FC<IctRadarViewProps> = ({
           )}
         </aside>
       </div>
+
+      {/* Historical Performance Summary: 'Enter Now' vs 'Limit Pullback' Hit-Rate & Fill Verification */}
+      <section
+        data-testid="ict-historical-performance"
+        className="rounded-2xl liquid-glass-card p-4 sm:p-5 flex flex-col gap-4"
+      >
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-black/8 dark:border-white/10">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              <BarChart3 className="w-4 h-4 text-[#0071E3] dark:text-[#FBBF24] shrink-0" />
+              <h2 className="text-sm sm:text-base font-extrabold text-[#1C1C1E] dark:text-white">
+                Historical Performance · Enter Now vs Limit Pullback
+              </h2>
+              <span className="px-2 py-0.5 rounded-md bg-black/[0.05] dark:bg-white/[0.08] text-[10px] font-mono font-bold tabular-nums text-[#4A4D57] dark:text-[#C7CBD6]">
+                {executionPerf.combined.total} Logged · {executionPerf.combined.filledCount} Verified Fills
+              </span>
+            </div>
+            <p className="text-xs text-[#4A4D57] dark:text-[#9EB5C8] mt-1">
+              {executionPerf.edgeNote}
+            </p>
+          </div>
+          <div className="flex items-center gap-3 shrink-0 font-mono tabular-nums text-xs">
+            <div className="text-right">
+              <span className="block text-[9.5px] font-sans uppercase tracking-wider text-[#6C6C70] dark:text-[#9EB5C8]">
+                Combined Hit Rate
+              </span>
+              <span className="text-base font-extrabold text-[#1C1C1E] dark:text-white">
+                {executionPerf.combined.hitRatePct !== null
+                  ? `${executionPerf.combined.hitRatePct}%`
+                  : '—'}
+              </span>
+            </div>
+            <span className="h-6 w-px bg-black/10 dark:bg-white/15" aria-hidden="true" />
+            <div className="text-right">
+              <span className="block text-[9.5px] font-sans uppercase tracking-wider text-[#6C6C70] dark:text-[#9EB5C8]">
+                Net Return
+              </span>
+              <span
+                className={`text-base font-extrabold ${
+                  executionPerf.combined.netR > 0
+                    ? 'text-[#0F7033] dark:text-[#4ADE80]'
+                    : executionPerf.combined.netR < 0
+                      ? 'text-[#C41C16] dark:text-[#FF6B63]'
+                      : 'text-[#1C1C1E] dark:text-white'
+                }`}
+              >
+                {executionPerf.combined.netR >= 0 ? '+' : ''}
+                {executionPerf.combined.netR.toFixed(1)}R
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+          {(
+            [
+              {
+                key: 'enterNow',
+                testId: 'perf-bucket-enter-now',
+                title: 'Enter Now (Market / Zone Fill)',
+                subtitle: 'Spot verified inside Entry Zone upon signal emission',
+                accentBar: 'bg-[#16A34A] dark:bg-[#4ADE80]',
+                badgeCls:
+                  'bg-[#16A34A]/16 text-[#0B5D2A] dark:bg-[#22C55E]/18 dark:text-[#4ADE80] border-[#16A34A]/40',
+                bucket: executionPerf.enterNow,
+              },
+              {
+                key: 'limitPullback',
+                testId: 'perf-bucket-limit-pullback',
+                title: 'Limit Pullback (Armed / Chase Guard)',
+                subtitle: 'Pending limit awaiting retracement fill into Entry Zone',
+                accentBar: 'bg-[#0066CC] dark:bg-[#F59E0B]',
+                badgeCls:
+                  'bg-[#0066CC]/14 text-[#005BB8] dark:bg-[#F59E0B]/18 dark:text-[#FBBF24] border-[#0066CC]/40 dark:border-[#F59E0B]/45',
+                bucket: executionPerf.limitPullback,
+              },
+            ] as const
+          ).map(({ key, testId, title, subtitle, accentBar, badgeCls, bucket }) => (
+            <div
+              key={key}
+              data-testid={testId}
+              className="rounded-xl liquid-glass-inset p-3.5 sm:p-4 flex flex-col gap-3"
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <span
+                    className={`inline-flex items-center px-2 py-0.5 rounded border text-[10px] font-extrabold uppercase tracking-wider ${badgeCls}`}
+                  >
+                    {title}
+                  </span>
+                  <p className="text-[11px] text-[#6C6C70] dark:text-[#9EB5C8] mt-1">
+                    {subtitle}
+                  </p>
+                </div>
+                <div className="text-right shrink-0 font-mono tabular-nums">
+                  <span className="block text-[9.5px] font-sans uppercase tracking-wider text-[#6C6C70] dark:text-[#9EB5C8]">
+                    Hit Rate
+                  </span>
+                  <span className="text-xl font-extrabold text-[#1C1C1E] dark:text-white">
+                    {bucket.hitRatePct !== null ? `${bucket.hitRatePct}%` : '—'}
+                  </span>
+                </div>
+              </div>
+
+              {/* Visual Hit-Rate Bar */}
+              <div className="w-full h-2 rounded-full bg-black/[0.08] dark:bg-white/[0.10] overflow-hidden">
+                <div
+                  className={`h-full rounded-full transition-all duration-500 ${accentBar}`}
+                  style={{ width: `${bucket.hitRatePct ?? 0}%` }}
+                />
+              </div>
+
+              {/* Tabular Performance Telemetry */}
+              <div className="grid grid-cols-4 gap-2 pt-1 font-mono tabular-nums text-[11px]">
+                <div>
+                  <span className="block text-[9.5px] font-sans uppercase text-[#6C6C70] dark:text-[#9EB5C8]">
+                    Fill Rate
+                  </span>
+                  <span className="font-bold text-[#1C1C1E] dark:text-white">
+                    {bucket.fillRatePct !== null ? `${bucket.fillRatePct}%` : '—'}
+                  </span>
+                  <span className="block text-[9.5px] text-[#6C6C70] dark:text-[#9EB5C8]">
+                    {bucket.filledCount}/{bucket.total}
+                  </span>
+                </div>
+                <div>
+                  <span className="block text-[9.5px] font-sans uppercase text-[#6C6C70] dark:text-[#9EB5C8]">
+                    W / BE / L
+                  </span>
+                  <span className="font-bold text-[#1C1C1E] dark:text-white">
+                    {bucket.wins}/{bucket.bes}/{bucket.losses}
+                  </span>
+                  <span className="block text-[9.5px] text-[#6C6C70] dark:text-[#9EB5C8]">
+                    {bucket.awaitingCount} open
+                  </span>
+                </div>
+                <div>
+                  <span className="block text-[9.5px] font-sans uppercase text-[#6C6C70] dark:text-[#9EB5C8]">
+                    Expectancy
+                  </span>
+                  <span
+                    className={`font-bold ${
+                      (bucket.expectancyR ?? 0) > 0
+                        ? 'text-[#0F7033] dark:text-[#4ADE80]'
+                        : (bucket.expectancyR ?? 0) < 0
+                          ? 'text-[#C41C16] dark:text-[#FF6B63]'
+                          : 'text-[#1C1C1E] dark:text-white'
+                    }`}
+                  >
+                    {bucket.expectancyR !== null
+                      ? `${bucket.expectancyR >= 0 ? '+' : ''}${bucket.expectancyR.toFixed(2)}R`
+                      : '—'}
+                  </span>
+                  <span className="block text-[9.5px] text-[#6C6C70] dark:text-[#9EB5C8]">
+                    {bucket.expiredCount} unfilled
+                  </span>
+                </div>
+                <div className="text-right">
+                  <span className="block text-[9.5px] font-sans uppercase text-[#6C6C70] dark:text-[#9EB5C8]">
+                    Net R
+                  </span>
+                  <span
+                    className={`font-extrabold ${
+                      bucket.netR > 0
+                        ? 'text-[#0F7033] dark:text-[#4ADE80]'
+                        : bucket.netR < 0
+                          ? 'text-[#C41C16] dark:text-[#FF6B63]'
+                          : 'text-[#1C1C1E] dark:text-white'
+                    }`}
+                  >
+                    {bucket.netR >= 0 ? '+' : ''}
+                    {bucket.netR.toFixed(1)}R
+                  </span>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Phase 2: Confluence Expectancy Matrix, Triple-Barrier & MAE/MFE Diagnostics */}
+        <div
+          data-testid="ict-confluence-expectancy-matrix"
+          className="pt-3 border-t border-black/8 dark:border-white/10 space-y-3"
+        >
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div>
+              <h3 className="text-xs sm:text-sm font-extrabold text-[#1C1C1E] dark:text-white flex items-center gap-1.5">
+                <Target className="w-3.5 h-3.5 text-[#0071E3] dark:text-[#FBBF24]" />
+                Confluence Expectancy Matrix &amp; Triple-Barrier MFE/MAE Diagnostics
+              </h3>
+              <p className="text-[11px] text-[#4A4D57] dark:text-[#9EB5C8] mt-0.5">
+                {expectancyMatrix.stopCalibrationNote}
+              </p>
+            </div>
+            <div className="flex items-center gap-3 font-mono tabular-nums text-[11px] shrink-0">
+              <div className="px-2.5 py-1 rounded-lg liquid-glass-inset">
+                <span className="text-[#6C6C70] dark:text-[#9EB5C8] mr-1">Avg MFE:</span>
+                <span className="font-bold text-[#0F7033] dark:text-[#4ADE80]">
+                  {expectancyMatrix.avgMfeR !== null ? `+${expectancyMatrix.avgMfeR.toFixed(2)}R` : '—'}
+                </span>
+              </div>
+              <div className="px-2.5 py-1 rounded-lg liquid-glass-inset">
+                <span className="text-[#6C6C70] dark:text-[#9EB5C8] mr-1">Avg MAE:</span>
+                <span className="font-bold text-[#C41C16] dark:text-[#FF6B63]">
+                  {expectancyMatrix.avgMaeR !== null ? `-${expectancyMatrix.avgMaeR.toFixed(2)}R` : '—'}
+                </span>
+              </div>
+              <div className="px-2.5 py-1 rounded-lg liquid-glass-inset">
+                <span className="text-[#6C6C70] dark:text-[#9EB5C8] mr-1">Capture:</span>
+                <span className="font-bold text-[#1C1C1E] dark:text-white">
+                  {expectancyMatrix.edgeCaptureRatioPct !== null
+                    ? `${expectancyMatrix.edgeCaptureRatioPct}%`
+                    : '—'}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* Rolling 20-Trade Expectancy Drift & Triple-Barrier Counters */}
+          <div
+            className={`rounded-xl px-3.5 py-2.5 border flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs ${
+              expectancyMatrix.driftWarning
+                ? 'bg-[#DC2626]/12 border-[#DC2626]/35 text-[#B91C1C] dark:text-[#FF6B63]'
+                : 'liquid-glass-inset border-black/8 dark:border-white/10 text-[#1C1C1E] dark:text-[#E2E8F0]'
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              {expectancyMatrix.driftWarning ? (
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+              ) : (
+                <ShieldCheck className="w-4 h-4 shrink-0 text-[#0F7033] dark:text-[#4ADE80]" />
+              )}
+              <span className="font-semibold">{expectancyMatrix.driftMessage}</span>
+            </div>
+            <div className="flex items-center gap-2 font-mono text-[10.5px] tabular-nums shrink-0 text-[#4A4D57] dark:text-[#9EB5C8]">
+              <span>TP: {expectancyMatrix.barrierBreakdown.upperTp}</span>
+              <span>·</span>
+              <span>SL: {expectancyMatrix.barrierBreakdown.lowerSl}</span>
+              <span>·</span>
+              <span>BE: {expectancyMatrix.barrierBreakdown.breakEven}</span>
+              <span>·</span>
+              <span>Time: {expectancyMatrix.barrierBreakdown.timeBarrier}</span>
+            </div>
+          </div>
+
+          {/* Per-Feature Expectancy Table */}
+          <div className="overflow-x-auto rounded-xl border border-black/8 dark:border-white/10">
+            <table className="w-full text-left border-collapse text-[11px]">
+              <thead>
+                <tr className="border-b border-black/8 dark:border-white/10 bg-black/[0.02] dark:bg-white/[0.03] text-[10px] uppercase tracking-wider text-[#6C6C70] dark:text-[#9EB5C8]">
+                  <th className="py-2 px-3 font-bold">Confluence / Regime Tag</th>
+                  <th className="py-2 px-2.5 text-right font-bold">Trades</th>
+                  <th className="py-2 px-2.5 text-right font-bold">Win Rate</th>
+                  <th className="py-2 px-2.5 text-right font-bold">Expectancy (E)</th>
+                  <th className="py-2 px-2.5 text-right font-bold">MFE / MAE</th>
+                  <th className="py-2 px-3 text-right font-bold">Net R</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-black/6 dark:divide-white/8 font-mono tabular-nums">
+                {expectancyMatrix.rows.map((row) => (
+                  <tr
+                    key={row.id}
+                    className="hover:bg-black/[0.02] dark:hover:bg-white/[0.02] transition-colors"
+                  >
+                    <td className="py-2 px-3 font-sans font-semibold text-[#1C1C1E] dark:text-white">
+                      <span>{row.label}</span>
+                      <span className="ml-2 text-[9.5px] uppercase text-[#6C6C70] dark:text-[#9EB5C8]">
+                        {row.category}
+                      </span>
+                    </td>
+                    <td className="py-2 px-2.5 text-right text-[#4A4D57] dark:text-[#C7CBD6]">
+                      {row.sampleSize}
+                    </td>
+                    <td className="py-2 px-2.5 text-right text-[#1C1C1E] dark:text-white font-semibold">
+                      {row.winRatePct !== null ? `${row.winRatePct}%` : '—'}
+                    </td>
+                    <td
+                      className={`py-2 px-2.5 text-right font-bold ${
+                        row.expectancyR === null
+                          ? 'text-[#6C6C70] dark:text-[#9EB5C8]'
+                          : row.expectancyR > 0
+                            ? 'text-[#0F7033] dark:text-[#4ADE80]'
+                            : row.expectancyR < 0
+                              ? 'text-[#C41C16] dark:text-[#FF6B63]'
+                              : 'text-[#1C1C1E] dark:text-white'
+                      }`}
+                    >
+                      {row.expectancyR !== null
+                        ? `${row.expectancyR >= 0 ? '+' : ''}${row.expectancyR.toFixed(2)}R`
+                        : '—'}
+                    </td>
+                    <td className="py-2 px-2.5 text-right text-[#4A4D57] dark:text-[#C7CBD6]">
+                      {row.avgMfeR !== null && row.avgMaeR !== null
+                        ? `+${row.avgMfeR.toFixed(1)} / -${row.avgMaeR.toFixed(1)}`
+                        : '—'}
+                    </td>
+                    <td
+                      className={`py-2 px-3 text-right font-bold ${
+                        row.netR > 0
+                          ? 'text-[#0F7033] dark:text-[#4ADE80]'
+                          : row.netR < 0
+                            ? 'text-[#C41C16] dark:text-[#FF6B63]'
+                            : 'text-[#4A4D57] dark:text-[#C7CBD6]'
+                      }`}
+                    >
+                      {row.sampleSize > 0 ? `${row.netR >= 0 ? '+' : ''}${row.netR.toFixed(1)}R` : '—'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      {/* Unified Persistent Signal History & Automated Trade Journal */}
+      {signalStats && onDeleteSignal && onClearClosedSignals && (
+        <div id="signal-history-ledger">
+          <SignalHistoryPanel
+            records={signalHistory}
+            stats={signalStats}
+            cloudSynced={signalCloudSynced}
+            verificationMetrics={verificationMetrics}
+            defaultCategory="radar"
+            title="Unified Signal History & Automated Trade Journal"
+            subtitle="Continuously captures ICT Radar & S&D setups (entry zone, timeframe, strategy, zone-fill verification) in the database — track live TP1/TP2/SL hit-rates and annotate your actual Win/Loss outcomes."
+            onInspectSignal={(sym, builtInId, overlays, tf) => {
+              if (onInspectSignal) {
+                onInspectSignal(sym, builtInId, overlays, tf);
+              } else if (onInspectChart && builtInId) {
+                onInspectChart(builtInId, overlays, tf || selectedTf);
+              }
+            }}
+            onAnnotateSignal={onAnnotateSignal}
+            onDeleteSignal={onDeleteSignal}
+            onClearClosedSignals={onClearClosedSignals}
+          />
+        </div>
+      )}
     </div>
   );
 };

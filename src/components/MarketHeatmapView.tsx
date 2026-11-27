@@ -29,12 +29,15 @@ function getTileColors(
   changePercent: number,
   themeMode: ThemeMode
 ): { bg: string; text: string; subtext: string; border: string } {
-  const isDarkSurface = themeMode === 'obsidian';
-  const border = isDarkSurface
-    ? 'rgba(8, 12, 20, 0.92)'
-    : themeMode === 'parchment'
-      ? 'rgba(244, 240, 230, 0.94)'
-      : 'rgba(255, 255, 255, 0.94)';
+  const isDarkSurface = themeMode === 'obsidian' || themeMode === 'velvet';
+  const border =
+    themeMode === 'velvet'
+      ? 'rgba(13, 11, 20, 0.94)'
+      : isDarkSurface
+        ? 'rgba(8, 12, 20, 0.92)'
+        : themeMode === 'parchment'
+          ? 'rgba(244, 240, 230, 0.94)'
+          : 'rgba(255, 255, 255, 0.94)';
 
   if (changePercent >= 3.0) {
     return { bg: '#096B31', text: '#FFFFFF', subtext: 'rgba(255,255,255,0.92)', border };

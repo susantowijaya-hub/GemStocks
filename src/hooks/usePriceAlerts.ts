@@ -304,6 +304,49 @@ function loadSyncedRadarConfigFallback(): SyncedRadarConfig {
   };
 }
 
+function verifyImmediateZoneFill(
+  direction: 'BUY' | 'SELL' | 'WAIT',
+  currentPrice: number,
+  entryLowNum?: number,
+  entryHighNum?: number,
+  stopLossNum?: number,
+  posture?: IctExecutionPosture
+): {
+  ictStage: 'armed' | 'triggered' | 'pullback_limit';
+  fillStatus: 'filled' | 'awaiting_fill';
+} {
+  if (posture === 'enter_now') {
+    return { ictStage: 'triggered', fillStatus: 'filled' };
+  }
+  if (
+    (direction === 'BUY' || direction === 'SELL') &&
+    Number.isFinite(currentPrice) &&
+    currentPrice > 0 &&
+    typeof entryLowNum === 'number' &&
+    typeof entryHighNum === 'number' &&
+    Number.isFinite(entryLowNum) &&
+    Number.isFinite(entryHighNum)
+  ) {
+    const lo = Math.min(entryLowNum, entryHighNum);
+    const hi = Math.max(entryLowNum, entryHighNum);
+    const tol = Math.max(currentPrice * 0.0003, 1e-6);
+    const insideZone = currentPrice >= lo - tol && currentPrice <= hi + tol;
+    const slValid = typeof stopLossNum === 'number' && Number.isFinite(stopLossNum);
+    const filledBeyondProximal =
+      direction === 'BUY'
+        ? currentPrice < lo && (!slValid || currentPrice > stopLossNum!)
+        : currentPrice > hi && (!slValid || currentPrice < stopLossNum!);
+
+    if (insideZone || filledBeyondProximal) {
+      return { ictStage: 'triggered', fillStatus: 'filled' };
+    }
+  }
+  if (posture === 'limit_pullback_only') {
+    return { ictStage: 'pullback_limit', fillStatus: 'awaiting_fill' };
+  }
+  return { ictStage: 'armed', fillStatus: 'awaiting_fill' };
+}
+
 function resolveAlertExecutionStage(posture?: IctExecutionPosture): {
   ictStage: 'armed' | 'triggered' | 'pullback_limit';
   fillStatus: 'filled' | 'awaiting_fill';
@@ -427,7 +470,14 @@ export function usePriceAlerts(
       const now = Date.now();
       const stageMeta =
         action === 'BUY' || action === 'SELL'
-          ? resolveAlertExecutionStage(sig.executionPosture)
+          ? verifyImmediateZoneFill(
+              action,
+              sig.currentPrice,
+              sig.entryLowNum,
+              sig.entryHighNum,
+              sig.stopLossNum,
+              sig.executionPosture
+            )
           : undefined;
       return {
         id: `${strategy}-${sig.assetId}-${action}-${now}-${Math.random().toString(36).slice(2, 6)}`,
@@ -478,7 +528,14 @@ export function usePriceAlerts(
       const now = Date.now();
       const stageMeta =
         action === 'BUY' || action === 'SELL'
-          ? resolveAlertExecutionStage(sdcv.executionPosture)
+          ? verifyImmediateZoneFill(
+              action,
+              sdcv.currentPrice,
+              sdcv.entryLowNum,
+              sdcv.entryHighNum,
+              sdcv.stopLossNum,
+              sdcv.executionPosture
+            )
           : undefined;
       return {
         id: `sdcv-${sdcv.assetId}-${action}-${now}-${Math.random().toString(36).slice(2, 6)}`,
@@ -1013,37 +1070,41 @@ export function usePriceAlerts(
           } else {
             const lo = Math.min(item.entryLowNum, item.entryHighNum);
             const hi = Math.max(item.entryLowNum, item.entryHighNum);
+            const tol = Math.max(asset.price * 0.0003, 1e-6);
+            // Include the active forming entry candle AND all subsequent candles so fast touches verify immediately
             const postTriggerBars = sourceBars
-              .filter((b) => b.t > item.triggeredAt)
+              .filter((b) => b.t >= item.triggeredAt - barMs)
               .sort((a, b) => a.t - b.t);
 
             for (const bar of postTriggerBars) {
-              const touchedZone = bar.l <= hi && bar.h >= lo;
+              const touchedZone = bar.l <= hi + tol && bar.h >= lo - tol;
               const crossedThroughBuy =
                 item.ictAction === 'BUY' && bar.l <= lo && bar.h >= sl;
               const crossedThroughSell =
                 item.ictAction === 'SELL' && bar.h >= hi && bar.l <= sl;
               if (touchedZone || crossedThroughBuy || crossedThroughSell) {
                 nextFillStatus = 'filled';
-                nextFilledAt = bar.t;
+                nextFilledAt = Math.max(item.triggeredAt, bar.t);
                 break;
               }
-              if (item.ictAction === 'BUY') {
-                if (bar.h >= target || bar.l <= sl) {
-                  nextFillStatus = 'expired_unfilled';
-                  break;
-                }
-              } else {
-                if (bar.l <= target || bar.h >= sl) {
-                  nextFillStatus = 'expired_unfilled';
-                  break;
+              if (bar.t > item.triggeredAt) {
+                if (item.ictAction === 'BUY') {
+                  if (bar.h >= target || bar.l <= sl) {
+                    nextFillStatus = 'expired_unfilled';
+                    break;
+                  }
+                } else {
+                  if (bar.l <= target || bar.h >= sl) {
+                    nextFillStatus = 'expired_unfilled';
+                    break;
+                  }
                 }
               }
             }
 
             if (nextFillStatus === 'awaiting_fill') {
               const inZoneLive =
-                (asset.price >= lo && asset.price <= hi) ||
+                (asset.price >= lo - tol && asset.price <= hi + tol) ||
                 (item.ictAction === 'BUY' && asset.price < lo && asset.price > sl) ||
                 (item.ictAction === 'SELL' && asset.price > hi && asset.price < sl);
               if (inZoneLive) {

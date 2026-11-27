@@ -222,6 +222,334 @@
         }
       },
       "required": ["ownerId", "query", "answer", "sources", "createdAt"]
+    },
+    "SignalHistoryRecord": {
+      "title": "SignalHistoryRecord",
+      "description": "Immutable-entry trading signal log with continuous lifecycle tracking (PENDING_LIMIT, RUNNING, TP1_HIT, TP2_HIT, SL_HIT, BE_CLOSED, EXPIRED) across stocks, crypto, and commodities.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the signal owner.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "lockKey": {
+          "type": "string",
+          "description": "Continuity deduplication key (e.g. idx_scanner:BBCA.JK or ict_radar:BTCUSD:15m).",
+          "minLength": 3,
+          "maxLength": 80,
+          "pattern": "^[a-zA-Z0-9_.:\\-/]+$"
+        },
+        "assetClass": {
+          "type": "string",
+          "description": "Instrument class category.",
+          "enum": ["stock_id", "stock_us", "crypto", "commodity"],
+          "maxLength": 16
+        },
+        "sourceEngine": {
+          "type": "string",
+          "description": "Originating signal engine.",
+          "enum": ["idx_scanner", "us_scanner", "ict_radar", "sdcv_radar"],
+          "maxLength": 16
+        },
+        "symbol": {
+          "type": "string",
+          "description": "Display ticker symbol.",
+          "minLength": 1,
+          "maxLength": 24,
+          "pattern": "^[A-Z0-9._\\-/^=]+$"
+        },
+        "assetId": {
+          "type": "string",
+          "description": "Canonical feed/Yahoo symbol ID.",
+          "minLength": 1,
+          "maxLength": 32,
+          "pattern": "^[A-Za-z0-9._\\-/^=]+$"
+        },
+        "name": {
+          "type": "string",
+          "description": "Human-readable asset name.",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "currency": {
+          "type": "string",
+          "description": "Quote currency.",
+          "enum": ["USD", "IDR"],
+          "maxLength": 4
+        },
+        "decimals": {
+          "type": "number",
+          "description": "Price display precision."
+        },
+        "timeframe": {
+          "type": "string",
+          "description": "Evaluation timeframe (e.g. 15m, 1h, 1D).",
+          "minLength": 1,
+          "maxLength": 8
+        },
+        "direction": {
+          "type": "string",
+          "description": "Locked trade direction.",
+          "enum": ["BUY", "SELL"],
+          "maxLength": 4
+        },
+        "strategyTag": {
+          "type": "string",
+          "description": "Setup classification at first detection.",
+          "minLength": 1,
+          "maxLength": 140
+        },
+        "confidence": {
+          "type": "number",
+          "description": "Signal conviction score (0..100)."
+        },
+        "firstShownPrice": {
+          "type": "number",
+          "description": "Spot price when signal was first detected and locked."
+        },
+        "entryPrice": {
+          "type": "number",
+          "description": "Locked primary entry price."
+        },
+        "entryLow": {
+          "type": "number",
+          "description": "Locked entry zone lower bound."
+        },
+        "entryHigh": {
+          "type": "number",
+          "description": "Locked entry zone upper bound."
+        },
+        "stopLoss": {
+          "type": "number",
+          "description": "Locked hard stop-loss level."
+        },
+        "tp1": {
+          "type": "number",
+          "description": "Locked first take-profit target."
+        },
+        "tp2": {
+          "type": "number",
+          "description": "Locked full take-profit target."
+        },
+        "riskReward": {
+          "type": "string",
+          "description": "Formatted risk-reward label at entry.",
+          "minLength": 1,
+          "maxLength": 24
+        },
+        "status": {
+          "type": "string",
+          "description": "Current continuous signal lifecycle status.",
+          "enum": ["PENDING_LIMIT", "RUNNING", "TP1_HIT", "TP2_HIT", "SL_HIT", "BE_CLOSED", "EXPIRED"],
+          "maxLength": 16
+        },
+        "filledOnFirstSight": {
+          "type": "boolean",
+          "description": "True if price was already inside entry/running when signal first appeared."
+        },
+        "executionPosture": {
+          "type": "string",
+          "description": "Captured radar execution posture at signal lock.",
+          "enum": ["enter_now", "armed_limit", "limit_pullback_only"],
+          "maxLength": 24
+        },
+        "zoneFillVerified": {
+          "type": "boolean",
+          "description": "True once live spot or candle wick verified entry inside Entry Zone."
+        },
+        "verificationStatus": {
+          "type": "string",
+          "description": "Real-time entry-zone verification status updated upon price crossing the entry zone or expiring unfilled.",
+          "enum": ["Pending", "Verified", "Expired"],
+          "maxLength": 12
+        },
+        "verifiedAtMs": {
+          "type": "number",
+          "description": "Epoch ms when real-time zone verification transitioned to Verified or Expired."
+        },
+        "userOutcome": {
+          "type": "string",
+          "description": "Trader manual journal outcome annotation.",
+          "enum": ["WIN", "LOSS", "BE", "SKIPPED"],
+          "maxLength": 10
+        },
+        "journalNote": {
+          "type": "string",
+          "description": "Optional trader execution journal note.",
+          "maxLength": 300
+        },
+        "journaledAtMs": {
+          "type": "number",
+          "description": "Epoch ms when trader annotated the trade journal outcome or note."
+        },
+        "timestamp": {
+          "type": "number",
+          "description": "Indexed signal creation epoch milliseconds (mirrors createdAtMs) for composite timeline queries."
+        },
+        "strategy": {
+          "type": "string",
+          "description": "Indexed canonical strategy identifier for performance hit-rate queries.",
+          "enum": ["ict_2022", "sdcv_canonical", "idx_bandar", "us_swing"],
+          "maxLength": 24
+        },
+        "outcome": {
+          "type": "string",
+          "description": "Indexed unified signal outcome (derived from manual journal outcome or live TP/SL status) for hit-rate analytics.",
+          "enum": ["PENDING", "RUNNING", "WIN", "LOSS", "BE", "EXPIRED"],
+          "maxLength": 12
+        },
+        "createdAtMs": {
+          "type": "number",
+          "description": "Client epoch milliseconds when signal first locked."
+        },
+        "filledAtMs": {
+          "type": "number",
+          "description": "Optional epoch ms when entry filled."
+        },
+        "tp1HitAtMs": {
+          "type": "number",
+          "description": "Optional epoch ms when TP1 was reached."
+        },
+        "closedAtMs": {
+          "type": "number",
+          "description": "Optional epoch ms when terminal outcome occurred."
+        },
+        "closedPrice": {
+          "type": "number",
+          "description": "Optional execution price at terminal close."
+        },
+        "lastPrice": {
+          "type": "number",
+          "description": "Most recently checked live market price."
+        },
+        "maxFavorablePrice": {
+          "type": "number",
+          "description": "Best favorable price reached since fill."
+        },
+        "maxAdversePrice": {
+          "type": "number",
+          "description": "Worst adverse price reached since fill."
+        },
+        "pnlPct": {
+          "type": "number",
+          "description": "Live unrealized or realized percentage return."
+        },
+        "rMultiple": {
+          "type": "number",
+          "description": "Live or realized R-multiple relative to initial risk."
+        },
+        "lastCheckedAtMs": {
+          "type": "number",
+          "description": "Epoch ms of latest continuity evaluation."
+        },
+        "mfeR": {
+          "type": "number",
+          "description": "Maximum Favorable Excursion in R-multiples since entry fill."
+        },
+        "maeR": {
+          "type": "number",
+          "description": "Maximum Adverse Excursion in R-multiples since entry fill."
+        },
+        "barrierOutcome": {
+          "type": "string",
+          "description": "Triple-Barrier classification (Upper TP, Lower SL, Vertical Time Barrier, Break Even, or Open).",
+          "enum": ["UPPER_TP", "LOWER_SL", "TIME_BARRIER", "BREAK_EVEN", "OPEN"],
+          "maxLength": 16
+        },
+        "timeBarrierAtMs": {
+          "type": "number",
+          "description": "Vertical time-barrier deadline epoch ms for Triple-Barrier expiration."
+        },
+        "inKillzone": {
+          "type": "boolean",
+          "description": "Whether the setup triggered inside an active London/NY institutional Killzone."
+        },
+        "po3Aligned": {
+          "type": "boolean",
+          "description": "Whether entry aligned with Power of 3 / NY Midnight Open AMD side."
+        },
+        "smtConfirmed": {
+          "type": "boolean",
+          "description": "Whether structural SMT divergence confirmed the setup."
+        },
+        "volatilityRegime": {
+          "type": "string",
+          "description": "Dual-TF volatility regime at signal lock.",
+          "enum": ["R1_COMPRESSION", "NORMAL", "R2_EXPANSION"],
+          "maxLength": 18
+        },
+        "htfAligned": {
+          "type": "boolean",
+          "description": "Whether the setup aligned with the 1H/4H higher-timeframe bias."
+        },
+        "netRr": {
+          "type": "number",
+          "description": "Net-of-friction reward-to-risk ratio at signal lock."
+        },
+        "stage2Aligned": {
+          "type": "boolean",
+          "description": "Whether the equity passed the Minervini / Weinstein Stage 2 uptrend template at lock."
+        },
+        "rsRank": {
+          "type": "number",
+          "description": "Cross-sectional Relative Strength percentile rank (1..99) vs benchmark at lock."
+        },
+        "vcpDetected": {
+          "type": "boolean",
+          "description": "Whether a Volatility Contraction Pattern with volume dry-up was active at lock."
+        },
+        "sectorLeader": {
+          "type": "boolean",
+          "description": "Whether the stock belonged to a Top-3 leading sector in its market at lock."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when signal was persisted."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of latest lifecycle update."
+        }
+      },
+      "required": [
+        "ownerId",
+        "lockKey",
+        "assetClass",
+        "sourceEngine",
+        "symbol",
+        "assetId",
+        "name",
+        "currency",
+        "decimals",
+        "timeframe",
+        "direction",
+        "strategyTag",
+        "confidence",
+        "firstShownPrice",
+        "entryPrice",
+        "entryLow",
+        "entryHigh",
+        "stopLoss",
+        "tp1",
+        "tp2",
+        "riskReward",
+        "status",
+        "filledOnFirstSight",
+        "createdAtMs",
+        "lastPrice",
+        "maxFavorablePrice",
+        "maxAdversePrice",
+        "pnlPct",
+        "rMultiple",
+        "lastCheckedAtMs",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -240,6 +568,10 @@
     "/users/{userId}/aiBriefs/{briefId}": {
       "schema": { "$ref": "#/entities/AiBrief" },
       "description": "User-saved Gemini + Google Search grounded market briefs."
+    },
+    "/users/{userId}/signalHistory/{signalId}": {
+      "schema": { "$ref": "#/entities/SignalHistoryRecord" },
+      "description": "Persistent user signal continuity ledger tracking locked entry, TP1, TP2, SL, and running status."
     }
   }
 }

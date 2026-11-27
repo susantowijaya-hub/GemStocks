@@ -1,4 +1,5 @@
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
+import { getPrioritySocketQuotes } from './prioritySocketHub.ts';
 
 export interface LiveQuotePatch {
   id: string;
@@ -169,6 +170,31 @@ export interface StockTradePlan {
   scannerScore?: number;
   buyReasons?: string[];
   cautionNote?: string;
+  stage?: 'Stage 1 Base' | 'Stage 2 Advancing' | 'Stage 3 Topping' | 'Stage 4 Declining';
+  minerviniPassedCount?: number;
+  minerviniTotalCount?: number;
+  trendTemplateSummary?: string;
+  rsRank?: number;
+  rsVsBenchPct?: number;
+  atr14Pct?: number;
+  adr20Pct?: number;
+  w52HighDistPct?: number;
+  w52LowGainPct?: number;
+  adtv20d?: number;
+  adtvLabel?: string;
+  adtvPassed?: boolean;
+  vcpDetected?: boolean;
+  vcpContractionPct?: number;
+  vcpDryUpRatio?: number;
+  vcpSummary?: string;
+  accPersistence5d?: number;
+  ema10Num?: number;
+  sma50Num?: number;
+  sma150Num?: number;
+  sma200Num?: number;
+  trailingExitNote?: string;
+  episodicPivot?: boolean;
+  epNote?: string;
 }
 
 export interface StockMover {
@@ -222,6 +248,7 @@ const YAHOO_SYMBOL_CONFIG: {
   { id: 'DJI', name: 'Dow Jones Industrial Average', yahooSymbol: '^DJI', decimals: 2 },
   { id: 'IHSG', name: 'IDX Composite Index', yahooSymbol: '^JKSE', decimals: 2 },
   { id: 'EIDO', name: 'iShares MSCI Indonesia ETF', yahooSymbol: 'EIDO', decimals: 2, currencyPrefix: '$' },
+  { id: 'N225', name: 'Nikkei 225 Index', yahooSymbol: '^N225', decimals: 2 },
   { id: 'HSI', name: 'Hang Seng Index', yahooSymbol: '^HSI', decimals: 2 },
   { id: 'TAIEX', name: 'Taiwan Weighted Index', yahooSymbol: '^TWII', decimals: 2 },
   { id: 'KOSPI', name: 'Korea Composite Index', yahooSymbol: '^KS11', decimals: 2 },
@@ -598,6 +625,26 @@ export function getServerSessionInfo(keyOrSymbol: string, now = new Date()): Ser
       stateLabel: open ? 'Open' : 'Closed',
       progressRatio: open ? clamp((jkt.totalMin - 9 * 60) / 450) : 1,
     };
+  }
+
+  // Japan (TSE / Nikkei 225: 09:00-11:30 & 12:30-15:30 JST)
+  if (upper === 'N225' || upper === '^N225' || upper === 'NI225' || upper.endsWith('.T')) {
+    const tyo = getTzClockServer(now, 'Asia/Tokyo');
+    if (tyo.isWeekend) return { isOpen: false, stateLabel: 'Closed', progressRatio: 1 };
+    const progress =
+      tyo.totalMin >= 9 * 60 && tyo.totalMin < 15 * 60 + 30
+        ? clamp((tyo.totalMin - 9 * 60) / 390)
+        : 1;
+    if (tyo.totalMin >= 9 * 60 && tyo.totalMin < 11 * 60 + 30) {
+      return { isOpen: true, stateLabel: 'Open (AM)', progressRatio: progress };
+    }
+    if (tyo.totalMin >= 11 * 60 + 30 && tyo.totalMin < 12 * 60 + 30) {
+      return { isOpen: false, stateLabel: 'Lunch Break', progressRatio: progress };
+    }
+    if (tyo.totalMin >= 12 * 60 + 30 && tyo.totalMin < 15 * 60 + 30) {
+      return { isOpen: true, stateLabel: 'Open (PM)', progressRatio: progress };
+    }
+    return { isOpen: false, stateLabel: 'Closed', progressRatio: 1 };
   }
 
   // Hong Kong (.HK / HSI)
@@ -1094,6 +1141,7 @@ const TV_GLOBAL_SYMBOL_MAP: Record<string, { tv: string; preferPrimary: boolean 
   DJI: { tv: 'DJ:DJI', preferPrimary: false },
   IHSG: { tv: 'IDX:COMPOSITE', preferPrimary: false },
   EIDO: { tv: 'AMEX:EIDO', preferPrimary: false },
+  N225: { tv: 'TVC:NI225', preferPrimary: false },
   HSI: { tv: 'HSI:HSI', preferPrimary: false },
   KOSPI: { tv: 'KRX:KOSPI', preferPrimary: false },
   SSEC: { tv: 'SSE:000001', preferPrimary: false },
@@ -1338,6 +1386,278 @@ export async function fetchLiveQuotes(): Promise<{
   }
   const res = await refreshQuotesInternal();
   return { ...res, diagnostics: getServerFeedDiagnostics() };
+}
+
+export interface PriorityRadarQuotePatch {
+  id: 'BTCUSD' | 'XAUUSD' | 'DXY';
+  price: number;
+  prevClose: number;
+  changeValue: number;
+  changePercent: number;
+  dayHigh?: number;
+  dayLow?: number;
+  marketSessionOpen: boolean;
+  sessionStateLabel: string;
+  updatedAtEpoch: number;
+  sourceLabel: string;
+}
+
+const priorityRadarCache: {
+  entry: CacheEntry<{ quotes: PriorityRadarQuotePatch[]; updatedAt: string; latencyMs: number }> | null;
+} = { entry: null };
+
+let inFlightPriorityRadar: Promise<{
+  quotes: PriorityRadarQuotePatch[];
+  updatedAt: string;
+  latencyMs: number;
+}> | null = null;
+
+/**
+ * Top-priority ultra-fast quote lane strictly for BTC/USD, XAU/USD, and DXY.
+ * Bypasses global equity/IDX batching so ICT & S&D radar signals stay tightly locked to live spot.
+ */
+export async function fetchPriorityRadarQuotes(): Promise<{
+  quotes: PriorityRadarQuotePatch[];
+  updatedAt: string;
+  latencyMs: number;
+}> {
+  const now = Date.now();
+  // Fast path: return 0ms server-side WebSocket quotes (Coinbase WS + TradingView OANDA WS) when fresh
+  const wsQuotes = getPrioritySocketQuotes().filter(
+    (q): q is PriorityRadarQuotePatch & { id: 'BTCUSD' | 'XAUUSD' | 'DXY' } =>
+      (q.id === 'BTCUSD' || q.id === 'XAUUSD' || q.id === 'DXY') &&
+      now - q.updatedAtEpoch < 15_000
+  );
+  const hasBtcWs = wsQuotes.some((q) => q.id === 'BTCUSD');
+  const hasXauWs = wsQuotes.some((q) => q.id === 'XAUUSD');
+  if (hasBtcWs && hasXauWs) {
+    return {
+      quotes: wsQuotes,
+      updatedAt: new Date(now).toISOString(),
+      latencyMs: 1,
+    };
+  }
+
+  if (priorityRadarCache.entry && priorityRadarCache.entry.expiresAt > now) {
+    return priorityRadarCache.entry.data;
+  }
+  if (inFlightPriorityRadar) {
+    return inFlightPriorityRadar;
+  }
+
+  inFlightPriorityRadar = (async () => {
+    const t0 = Date.now();
+    const nowDate = new Date(t0);
+    const out: PriorityRadarQuotePatch[] = [];
+
+    const fetchBtcFast = async (): Promise<PriorityRadarQuotePatch | null> => {
+      const cfg = YAHOO_SYMBOL_CONFIG.find((c) => c.id === 'BTCUSD');
+      const decimals = cfg?.decimals ?? 2;
+      const sess = getServerSessionInfo('BTCUSD', nowDate);
+      try {
+        const cb = await fetchCoinbaseSpotStats('BTC-USD');
+        if (cb && Number.isFinite(cb.price) && cb.price > 0) {
+          const { prevClose, changeValue, changePercent } = resolveConsistentChange(
+            cb.price,
+            cb.open24h,
+            undefined,
+            decimals,
+            true
+          );
+          return {
+            id: 'BTCUSD',
+            price: Number(cb.price.toFixed(decimals)),
+            prevClose,
+            changeValue,
+            changePercent,
+            dayHigh: Number.isFinite(cb.high24h) ? Number(cb.high24h.toFixed(decimals)) : undefined,
+            dayLow: Number.isFinite(cb.low24h) ? Number(cb.low24h.toFixed(decimals)) : undefined,
+            marketSessionOpen: sess.isOpen,
+            sessionStateLabel: sess.stateLabel,
+            updatedAtEpoch: Date.now(),
+            sourceLabel: 'Coinbase Spot',
+          };
+        }
+      } catch {
+        // fallback to Binance 24hr ticker
+      }
+      try {
+        const bRes = await fetch('https://data-api.binance.vision/api/v3/ticker/24hr?symbol=BTCUSDT', {
+          headers: UA_HEADERS,
+          signal: AbortSignal.timeout(2500),
+        });
+        if (bRes.ok) {
+          const j = (await bRes.json()) as {
+            lastPrice?: string;
+            openPrice?: string;
+            highPrice?: string;
+            lowPrice?: string;
+            priceChangePercent?: string;
+          };
+          const price = Number(j.lastPrice);
+          const open24 = Number(j.openPrice);
+          if (Number.isFinite(price) && price > 0) {
+            const { prevClose, changeValue, changePercent } = resolveConsistentChange(
+              price,
+              Number.isFinite(open24) && open24 > 0 ? open24 : price,
+              j.priceChangePercent,
+              decimals,
+              true
+            );
+            return {
+              id: 'BTCUSD',
+              price: Number(price.toFixed(decimals)),
+              prevClose,
+              changeValue,
+              changePercent,
+              dayHigh: Number.isFinite(Number(j.highPrice)) ? Number(Number(j.highPrice).toFixed(decimals)) : undefined,
+              dayLow: Number.isFinite(Number(j.lowPrice)) ? Number(Number(j.lowPrice).toFixed(decimals)) : undefined,
+              marketSessionOpen: sess.isOpen,
+              sessionStateLabel: sess.stateLabel,
+              updatedAtEpoch: Date.now(),
+              sourceLabel: 'Binance Spot',
+            };
+          }
+        }
+      } catch {
+        // fallback to warm cache below
+      }
+      const cached = perSymbolQuoteCache.get('BTCUSD')?.data;
+      if (cached && cached.price > 0) {
+        return {
+          id: 'BTCUSD',
+          price: cached.price,
+          prevClose: cached.prevClose,
+          changeValue: cached.changeValue,
+          changePercent: cached.changePercent,
+          marketSessionOpen: sess.isOpen,
+          sessionStateLabel: sess.stateLabel,
+          updatedAtEpoch: Date.now(),
+          sourceLabel: 'Cached Spot',
+        };
+      }
+      return null;
+    };
+
+    const fetchTvSpotPair = async (): Promise<PriorityRadarQuotePatch[]> => {
+      const results: PriorityRadarQuotePatch[] = [];
+      try {
+        const tvRes = await fetch('https://scanner.tradingview.com/global/scan', {
+          method: 'POST',
+          headers: { ...UA_HEADERS, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            symbols: { tickers: ['OANDA:XAUUSD', 'TVC:DXY'], query: { types: [] } },
+            columns: ['close', 'change', 'change_abs', 'high', 'low'],
+          }),
+          signal: AbortSignal.timeout(2800),
+        });
+        if (tvRes.ok) {
+          const json = (await tvRes.json()) as {
+            data?: Array<{ s: string; d: Array<number | null> }>;
+          };
+          for (const row of json.data ?? []) {
+            const close = Number(row.d?.[0]);
+            const chgPct = Number(row.d?.[1]);
+            const chgAbs = Number(row.d?.[2]);
+            const hi = Number(row.d?.[3]);
+            const lo = Number(row.d?.[4]);
+            if (!Number.isFinite(close) || close <= 0) continue;
+
+            if (row.s === 'OANDA:XAUUSD') {
+              const sess = getServerSessionInfo('XAUUSD', nowDate);
+              const rawPrev = Number.isFinite(chgAbs) ? close - chgAbs : close / (1 + (Number.isFinite(chgPct) ? chgPct : 0) / 100);
+              const { prevClose, changeValue, changePercent } = resolveConsistentChange(
+                close,
+                rawPrev,
+                chgPct,
+                2,
+                false
+              );
+              results.push({
+                id: 'XAUUSD',
+                price: Number(close.toFixed(2)),
+                prevClose,
+                changeValue,
+                changePercent,
+                dayHigh: Number.isFinite(hi) && hi > 0 ? Number(hi.toFixed(2)) : undefined,
+                dayLow: Number.isFinite(lo) && lo > 0 ? Number(lo.toFixed(2)) : undefined,
+                marketSessionOpen: sess.isOpen,
+                sessionStateLabel: sess.stateLabel,
+                updatedAtEpoch: Date.now(),
+                sourceLabel: 'OANDA Spot',
+              });
+            } else if (row.s === 'TVC:DXY') {
+              const sess = getServerSessionInfo('DXY', nowDate);
+              const rawPrev = Number.isFinite(chgAbs) ? close - chgAbs : close / (1 + (Number.isFinite(chgPct) ? chgPct : 0) / 100);
+              const { prevClose, changeValue, changePercent } = resolveConsistentChange(
+                close,
+                rawPrev,
+                chgPct,
+                3,
+                false
+              );
+              results.push({
+                id: 'DXY',
+                price: Number(close.toFixed(3)),
+                prevClose,
+                changeValue,
+                changePercent,
+                dayHigh: Number.isFinite(hi) && hi > 0 ? Number(hi.toFixed(3)) : undefined,
+                dayLow: Number.isFinite(lo) && lo > 0 ? Number(lo.toFixed(3)) : undefined,
+                marketSessionOpen: sess.isOpen,
+                sessionStateLabel: sess.stateLabel,
+                updatedAtEpoch: Date.now(),
+                sourceLabel: 'TVC DXY',
+              });
+            }
+          }
+        }
+      } catch {
+        // fallback below
+      }
+
+      // Fallback to warm perSymbolQuoteCache if TV timed out for XAUUSD or DXY
+      for (const fallbackId of ['XAUUSD', 'DXY'] as const) {
+        if (!results.some((r) => r.id === fallbackId)) {
+          const cached = perSymbolQuoteCache.get(fallbackId)?.data;
+          if (cached && cached.price > 0) {
+            const sess = getServerSessionInfo(fallbackId, nowDate);
+            results.push({
+              id: fallbackId,
+              price: cached.price,
+              prevClose: cached.prevClose,
+              changeValue: cached.changeValue,
+              changePercent: cached.changePercent,
+              marketSessionOpen: sess.isOpen,
+              sessionStateLabel: sess.stateLabel,
+              updatedAtEpoch: Date.now(),
+              sourceLabel: 'Cached Spot',
+            });
+          }
+        }
+      }
+      return results;
+    };
+
+    const [btcPatch, tvPatches] = await Promise.all([fetchBtcFast(), fetchTvSpotPair()]);
+    if (btcPatch) out.push(btcPatch);
+    for (const p of tvPatches) out.push(p);
+
+    const latencyMs = Date.now() - t0;
+    const payload = {
+      quotes: out,
+      updatedAt: new Date().toISOString(),
+      latencyMs,
+    };
+    priorityRadarCache.entry = { data: payload, expiresAt: Date.now() + 1500 };
+    return payload;
+  })();
+
+  try {
+    return await inFlightPriorityRadar;
+  } finally {
+    inFlightPriorityRadar = null;
+  }
 }
 
 async function refreshQuotesInternal(): Promise<{
@@ -2077,19 +2397,144 @@ export async function fetchLiveChart(
       const cfg = YAHOO_SYMBOL_CONFIG.find((c) => c.id === id);
       if (!cfg) return null;
 
+      // High-accuracy direct exchange OHLCV for BTCUSD & ETHUSD (Coinbase Exchange primary -> Binance failover -> Yahoo)
+      const isCryptoDirect = id === 'BTCUSD' || id === 'ETHUSD';
+      const cryptoIntradaySpec: Record<
+        string,
+        { cbGranularity: number; aggregateEvery?: number; binanceInterval: string; limit: number }
+      > = {
+        '1m': { cbGranularity: 60, binanceInterval: '1m', limit: 60 },
+        '5m': { cbGranularity: 300, binanceInterval: '5m', limit: 60 },
+        '15m': { cbGranularity: 900, binanceInterval: '15m', limit: 64 },
+        '15M': { cbGranularity: 900, binanceInterval: '15m', limit: 64 },
+        '30m': { cbGranularity: 900, aggregateEvery: 2, binanceInterval: '30m', limit: 64 },
+        '1h': { cbGranularity: 3600, binanceInterval: '1h', limit: 64 },
+        '1H': { cbGranularity: 3600, binanceInterval: '1h', limit: 64 },
+        '4h': { cbGranularity: 3600, aggregateEvery: 4, binanceInterval: '4h', limit: 60 },
+        '4H': { cbGranularity: 3600, aggregateEvery: 4, binanceInterval: '4h', limit: 60 },
+        '1D': { cbGranularity: 900, binanceInterval: '15m', limit: 96 },
+      };
+
+      if (isCryptoDirect && cryptoIntradaySpec[timeframe]) {
+        const spec = cryptoIntradaySpec[timeframe];
+        const cbProduct = id === 'BTCUSD' ? 'BTC-USD' : 'ETH-USD';
+        const binanceSym = id === 'BTCUSD' ? 'BTCUSDT' : 'ETHUSDT';
+        let exCandles: CandlePoint[] = [];
+
+        // 1) Primary: Coinbase Exchange Public Candles (exact USD exchange matching live WS ticks & L2 book)
+        try {
+          const cbUrl = `https://api.exchange.coinbase.com/products/${cbProduct}/candles?granularity=${spec.cbGranularity}`;
+          const cbRes = await fetch(cbUrl, {
+            headers: { ...UA_HEADERS, Accept: 'application/json' },
+            signal: AbortSignal.timeout(4500),
+          });
+          if (cbRes.ok) {
+            const rows = (await cbRes.json()) as Array<[number, number, number, number, number, number]>;
+            if (Array.isArray(rows) && rows.length >= 6) {
+              // Coinbase format: [timeSec, low, high, open, close, volume] newest-first
+              const chronological = rows
+                .filter((r) => Array.isArray(r) && r.length >= 6 && Number.isFinite(r[4]) && r[4] > 0)
+                .map((r): CandlePoint => ({
+                  t: r[0] * 1000,
+                  o: Number(r[3].toFixed(cfg.decimals)),
+                  h: Number(Math.max(r[2], r[3], r[4]).toFixed(cfg.decimals)),
+                  l: Number(Math.min(r[1], r[3], r[4]).toFixed(cfg.decimals)),
+                  c: Number(r[4].toFixed(cfg.decimals)),
+                  v: Number.isFinite(r[5]) && r[5] > 0 ? Number(r[5].toFixed(4)) : undefined,
+                }))
+                .sort((a, b) => a.t - b.t);
+
+              if (spec.aggregateEvery && spec.aggregateEvery > 1) {
+                const step = spec.aggregateEvery;
+                const agg: CandlePoint[] = [];
+                for (let i = 0; i < chronological.length; i += step) {
+                  const chunk = chronological.slice(i, i + step);
+                  if (chunk.length === 0) continue;
+                  const volSum = chunk.reduce((acc, x) => acc + (typeof x.v === 'number' ? x.v : 0), 0);
+                  agg.push({
+                    t: chunk[0].t,
+                    o: chunk[0].o,
+                    h: Number(Math.max(...chunk.map((x) => x.h)).toFixed(cfg.decimals)),
+                    l: Number(Math.min(...chunk.map((x) => x.l)).toFixed(cfg.decimals)),
+                    c: chunk[chunk.length - 1].c,
+                    ...(volSum > 0 ? { v: Number(volSum.toFixed(4)) } : {}),
+                  });
+                }
+                exCandles = agg.slice(-spec.limit);
+              } else {
+                exCandles = chronological.slice(-spec.limit);
+              }
+            }
+          }
+        } catch {
+          // fall through to Binance public market data failover
+        }
+
+        // 2) Secondary Failover: Binance Public Market Data API (24/7 institutional liquidity)
+        if (exCandles.length < 10) {
+          try {
+            const bUrl = `https://data-api.binance.vision/api/v3/klines?symbol=${binanceSym}&interval=${spec.binanceInterval}&limit=${spec.limit}`;
+            const bRes = await fetch(bUrl, {
+              headers: UA_HEADERS,
+              signal: AbortSignal.timeout(4500),
+            });
+            if (bRes.ok) {
+              const rows = (await bRes.json()) as Array<Array<string | number>>;
+              if (Array.isArray(rows) && rows.length >= 6) {
+                exCandles = rows
+                  .map((r): CandlePoint => {
+                    const o = Number(r[1]);
+                    const h = Number(r[2]);
+                    const l = Number(r[3]);
+                    const c = Number(r[4]);
+                    const v = Number(r[5]);
+                    return {
+                      t: Number(r[0]),
+                      o: Number(o.toFixed(cfg.decimals)),
+                      h: Number(Math.max(h, o, c).toFixed(cfg.decimals)),
+                      l: Number(Math.min(l, o, c).toFixed(cfg.decimals)),
+                      c: Number(c.toFixed(cfg.decimals)),
+                      ...(Number.isFinite(v) && v > 0 ? { v: Number(v.toFixed(4)) } : {}),
+                    };
+                  })
+                  .filter((b) => Number.isFinite(b.c) && b.c > 0);
+              }
+            }
+          } catch {
+            // fall through to Yahoo tertiary fallback
+          }
+        }
+
+        if (exCandles.length >= 6) {
+          const pts = exCandles.map((b) => b.c);
+          const tss = exCandles.map((b) => b.t);
+          const payload: LiveChartResponse = {
+            id,
+            timeframe,
+            points: pts,
+            timestamps: tss,
+            candles: exCandles,
+            prevClose: pts[0],
+          };
+          const ttlMs = id === 'BTCUSD' && ['1m', '5m', '15m', '30m'].includes(timeframe) ? 8_000 : 12_000;
+          chartCache.set(key, { data: payload, expiresAt: now + ttlMs });
+          return payload;
+        }
+      }
+
       const rangeMap: Record<
         string,
         { range: string; interval: string; sliceTail?: number; aggregateEvery?: number }
       > = {
-        '1m': { range: '1d', interval: '1m', sliceTail: 36 },
-        '5m': { range: '1d', interval: '5m', sliceTail: 36 },
-        '15m': { range: '5d', interval: '15m', sliceTail: 40 },
-        '15M': { range: '5d', interval: '15m', sliceTail: 40 },
-        '30m': { range: '5d', interval: '30m', sliceTail: 42 },
-        '1h': { range: '1mo', interval: '60m', sliceTail: 42 },
-        '1H': { range: '1mo', interval: '60m', sliceTail: 42 },
-        '4h': { range: '1mo', interval: '60m', aggregateEvery: 4, sliceTail: 38 },
-        '4H': { range: '1mo', interval: '60m', aggregateEvery: 4, sliceTail: 38 },
+        '1m': { range: '1d', interval: '1m', sliceTail: 48 },
+        '5m': { range: '1d', interval: '5m', sliceTail: 48 },
+        '15m': { range: '5d', interval: '15m', sliceTail: 54 },
+        '15M': { range: '5d', interval: '15m', sliceTail: 54 },
+        '30m': { range: '5d', interval: '30m', sliceTail: 52 },
+        '1h': { range: '1mo', interval: '60m', sliceTail: 54 },
+        '1H': { range: '1mo', interval: '60m', sliceTail: 54 },
+        '4h': { range: '1mo', interval: '60m', aggregateEvery: 4, sliceTail: 48 },
+        '4H': { range: '1mo', interval: '60m', aggregateEvery: 4, sliceTail: 48 },
         '1D': { range: '1d', interval: '15m' },
         '1W': { range: '5d', interval: '1h' },
         '1M': { range: '1mo', interval: '1d' },
@@ -2100,12 +2545,12 @@ export async function fetchLiveChart(
       };
       const params = rangeMap[timeframe] ?? rangeMap['1D'];
 
-      const json = await fetchYahooChartJson(
-        cfg.yahooSymbol,
-        params.range,
-        params.interval,
-        7000
-      );
+      const [json, tvGlobalMap] = await Promise.all([
+        fetchYahooChartJson(cfg.yahooSymbol, params.range, params.interval, 7000),
+        id === 'XAUUSD' || Boolean(TV_GLOBAL_SYMBOL_MAP[id])
+          ? fetchTradingViewGlobalQuotes().catch(() => new Map<string, TvGlobalQuote>())
+          : Promise.resolve(new Map<string, TvGlobalQuote>()),
+      ]);
 
       if (!json) {
         if (cached?.data) {
@@ -2187,7 +2632,7 @@ export async function fetchLiveChart(
         timestamps = aggCandles.map((b) => b.t);
       }
 
-      const finalPoints =
+      let finalPoints =
         params.sliceTail && points.length > params.sliceTail
           ? points.slice(-params.sliceTail)
           : points;
@@ -2195,14 +2640,47 @@ export async function fetchLiveChart(
         params.sliceTail && timestamps.length > params.sliceTail
           ? timestamps.slice(-params.sliceTail)
           : timestamps;
-      const finalCandles =
+      let finalCandles =
         params.sliceTail && candles.length > params.sliceTail
           ? candles.slice(-params.sliceTail)
           : candles;
 
-      const prevClose = Number(
+      let prevClose = Number(
         item?.meta?.chartPreviousClose ?? item?.meta?.previousClose ?? finalPoints[0]
       );
+
+      // Reconcile Spot Gold (OANDA:XAUUSD) vs COMEX Futures (GC=F) basis across all OHLC candles
+      // so ICT/S&D entry zones, SL, and TP align identically with live spot XAU/USD quotes
+      const tvSpot = tvGlobalMap.get(id);
+      if (tvSpot && Number.isFinite(tvSpot.price) && tvSpot.price > 0 && finalCandles.length > 0) {
+        const lastBar = finalCandles[finalCandles.length - 1];
+        const relGap = lastBar.c > 0 ? Math.abs(tvSpot.price - lastBar.c) / lastBar.c : 0;
+        if (id === 'XAUUSD' && relGap > 0.0002 && relGap < 0.06) {
+          const basis = tvSpot.price - lastBar.c;
+          finalCandles = finalCandles.map((bar) => ({
+            ...bar,
+            o: Number((bar.o + basis).toFixed(cfg.decimals)),
+            h: Number((bar.h + basis).toFixed(cfg.decimals)),
+            l: Number((bar.l + basis).toFixed(cfg.decimals)),
+            c: Number((bar.c + basis).toFixed(cfg.decimals)),
+          }));
+          finalPoints = finalCandles.map((b) => b.c);
+          if (Number.isFinite(prevClose)) {
+            prevClose = prevClose + basis;
+          }
+        } else if (params.sliceTail && relGap > 0.0001 && relGap < 0.015) {
+          // Keep the forming intraday bar aligned with real-time TradingView spot
+          const spotRounded = Number(tvSpot.price.toFixed(cfg.decimals));
+          const updatedLast: CandlePoint = {
+            ...lastBar,
+            c: spotRounded,
+            h: Number(Math.max(lastBar.h, spotRounded).toFixed(cfg.decimals)),
+            l: Number(Math.min(lastBar.l, spotRounded).toFixed(cfg.decimals)),
+          };
+          finalCandles = [...finalCandles.slice(0, -1), updatedLast];
+          finalPoints = [...finalPoints.slice(0, -1), spotRounded];
+        }
+      }
 
       const payload: LiveChartResponse = {
         id,
@@ -2213,7 +2691,9 @@ export async function fetchLiveChart(
         prevClose: Number.isFinite(prevClose) ? Number(prevClose.toFixed(cfg.decimals)) : finalPoints[0],
       };
 
-      const chartTtl = params.sliceTail ? 15_000 : 180_000;
+      const isPriorityIntraday =
+        (id === 'XAUUSD' || id === 'BTCUSD') && Boolean(params.sliceTail);
+      const chartTtl = isPriorityIntraday ? 8_000 : params.sliceTail ? 12_000 : 180_000;
       chartCache.set(key, { data: payload, expiresAt: now + chartTtl });
       return payload;
     } catch {
@@ -2698,7 +3178,7 @@ const NEWS_RSS_SOURCES: {
   },
   {
     publisher: 'Yahoo Finance Asia',
-    url: 'https://feeds.finance.yahoo.com/rss/2.0/headline?s=%5EJKSE,IDR%3DX,%5ETWII,%5EKS11,%5EHSI&region=US&lang=en-US',
+    url: 'https://feeds.finance.yahoo.com/rss/2.0/headline?s=%5EJKSE,%5EN225,IDR%3DX,%5ETWII,%5EKS11,%5EHSI&region=US&lang=en-US',
     defaultTopic: 'idx',
     maxItems: 5,
   },
@@ -4612,6 +5092,7 @@ function computeEquityTradePlanFromBars(params: {
     highs,
     lows,
     opens,
+    volumes,
     currentPrice,
     prevClose,
     dayHigh,
@@ -4624,29 +5105,47 @@ function computeEquityTradePlanFromBars(params: {
   const price = currentPrice > 0 ? currentPrice : closes[closes.length - 1] || prevClose || 100;
   const n = Math.min(closes.length, highs.length, lows.length);
 
-  // 14-day ATR + 20D range
-  let atrSum = 0;
-  let atrCount = 0;
-  for (let i = Math.max(1, n - 14); i < n; i++) {
+  // 14-day Wilder ATR + 20-day ADR%
+  const trSeries: number[] = [];
+  for (let i = 1; i < n; i++) {
     const tr = Math.max(
       highs[i] - lows[i],
       Math.abs(highs[i] - closes[i - 1]),
       Math.abs(lows[i] - closes[i - 1])
     );
-    if (Number.isFinite(tr) && tr > 0) {
-      atrSum += tr;
-      atrCount += 1;
+    if (Number.isFinite(tr) && tr > 0) trSeries.push(tr);
+  }
+  let wilderAtr = 0;
+  if (trSeries.length >= 14) {
+    let sum = 0;
+    for (let i = 0; i < 14; i++) sum += trSeries[i];
+    wilderAtr = sum / 14;
+    for (let i = 14; i < trSeries.length; i++) {
+      wilderAtr = (wilderAtr * 13 + trSeries[i]) / 14;
     }
+  } else if (trSeries.length > 0) {
+    wilderAtr = trSeries.reduce((a, b) => a + b, 0) / trSeries.length;
   }
   const daySpan = Math.max(Math.abs(dayHigh - dayLow), price * 0.014);
-  const atr = atrCount > 0 ? Math.max(atrSum / atrCount, price * 0.01) : daySpan * 1.15;
+  const atr = wilderAtr > 0 ? Math.max(wilderAtr, price * 0.008) : daySpan * 1.15;
+  const atr14Pct = Number(((atr / Math.max(1e-6, price)) * 100).toFixed(2));
 
-  // Identify technical Supply & Demand base zones from 3-month swing structure
+  let adrSum = 0;
+  let adrCnt = 0;
+  for (let i = Math.max(0, n - 20); i < n; i++) {
+    if (lows[i] > 0 && highs[i] >= lows[i]) {
+      adrSum += ((highs[i] - lows[i]) / lows[i]) * 100;
+      adrCnt += 1;
+    }
+  }
+  const adr20Pct = Number((adrCnt > 0 ? adrSum / adrCnt : atr14Pct).toFixed(2));
+
+  // Identify technical Supply & Demand base zones from multi-week swing structure
   const swingWindowStart = Math.max(0, n - 45);
   const histHigh = n > 0 ? Math.max(...highs.slice(swingWindowStart), dayHigh, price) : Math.max(dayHigh, price * 1.03);
   const histLow = n > 0 ? Math.min(...lows.slice(swingWindowStart), dayLow, price) : Math.min(dayLow, price * 0.97);
 
-  // 20D & 50D EMA trend filter over 3mo daily closes
+  // Moving averages: 10D / 20D / 50D EMA & 50D / 150D / 200D SMA over 1y daily closes
   const computeEma = (arr: number[], period: number): number => {
     if (arr.length === 0) return price;
     const k = 2 / (period + 1);
@@ -4656,8 +5155,156 @@ function computeEquityTradePlanFromBars(params: {
     }
     return ema;
   };
-  const ema20Num = Number(computeEma(closes.slice(-40), 20).toFixed(currency === 'IDR' ? 0 : 2));
-  const ema50Num = Number(computeEma(closes, 50).toFixed(currency === 'IDR' ? 0 : 2));
+  const computeSma = (arr: number[], period: number, endExclusive = arr.length): number => {
+    const end = Math.min(arr.length, endExclusive);
+    const start = Math.max(0, end - period);
+    if (end <= start) return price;
+    let s = 0;
+    for (let i = start; i < end; i++) s += arr[i];
+    return s / (end - start);
+  };
+
+  const dec = currency === 'IDR' ? 0 : 2;
+  const ema10Num = Number(computeEma(closes.slice(-30), 10).toFixed(dec));
+  const ema20Num = Number(computeEma(closes.slice(-60), 20).toFixed(dec));
+  const ema50Num = Number(computeEma(closes.slice(-150), 50).toFixed(dec));
+  const sma50Num = Number(computeSma(closes, 50).toFixed(dec));
+  const sma150Num = Number(computeSma(closes, Math.min(150, Math.max(50, n))).toFixed(dec));
+  const sma200Num = Number(computeSma(closes, Math.min(200, Math.max(60, n))).toFixed(dec));
+  const sma200Prev = n >= 40 ? computeSma(closes, Math.min(200, Math.max(40, n - 20)), n - 20) : sma200Num;
+  const sma200Rising = sma200Num >= sma200Prev * 0.998;
+
+  // 52-week High / Low distances
+  const w52High = n > 0 ? Math.max(...highs, dayHigh, price) : Math.max(dayHigh, price);
+  const w52Low = n > 0 ? Math.min(...lows.filter((v) => v > 0), dayLow > 0 ? dayLow : price, price) : Math.min(dayLow > 0 ? dayLow : price, price);
+  const w52HighDistPct = Number((((price - w52High) / Math.max(1e-6, w52High)) * 100).toFixed(1));
+  const w52LowGainPct = Number((((price - w52Low) / Math.max(1e-6, w52Low)) * 100).toFixed(1));
+
+  // Minervini 8-Point Stage 2 Trend Template (Point 8 uses momentum proxy here; refined cross-sectionally on client)
+  const m1 = price > sma150Num && price > sma200Num;
+  const m2 = sma150Num >= sma200Num * 0.995;
+  const m3 = sma200Rising;
+  const m4 = sma50Num > sma150Num && sma50Num > sma200Num;
+  const m5 = price > sma50Num;
+  const m6 = w52LowGainPct >= 25;
+  const m7 = w52HighDistPct >= -25;
+  const m8 = ema20Num >= ema50Num * 0.995 && price >= ema20Num * 0.985;
+  const minerviniPassedCount = [m1, m2, m3, m4, m5, m6, m7, m8].filter(Boolean).length;
+  const minerviniTotalCount = 8;
+
+  let stage: StockTradePlan['stage'] = 'Stage 1 Base';
+  if (minerviniPassedCount >= 6 && m1 && m4 && m5) {
+    stage = 'Stage 2 Advancing';
+  } else if (price < sma50Num * 0.98 && sma50Num < sma150Num * 0.99 && price < sma200Num * 0.98) {
+    stage = 'Stage 4 Declining';
+  } else if (price < sma50Num * 0.98 && sma50Num >= sma200Num * 0.97) {
+    stage = 'Stage 3 Topping';
+  }
+  const trendTemplateSummary =
+    stage === 'Stage 2 Advancing'
+      ? `Stage 2 Uptrend (${minerviniPassedCount}/8 Minervini · ${w52HighDistPct.toFixed(0)}% from 52W High)`
+      : stage === 'Stage 4 Declining'
+        ? `Stage 4 Downtrend (${minerviniPassedCount}/8 · Below 50/150/200D SMA)`
+        : stage === 'Stage 3 Topping'
+          ? `Stage 3 Topping/Distribution (${minerviniPassedCount}/8 · Below 50D SMA)`
+          : `Stage 1 Basing (${minerviniPassedCount}/8 · Building 50/200D Base)`;
+
+  // Multi-horizon composite return for cross-sectional Relative Strength ranking
+  const retOver = (days: number): number => {
+    const idx = Math.max(0, n - 1 - days);
+    const base = closes[idx];
+    return base > 0 ? ((price - base) / base) * 100 : 0;
+  };
+  const compositeReturnPct = Number((retOver(21) * 0.4 + retOver(63) * 0.4 + retOver(126) * 0.2).toFixed(2));
+
+  // 20-Day Average Daily Traded Value (ADTV) Liquidity Floor
+  let adtvSum = 0;
+  let adtvCnt = 0;
+  const volLen = Math.min(n, volumes.length);
+  for (let i = Math.max(0, volLen - 20); i < volLen; i++) {
+    const c = closes[i];
+    const v = volumes[i];
+    if (c > 0 && v > 0) {
+      adtvSum += c * v;
+      adtvCnt += 1;
+    }
+  }
+  const adtv20d = adtvCnt > 0 ? adtvSum / adtvCnt : 0;
+  const adtvFloor = currency === 'IDR' ? 10_000_000_000 : 20_000_000;
+  const adtvPassed = adtv20d <= 0 ? true : adtv20d >= adtvFloor;
+  const adtvLabel =
+    adtv20d <= 0
+      ? 'N/A'
+      : currency === 'IDR'
+        ? adtv20d >= 1e12
+          ? `Rp ${(adtv20d / 1e12).toFixed(2)}T`
+          : `Rp ${(adtv20d / 1e9).toFixed(1)}B`
+        : adtv20d >= 1e9
+          ? `$${(adtv20d / 1e9).toFixed(2)}B`
+          : `$${(adtv20d / 1e6).toFixed(0)}M`;
+
+  // Phase 2: VCP (Volatility Contraction Pattern) Tightness & Volume Dry-Up
+  const recent10H = n >= 10 ? Math.max(...highs.slice(-10)) : dayHigh;
+  const recent10L = n >= 10 ? Math.min(...lows.slice(-10)) : dayLow;
+  const prior25SliceH = n >= 30 ? highs.slice(-35, -10) : highs.slice(0, Math.max(1, n - 5));
+  const prior25SliceL = n >= 30 ? lows.slice(-35, -10) : lows.slice(0, Math.max(1, n - 5));
+  const prior25H = prior25SliceH.length > 0 ? Math.max(...prior25SliceH) : recent10H;
+  const prior25L = prior25SliceL.length > 0 ? Math.min(...prior25SliceL) : recent10L;
+  const range10Pct = price > 0 ? ((recent10H - recent10L) / price) * 100 : 12;
+  const range25Pct = price > 0 ? ((prior25H - prior25L) / price) * 100 : range10Pct;
+  const v5 = volLen >= 5 ? volumes.slice(-5).reduce((a, b) => a + b, 0) / 5 : 0;
+  const v20 = volLen >= 20 ? volumes.slice(-20).reduce((a, b) => a + b, 0) / 20 : v5;
+  const vcpDryUpRatio = v20 > 0 ? Number((v5 / v20).toFixed(2)) : 1.0;
+  const vcpContractionPct = Number(range10Pct.toFixed(1));
+  const vcpDetected =
+    n >= 20 &&
+    range10Pct <= 11.5 &&
+    range25Pct >= range10Pct * 1.2 &&
+    vcpDryUpRatio <= 0.88 &&
+    price >= sma50Num * 0.96;
+  const vcpSummary = vcpDetected
+    ? `VCP Tight (${vcpContractionPct}% 10D range · ${vcpDryUpRatio}x vol dry-up)`
+    : range10Pct <= 9.5 && price >= sma50Num * 0.97
+      ? `Tight Base (${vcpContractionPct}% 10D range)`
+      : undefined;
+
+  // Phase 2: 5-Day Multi-Session Accumulation Persistence (0..5)
+  let accPersistence5d = 0;
+  const start5 = Math.max(0, n - 5);
+  for (let i = start5; i < n; i++) {
+    const hi = highs[i];
+    const lo = lows[i];
+    const cl = closes[i];
+    const op = opens[i] ?? cl;
+    const rng = Math.max(1e-6, hi - lo);
+    const clv = ((cl - lo) - (hi - cl)) / rng;
+    const prevC = i > 0 ? closes[i - 1] : op;
+    const volOk = volLen > i && v20 > 0 ? volumes[i] >= v20 * 0.85 : true;
+    if ((cl >= prevC * 0.998 && clv >= 0.1 && volOk) || (cl > op && clv >= 0.25)) {
+      accPersistence5d += 1;
+    }
+  }
+
+  // Phase 3: Episodic Pivot (EP) / Catalyst Gap-Up Breakout Detector (last 3 bars)
+  let episodicPivot = false;
+  let epNote: string | undefined;
+  for (let i = Math.max(1, n - 3); i < n; i++) {
+    const prevC = closes[i - 1];
+    const op = opens[i] ?? closes[i];
+    const cl = closes[i];
+    const hi = highs[i];
+    const lo = lows[i];
+    const gapPct = prevC > 0 ? ((op - prevC) / prevC) * 100 : 0;
+    const barGainPct = prevC > 0 ? ((cl - prevC) / prevC) * 100 : 0;
+    const clv = hi > lo ? ((cl - lo) - (hi - cl)) / (hi - lo) : 0;
+    const barVolRatio = volLen > i && v20 > 0 ? volumes[i] / v20 : 1;
+    if ((gapPct >= 4.0 || barGainPct >= 6.5) && barVolRatio >= 2.0 && clv >= 0.25 && cl >= sma50Num) {
+      episodicPivot = true;
+      epNote = `EP Catalyst (+${barGainPct.toFixed(1)}% · ${barVolRatio.toFixed(1)}x Vol · Close in upper range)`;
+      break;
+    }
+  }
+
   const trendFilterLabel: StockTradePlan['trendFilterLabel'] =
     ema20Num > ema50Num * 1.003 && price >= ema20Num * 0.985
       ? 'Uptrend (EMA20 > EMA50)'
@@ -4897,6 +5544,8 @@ function computeEquityTradePlanFromBars(params: {
   const entryZoneLow = action === 'SELL' ? entryPrice : snapStockTickServer(entryPrice - atr * 0.12, currency);
   const entryZoneHigh = action === 'BUY' ? entryPrice : snapStockTickServer(entryPrice + atr * 0.12, currency);
 
+  const trailingExitNote = `Scale 50% at TP1 → Move SL to BE → Trail runner on daily close < 10D EMA (${fmtStockLevelServer(ema10Num, currency)}) / 20D EMA (${fmtStockLevelServer(ema20Num, currency)}).`;
+
   return {
     action,
     conviction,
@@ -4918,13 +5567,38 @@ function computeEquityTradePlanFromBars(params: {
     demandHighNum: snappedDemHigh,
     supplyLowNum: snappedSupLow,
     supplyHighNum: snappedSupHigh,
+    ema10Num,
     ema20Num,
     ema50Num,
+    sma50Num,
+    sma150Num,
+    sma200Num,
     trendFilterLabel,
     verdictLabel,
     scannerScore,
     buyReasons: buyReasons.slice(0, 4),
     cautionNote,
+    // Stocks Phase 1, 2 & 3 Structural Telemetry
+    stage,
+    minerviniPassedCount,
+    minerviniTotalCount,
+    trendTemplateSummary,
+    rsVsBenchPct: compositeReturnPct,
+    atr14Pct,
+    adr20Pct,
+    w52HighDistPct,
+    w52LowGainPct,
+    adtv20d: Math.round(adtv20d),
+    adtvLabel,
+    adtvPassed,
+    vcpDetected,
+    vcpContractionPct,
+    vcpDryUpRatio,
+    vcpSummary,
+    accPersistence5d,
+    trailingExitNote,
+    episodicPivot,
+    epNote,
   };
 }
 
@@ -4999,7 +5673,7 @@ async function fetchEquityBandarmologyAndZonesMap(
     while (cursor < queue.length) {
       const target = queue[cursor++];
       try {
-        const json = await fetchYahooChartJson(target.yahooSymbol, '3mo', '1d', 4500);
+        const json = await fetchYahooChartJson(target.yahooSymbol, '1y', '1d', 5200);
         const item = json?.chart?.result?.[0];
         const q = item?.indicators?.quote?.[0];
         const rawC = q?.close ?? [];
@@ -6375,6 +7049,7 @@ const INDEX_AND_POPULAR_SYMBOLS: StockSearchItem[] = [
   { symbol: 'SPX', yahooSymbol: '^GSPC', name: 'S&P 500 Index', exchange: 'NYSE/CME · Index', typeDisp: 'Index', currency: 'USD', category: 'Equities', isIndex: true, assetId: 'SPX' },
   { symbol: 'IXIC', yahooSymbol: '^IXIC', name: 'NASDAQ Composite Index', exchange: 'NASDAQ · Index', typeDisp: 'Index', currency: 'USD', category: 'Equities', isIndex: true, assetId: 'IXIC' },
   { symbol: 'DJI', yahooSymbol: '^DJI', name: 'Dow Jones Industrial Average', exchange: 'NYSE · Index', typeDisp: 'Index', currency: 'USD', category: 'Equities', isIndex: true, assetId: 'DJI' },
+  { symbol: 'N225', yahooSymbol: '^N225', name: 'Nikkei 225 Index', exchange: 'TSE · Japan', typeDisp: 'Index', currency: 'USD', category: 'Equities', isIndex: true, assetId: 'N225' },
   { symbol: 'UNTR', yahooSymbol: 'UNTR.JK', name: 'United Tractors Tbk PT', exchange: 'IDX', typeDisp: 'Equity', currency: 'IDR', category: 'Equities' },
   { symbol: 'BBCA', yahooSymbol: 'BBCA.JK', name: 'Bank Central Asia Tbk PT', exchange: 'IDX', typeDisp: 'Equity', currency: 'IDR', category: 'Equities' },
   { symbol: 'BBRI', yahooSymbol: 'BBRI.JK', name: 'Bank Rakyat Indonesia Tbk PT', exchange: 'IDX', typeDisp: 'Equity', currency: 'IDR', category: 'Equities' },
@@ -6865,6 +7540,23 @@ export interface MarketIntelligencePayload {
       bearTrigger: string;
       bearTarget: string;
     };
+    macroPillars?: Array<{
+      id: string;
+      label: string;
+      symbol: string;
+      valueText: string;
+      changePct: number;
+      role: string;
+      bias: 'bull' | 'bear' | 'neutral';
+    }>;
+    divergences?: string[];
+    invalidationLevel?: string;
+    tacticalPosture?: {
+      riskBudget: string;
+      favoredLongs: string;
+      favoredHedges: string;
+      eventRiskNote: string;
+    };
   };
   indexSessions: IndexSessionBrief[];
   aiRefined: boolean;
@@ -6985,6 +7677,12 @@ function resolveIndexPhase(assetId: string, nowDate: Date): SessionPhaseKey {
     if (!jkt.isWeekend && jkt.totalMin >= 11 * 60 + 30 && jkt.totalMin < 14 * 60) {
       return 'duringSession';
     }
+    return 'afterClose';
+  }
+  if (assetId === 'N225') {
+    const tyo = getTzClockServer(nowDate, 'Asia/Tokyo');
+    if (!tyo.isWeekend && tyo.totalMin >= 7 * 60 && tyo.totalMin < 9 * 60) return 'beforeOpen';
+    if (!tyo.isWeekend && tyo.totalMin >= 11 * 60 + 30 && tyo.totalMin < 12 * 60 + 30) return 'duringSession';
     return 'afterClose';
   }
   if (assetId === 'HSI') {
@@ -7114,6 +7812,7 @@ async function fetchMarketIntelligenceFresh(): Promise<MarketIntelligencePayload
     { id: 'IXIC', symbol: 'IXIC', name: 'NASDAQ Composite', region: 'US' },
     { id: 'DJI', symbol: 'DJI', name: 'Dow Jones Industrial', region: 'US' },
     { id: 'IHSG', symbol: 'IHSG', name: 'IDX Composite (IHSG)', region: 'Indonesia' },
+    { id: 'N225', symbol: 'N225', name: 'Nikkei 225 Japan', region: 'Asia-Pacific' },
     { id: 'HSI', symbol: 'HSI', name: 'Hang Seng Index', region: 'Asia-Pacific' },
     { id: 'TAIEX', symbol: 'TAIEX', name: 'Taiwan Weighted', region: 'Asia-Pacific' },
     { id: 'KOSPI', symbol: 'KOSPI', name: 'KOSPI Korea', region: 'Asia-Pacific' },
@@ -7673,6 +8372,153 @@ ${JSON.stringify(digestInput)}`,
     ? `${selectedMacroEvents[0].currency} ${selectedMacroEvents[0].title} (${selectedMacroEvents[0].timeWib})`
     : 'upcoming Tier-1 macro prints';
 
+  // Institutional Trader-Journal 6-Pillar Cross-Asset Regime Matrix
+  const macroPillars: NonNullable<
+    NonNullable<MarketIntelligencePayload['unifiedSynthesis']>['macroPillars']
+  > = [];
+
+  if (spx) {
+    macroPillars.push({
+      id: 'SPX',
+      label: 'US Risk Beta',
+      symbol: 'SPX',
+      valueText: spx.price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+      changePct: Number(spx.changePercent.toFixed(2)),
+      role: spx.changePercent >= 0.25 ? 'Risk-On Bid' : spx.changePercent <= -0.25 ? 'De-Risking' : 'Range Balance',
+      bias: spx.changePercent >= 0.2 ? 'bull' : spx.changePercent <= -0.2 ? 'bear' : 'neutral',
+    });
+  }
+  if (us10y) {
+    macroPillars.push({
+      id: 'US10Y',
+      label: 'Discount Rate',
+      symbol: 'US10Y',
+      valueText: `${us10y.price.toFixed(3)}%`,
+      changePct: Number(us10y.changePercent.toFixed(2)),
+      role: us10y.changePercent >= 0.6 ? 'Yield Headwind' : us10y.changePercent <= -0.6 ? 'Duration Relief' : 'Rates Anchored',
+      bias: us10y.changePercent <= -0.5 ? 'bull' : us10y.changePercent >= 0.6 ? 'bear' : 'neutral',
+    });
+  }
+  if (dxy) {
+    macroPillars.push({
+      id: 'DXY',
+      label: 'Global USD Liquidity',
+      symbol: 'DXY',
+      valueText: dxy.price.toFixed(2),
+      changePct: Number(dxy.changePercent.toFixed(2)),
+      role: dxy.changePercent >= 0.25 ? 'USD Tightening' : dxy.changePercent <= -0.25 ? 'USD Easing' : 'FX Neutral',
+      bias: dxy.changePercent <= -0.2 ? 'bull' : dxy.changePercent >= 0.25 ? 'bear' : 'neutral',
+    });
+  }
+  if (gold) {
+    macroPillars.push({
+      id: 'XAUUSD',
+      label: 'Sovereign Hedge',
+      symbol: 'XAU',
+      valueText: `$${gold.price.toLocaleString('en-US', { maximumFractionDigits: 1 })}`,
+      changePct: Number(gold.changePercent.toFixed(2)),
+      role: gold.changePercent >= 0.35 ? 'Haven / Debasement Bid' : gold.changePercent <= -0.35 ? 'Haven Unwind' : 'Consolidating',
+      bias: gold.changePercent >= 0.25 ? 'bull' : gold.changePercent <= -0.35 ? 'bear' : 'neutral',
+    });
+  }
+  if (btc) {
+    macroPillars.push({
+      id: 'BTCUSD',
+      label: '24/7 Liquidity Barometer',
+      symbol: 'BTC',
+      valueText: `$${btc.price.toLocaleString('en-US', { maximumFractionDigits: 0 })}`,
+      changePct: Number(btc.changePercent.toFixed(2)),
+      role: btc.changePercent >= 0.8 ? 'Liquidity Expansion' : btc.changePercent <= -0.8 ? 'Beta Liquidation' : 'Coiling',
+      bias: btc.changePercent >= 0.5 ? 'bull' : btc.changePercent <= -0.5 ? 'bear' : 'neutral',
+    });
+  }
+  if (ihsg || usdidr) {
+    const idrStress = (usdidr?.changePercent ?? 0) >= 0.25;
+    macroPillars.push({
+      id: ihsg ? 'IHSG' : 'USDIDR',
+      label: 'IDX / EM Flow',
+      symbol: ihsg ? 'IHSG' : 'USD/IDR',
+      valueText: ihsg
+        ? ihsg.price.toLocaleString('en-US', { maximumFractionDigits: 1 })
+        : `Rp ${Math.round(usdidr!.price).toLocaleString('en-US')}`,
+      changePct: Number((ihsg ? ihsg.changePercent : usdidr!.changePercent).toFixed(2)),
+      role: idrStress
+        ? 'FX Drag on EM'
+        : (ihsg?.changePercent ?? 0) >= 0.25
+          ? 'Foreign Inflow'
+          : (ihsg?.changePercent ?? 0) <= -0.25
+            ? 'EM Outflow'
+            : 'Selective IDX',
+      bias: (ihsg?.changePercent ?? 0) >= 0.2 && !idrStress
+        ? 'bull'
+        : (ihsg?.changePercent ?? 0) <= -0.2 || idrStress
+          ? 'bear'
+          : 'neutral',
+    });
+  }
+
+  // Professional Desk Cross-Asset Divergence Detection
+  const divergences: string[] = [];
+  if (spx && dxy && spx.changePercent >= 0.3 && dxy.changePercent >= 0.25) {
+    divergences.push(
+      `Equities vs USD Divergence: SPX (+${spx.changePercent.toFixed(2)}%) advancing despite stronger DXY (+${dxy.changePercent.toFixed(2)}%) — monitor for late-session multiple fade if yields follow.`
+    );
+  }
+  if (spx && gold && spx.changePercent >= 0.25 && gold.changePercent >= 0.4) {
+    divergences.push(
+      `Dual Bid (SPX + Gold): Both risk equities and XAU/USD (+${gold.changePercent.toFixed(2)}%) are rising together — signals fiscal/liquidity hedge buying rather than pure deflationary risk-off.`
+    );
+  }
+  if (btc && spx && Math.abs(btc.changePercent - spx.changePercent) >= 1.8) {
+    divergences.push(
+      btc.changePercent > spx.changePercent
+        ? `Liquidity Beta Lead: BTC (${btc.changePercent >= 0 ? '+' : ''}${btc.changePercent.toFixed(2)}%) is outpacing SPX (${spx.changePercent >= 0 ? '+' : ''}${spx.changePercent.toFixed(2)}%), hinting at improving offshore risk appetite.`
+        : `Liquidity Beta Lag: BTC (${btc.changePercent.toFixed(2)}%) is underperforming SPX (${spx.changePercent >= 0 ? '+' : ''}${spx.changePercent.toFixed(2)}%) — speculative liquidity is more cautious than cash equities.`
+    );
+  }
+  if (ihsg && usdidr && ihsg.changePercent < -0.25 && usdidr.changePercent > 0.2) {
+    divergences.push(
+      `EM FX Pressure: USD/IDR (+${usdidr.changePercent.toFixed(2)}%) weakening alongside IHSG (${ihsg.changePercent.toFixed(2)}%) — tighten IDX stops and favor USD-earner/commodity exporters.`
+    );
+  }
+
+  const invalidationLevel =
+    regimeTag === 'Risk-On Expansion'
+      ? `Thesis INVALIDATED if SPX closes below S1 (${spx?.support ?? 'session low'}), DXY reclaims ${dxy?.resistance ?? 'R1'}, or US10Y spikes above ${us10y?.resistance ?? 'R1'}.`
+      : regimeTag === 'Defensive De-Risking'
+        ? `Bearish thesis INVALIDATED if SPX reclaims ${spx?.resistance ?? 'R1'} with DXY breaking below ${dxy?.support ?? 'S1'} and US10Y retreating under ${us10y?.support ?? 'S1'}.`
+        : `Range thesis INVALIDATED on decisive 1H close outside SPX ${spx?.support ?? 'S1'}–${spx?.resistance ?? 'R1'} or DXY break beyond ${dxy?.resistance ?? 'R1'}.`;
+
+  const tacticalPosture: NonNullable<
+    NonNullable<MarketIntelligencePayload['unifiedSynthesis']>['tacticalPosture']
+  > =
+    regimeTag === 'Risk-On Expansion'
+      ? {
+          riskBudget: '1.0% Risk / Trade · Normal Desk Sizing',
+          favoredLongs: 'US Leaders, IDX Foreign Accumulation & Pullbacks in BTC/XAU',
+          favoredHedges: 'Trailing stops at structural S1; avoid chasing >2x ATR moves',
+          eventRiskNote: upcomingHighMacro
+            ? `Reduce intraday leverage 15m before ${upcomingHighMacro.currency} ${upcomingHighMacro.title} (${upcomingHighMacro.timeWib}).`
+            : 'No imminent Tier-1 shock inside 24h — execute planned pullback entries.',
+        }
+      : regimeTag === 'Defensive De-Risking'
+        ? {
+            riskBudget: '0.25%–0.5% Risk / Trade · Capital Preservation',
+            favoredLongs: 'XAU/USD Haven Demand, Short-Duration Cash, High-Quality Defensives',
+            favoredHedges: 'DXY strength, short weak-breadth supply rejects, raise cash buffer',
+            eventRiskNote: upcomingHighMacro
+              ? `High event volatility risk into ${upcomingHighMacro.currency} ${upcomingHighMacro.title} (${upcomingHighMacro.timeWib}) — A+ setups only.`
+              : 'Wait for confirmed Liquidity Sweep + MSS reversal before deploying fresh risk.',
+          }
+        : {
+            riskBudget: '0.5%–0.75% Risk / Trade · Selective A/A+ Only',
+            favoredLongs: 'Fresh Demand pullbacks with verified Foreign/Institutional accumulation',
+            favoredHedges: 'XAU/USD dips & mean-reversion fades at opposing HTF supply',
+            eventRiskNote: upcomingHighMacro
+              ? `Event-driven chop expected ahead of ${upcomingHighMacro.currency} ${upcomingHighMacro.title} (${upcomingHighMacro.timeWib}) — prefer limit orders.`
+              : 'Two-way rotational tape — book 50% at TP1 and move SL to Break-Even.',
+          };
+
   const unifiedSynthesis: NonNullable<MarketIntelligencePayload['unifiedSynthesis']> = {
     regimeTag,
     convictionPct: alignedAgreement,
@@ -7686,6 +8532,10 @@ ${JSON.stringify(digestInput)}`,
       bearTrigger: `DXY breaks ${dxy?.resistance ?? 'resistance'} or SPX fails S1 ${spx?.support ?? 'support'} on hawkish surprise`,
       bearTarget: `Defensives & bullion bid toward Gold ${gold?.resistance ?? 'R1'} as equities test lower liquidity shelves`,
     },
+    macroPillars,
+    divergences,
+    invalidationLevel,
+    tacticalPosture,
   };
 
   const result: MarketIntelligencePayload = {
@@ -9257,187 +10107,6 @@ export async function fetchMarketDepth(assetId: string): Promise<MarketDepthSnap
   );
 }
 
-// ============================================================================
-// Watchlist Cross-Asset Correlation Matrix (Real Aligned Daily Returns)
-// ============================================================================
-
-export interface CorrelationMatrixResponse {
-  timeframe: '1M' | '3M';
-  assetIds: string[];
-  matrix: number[][];
-  sampleDays: number;
-  updatedAt: string;
-}
-
-const correlationCache = new Map<'1M' | '3M', CacheEntry<CorrelationMatrixResponse>>();
-const datedHistoryCache = new Map<string, CacheEntry<Map<string, number>>>();
-
-async function fetchDatedDailyCloses(
-  yahooSymbol: string,
-  range: '1mo' | '3mo'
-): Promise<Map<string, number>> {
-  const key = `${yahooSymbol}:${range}`;
-  const now = Date.now();
-  const cached = datedHistoryCache.get(key);
-  if (cached && cached.expiresAt > now) {
-    return cached.data;
-  }
-
-  const out = new Map<string, number>();
-  try {
-    const res = await fetch(
-      `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
-        yahooSymbol
-      )}?range=${range}&interval=1d`,
-      { headers: UA_HEADERS, signal: AbortSignal.timeout(5500) }
-    );
-    if (!res.ok) return cached?.data ?? out;
-    const json = (await res.json()) as {
-      chart?: {
-        result?: Array<{
-          timestamp?: number[];
-          indicators?: { quote?: Array<{ close?: Array<number | null> }> };
-        }>;
-      };
-    };
-    const item = json.chart?.result?.[0];
-    const tsArr = item?.timestamp ?? [];
-    const closeArr = item?.indicators?.quote?.[0]?.close ?? [];
-    for (let i = 0; i < Math.min(tsArr.length, closeArr.length); i++) {
-      const ts = tsArr[i];
-      const c = closeArr[i];
-      if (typeof ts === 'number' && typeof c === 'number' && Number.isFinite(c) && c > 0) {
-        const dayKey = new Date(ts * 1000).toISOString().slice(0, 10);
-        out.set(dayKey, c);
-      }
-    }
-    if (out.size >= 5) {
-      datedHistoryCache.set(key, { data: out, expiresAt: now + 900_000 });
-      return out;
-    }
-  } catch {
-    // ignore and return fallback
-  }
-  return cached?.data ?? out;
-}
-
-function computeAlignedPearson(
-  mapA: Map<string, number>,
-  mapB: Map<string, number>
-): { r: number; pairs: number } {
-  const commonDates: string[] = [];
-  for (const date of mapA.keys()) {
-    if (mapB.has(date)) commonDates.push(date);
-  }
-  commonDates.sort();
-  if (commonDates.length < 5) return { r: 0, pairs: Math.max(0, commonDates.length - 1) };
-
-  const retA: number[] = [];
-  const retB: number[] = [];
-  for (let i = 1; i < commonDates.length; i++) {
-    const prevDate = commonDates[i - 1];
-    const currDate = commonDates[i];
-    const a0 = mapA.get(prevDate)!;
-    const a1 = mapA.get(currDate)!;
-    const b0 = mapB.get(prevDate)!;
-    const b1 = mapB.get(currDate)!;
-    if (a0 > 0 && a1 > 0 && b0 > 0 && b1 > 0) {
-      retA.push(Math.log(a1 / a0));
-      retB.push(Math.log(b1 / b0));
-    }
-  }
-
-  const n = retA.length;
-  if (n < 4) return { r: 0, pairs: n };
-
-  let sumA = 0;
-  let sumB = 0;
-  for (let i = 0; i < n; i++) {
-    sumA += retA[i];
-    sumB += retB[i];
-  }
-  const meanA = sumA / n;
-  const meanB = sumB / n;
-
-  let num = 0;
-  let denA = 0;
-  let denB = 0;
-  for (let i = 0; i < n; i++) {
-    const da = retA[i] - meanA;
-    const db = retB[i] - meanB;
-    num += da * db;
-    denA += da * da;
-    denB += db * db;
-  }
-
-  const den = Math.sqrt(denA * denB);
-  if (!Number.isFinite(den) || den <= 1e-12) return { r: 0, pairs: n };
-  const corr = Math.max(-1, Math.min(1, num / den));
-  return { r: Number(corr.toFixed(2)), pairs: n };
-}
-
-export async function fetchCorrelationMatrix(
-  timeframe: '1M' | '3M' = '1M'
-): Promise<CorrelationMatrixResponse> {
-  const tf: '1M' | '3M' = timeframe === '3M' ? '3M' : '1M';
-  const now = Date.now();
-  const cached = correlationCache.get(tf);
-  if (cached && cached.expiresAt > now) {
-    return cached.data;
-  }
-
-  return coalesceInFlight(
-    `correlation-matrix:${tf}`,
-    cached?.data,
-    async () => {
-      const range = tf === '3M' ? '3mo' : '1mo';
-      const assetConfigs = YAHOO_SYMBOL_CONFIG;
-      const assetIds = assetConfigs.map((c) => c.id);
-
-      const datedSeriesList = await Promise.all(
-        assetConfigs.map((c) => fetchDatedDailyCloses(c.yahooSymbol, range))
-      );
-
-      // Inject today's live quote price onto today's UTC date key so live session moves are reflected
-      const todayKey = new Date().toISOString().slice(0, 10);
-      const liveMap = new Map(
-        (quotesCache.entry?.data.quotes ?? []).map((q) => [q.id, q.price])
-      );
-      datedSeriesList.forEach((seriesMap, idx) => {
-        const livePx = liveMap.get(assetIds[idx]);
-        if (livePx && Number.isFinite(livePx) && livePx > 0 && seriesMap.size > 0) {
-          seriesMap.set(todayKey, livePx);
-        }
-      });
-
-      const n = assetIds.length;
-      const matrix: number[][] = Array.from({ length: n }, () => Array(n).fill(0));
-      let maxPairs = 0;
-
-      for (let i = 0; i < n; i++) {
-        matrix[i][i] = 1;
-        for (let j = i + 1; j < n; j++) {
-          const { r, pairs } = computeAlignedPearson(datedSeriesList[i], datedSeriesList[j]);
-          matrix[i][j] = r;
-          matrix[j][i] = r;
-          if (pairs > maxPairs) maxPairs = pairs;
-        }
-      }
-
-      const payload: CorrelationMatrixResponse = {
-        timeframe: tf,
-        assetIds,
-        matrix,
-        sampleDays: maxPairs > 0 ? maxPairs : tf === '3M' ? 60 : 20,
-        updatedAt: new Date().toISOString(),
-      };
-
-      correlationCache.set(tf, { data: payload, expiresAt: Date.now() + 300_000 });
-      return payload;
-    }
-  );
-}
-
 let warmupStarted = false;
 export function warmServerCaches(): void {
   if (warmupStarted) return;
@@ -9455,12 +10124,11 @@ export function warmServerCaches(): void {
           fetchLiveCalendar(),
           fetchTopStockMovers(),
         ]).then(() => {
-          // Stage 3: defer heavy heatmap, daily summary, correlations & intelligence so client boot traffic wins
+          // Stage 3: defer heavy heatmap, daily summary & intelligence so client boot traffic wins
           setTimeout(() => {
             void Promise.allSettled([
               fetchMarketHeatmap(),
               fetchDailyMarketSummary(),
-              fetchCorrelationMatrix('1M'),
               fetchMarketIntelligence(),
             ]);
           }, 1800);

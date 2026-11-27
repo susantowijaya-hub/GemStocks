@@ -114,6 +114,8 @@ export const FeedDiagnosticsBadge: React.FC<FeedDiagnosticsBadgeProps> = ({
   const providers = serverDiagnostics?.providers ?? [];
   const hasCachedFallback =
     clientTransport.usingBootstrapCache ||
+    Boolean(clientTransport.cachedFallbackActive) ||
+    Boolean(clientTransport.wsTimedOut) ||
     Boolean(serverDiagnostics?.hasCachedFallback) ||
     clientTransport.activeBackoffs.length > 0;
   const hasFailover = Boolean(serverDiagnostics?.hasFailover);
@@ -145,11 +147,13 @@ export const FeedDiagnosticsBadge: React.FC<FeedDiagnosticsBadgeProps> = ({
 
   const summaryStatusText = !isPulseActive
     ? 'Live Stream Paused (Snapshot Held)'
-    : hasCachedFallback
-      ? 'Cached Snapshot Fallback Active'
-      : hasFailover
-        ? 'Secondary Provider Failover Engaged'
-        : 'All Primary Providers Live';
+    : clientTransport.wsTimedOut
+      ? 'WebSocket >10s Timeout — Cached/HTTP Fallback Active'
+      : hasCachedFallback
+        ? 'Cached Snapshot Fallback Active'
+        : hasFailover
+          ? 'Secondary Provider Failover Engaged'
+          : 'Priority WSS + Throttled Sync Live';
 
   const tooltipSummary = !isPulseActive
     ? 'Live stream paused · Click to resume or inspect feed providers'
@@ -268,8 +272,10 @@ export const FeedDiagnosticsBadge: React.FC<FeedDiagnosticsBadgeProps> = ({
               <div className="text-[10px] text-[#6C6C70] dark:text-[#9EB5C8] truncate">
                 {isPulseActive
                   ? wsConnected
-                    ? 'Coinbase WSS + 1s quote streaming active'
-                    : 'Auto-refreshing live feed snapshots'
+                    ? 'Priority WSS (XAU/BTC) + throttled background sync'
+                    : clientTransport.wsTimedOut
+                      ? 'WS timed out (>10s) — serving cached & HTTP failover'
+                      : 'Auto-refreshing live feed snapshots'
                   : 'Paused — holding current prices cleanly'}
               </div>
             </div>
@@ -308,16 +314,24 @@ export const FeedDiagnosticsBadge: React.FC<FeedDiagnosticsBadgeProps> = ({
             </div>
             <div className="px-3 py-2">
               <div className="text-[10px] font-semibold text-[#6C6C70] dark:text-[#9EB5C8]">
-                Crypto Stream
+                Priority Stream
               </div>
               <div className="text-xs font-semibold text-[#1C1C1E] dark:text-white mt-0.5 flex items-center gap-1 truncate">
-                <Wifi className="w-3 h-3 shrink-0 text-[#0F7033] dark:text-[#4ADE80]" />
+                <Wifi
+                  className={`w-3 h-3 shrink-0 ${
+                    clientTransport.wsTimedOut
+                      ? 'text-[#D97706] dark:text-[#FBBF24]'
+                      : 'text-[#0F7033] dark:text-[#4ADE80]'
+                  }`}
+                />
                 <span className="truncate">
                   {clientTransport.wsFresh
-                    ? 'Coinbase WSS'
-                    : clientTransport.wsConnected
-                      ? 'WSS Idle'
-                      : 'REST Poll'}
+                    ? 'Priority WSS'
+                    : clientTransport.wsTimedOut
+                      ? 'HTTP Failover'
+                      : clientTransport.wsConnected
+                        ? 'WSS Idle'
+                        : 'HTTP Sync'}
                 </span>
               </div>
             </div>
@@ -327,12 +341,14 @@ export const FeedDiagnosticsBadge: React.FC<FeedDiagnosticsBadgeProps> = ({
               </div>
               <div
                 className={`text-xs font-semibold mt-0.5 truncate ${
-                  clientTransport.usingBootstrapCache
+                  clientTransport.usingBootstrapCache || clientTransport.cachedFallbackActive
                     ? 'text-[#9A5B06] dark:text-[#FBBF24]'
                     : 'text-[#0F7033] dark:text-[#4ADE80]'
                 }`}
               >
-                {clientTransport.usingBootstrapCache ? 'Bootstrap Cache' : 'Live Sync'}
+                {clientTransport.usingBootstrapCache || clientTransport.cachedFallbackActive
+                  ? 'Cached Fallback'
+                  : 'Live Sync'}
               </div>
             </div>
           </div>

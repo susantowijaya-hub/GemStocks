@@ -1,47 +1,54 @@
 @import "tailwindcss";
-@custom-variant dark (&:where(.obsidian, .obsidian *, .dark, .dark *));
+@custom-variant dark (&:where(.obsidian, .obsidian *, .velvet, .velvet *, .dark, .dark *));
 @custom-variant obsidian (&:where(.obsidian, .obsidian *));
+@custom-variant velvet (&:where(.velvet, .velvet *));
 @custom-variant arctic (&:where(.arctic, .arctic *));
 @custom-variant parchment (&:where(.parchment, .parchment *));
 
 @theme {
   --color-gain: #26A69A;
-  --color-gain-text-light: #0F7638;
+  --color-gain-text-light: #047857;
   --color-loss: #EF5350;
   --color-loss-text-light: #B91C1C;
   --color-breaking: #EF4444;
   --color-accent-light: #1D4ED8;
   --color-accent-dark: #2962FF;
   --font-sans: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
 @layer base {
   /* ==========================================================================
      Theme 2: Institutional Daylight (Cool Slate Canvas + Studio White Cards)
+     High-sunlight readability: deep navy ink, crisp borders, >= 7:1 contrast
      ========================================================================== */
   :root,
   html.arctic,
-  html:not(.obsidian):not(.parchment) {
+  html:not(.obsidian):not(.parchment):not(.velvet) {
     color-scheme: light;
     --bg-canvas: #F4F6F9;
     --bg-surface: #FFFFFF;
     --bg-strong: #FFFFFF;
-    --bg-inset: #F1F4F8;
-    --border-subtle: #DCE2EA;
-    --border-divider: #E6ECF2;
-    --text-primary: #0A2540;
-    --text-secondary: #425466;
-    --text-muted: #526375;
+    --bg-inset: #EFF3F8;
+    --border-subtle: #D1DBE6;
+    --border-divider: #E2E8F0;
+    --text-primary: #091E36;
+    --text-secondary: #334155;
+    --text-muted: #475569;
     --accent-primary: #1D4ED8;
     --accent-hover: #1E40AF;
-    --accent-soft: rgba(29, 78, 216, 0.10);
-    --gain-text: #0F7638;
+    --accent-soft: rgba(29, 78, 216, 0.11);
+    --gain-text: #047857;
+    --gain-bg: rgba(4, 120, 87, 0.12);
     --loss-text: #B91C1C;
+    --loss-bg: rgba(185, 28, 28, 0.11);
+    --warn-text: #92400E;
+    --warn-bg: rgba(180, 83, 9, 0.12);
   }
 
   /* ==========================================================================
      Theme 1: Desk Slate Pro (Deep Obsidian Canvas + Stepped Charcoal Panels)
+     Low-glare night grading: off-white #F0F3FA ink (no halation), luminous teal/coral
      ========================================================================== */
   html.obsidian,
   html.dark {
@@ -49,38 +56,73 @@
     --bg-canvas: #0B0E14;
     --bg-surface: #131722;
     --bg-strong: #171C28;
-    --bg-inset: #1E222D;
-    --border-subtle: #2A2E39;
-    --border-divider: #1F2430;
+    --bg-inset: #1D2331;
+    --border-subtle: #2C3344;
+    --border-divider: #202635;
     --text-primary: #F0F3FA;
-    --text-secondary: #9CA3AF;
-    --text-muted: #9CA3AF;
+    --text-secondary: #B6C2D4;
+    --text-muted: #94A3B8;
     --accent-primary: #2962FF;
     --accent-hover: #3B82F6;
-    --accent-soft: rgba(41, 98, 255, 0.16);
-    --gain-text: #26A69A;
-    --loss-text: #EF5350;
+    --accent-soft: rgba(41, 98, 255, 0.18);
+    --gain-text: #34D399;
+    --gain-bg: rgba(52, 211, 153, 0.15);
+    --loss-text: #F87171;
+    --loss-bg: rgba(248, 113, 113, 0.15);
+    --warn-text: #FBBF24;
+    --warn-bg: rgba(251, 191, 36, 0.15);
   }
 
   /* ==========================================================================
      Theme 3: Warm Editorial (Alabaster Matte + Sharp Slate Hairlines)
+     Anti-glare daylight reading: warm sepia charcoal ink, forest emerald & crimson
      ========================================================================== */
   html.parchment {
     color-scheme: light;
     --bg-canvas: #F4F0E6;
     --bg-surface: #FDFBF7;
     --bg-strong: #FCF9F2;
-    --bg-inset: #EFE9DA;
-    --border-subtle: #D8CFBC;
-    --border-divider: #E5DEC9;
-    --text-primary: #191815;
-    --text-secondary: #4D473C;
-    --text-muted: #5C5549;
+    --bg-inset: #EDE6D6;
+    --border-subtle: #CFC4AE;
+    --border-divider: #E1D9C6;
+    --text-primary: #191714;
+    --text-secondary: #3F3A31;
+    --text-muted: #544D42;
     --accent-primary: #B4410E;
     --accent-hover: #9A3412;
-    --accent-soft: rgba(180, 65, 14, 0.10);
-    --gain-text: #0F7638;
-    --loss-text: #B91C1C;
+    --accent-soft: rgba(180, 65, 14, 0.11);
+    --gain-text: #065F46;
+    --gain-bg: rgba(6, 95, 70, 0.12);
+    --loss-text: #991B1B;
+    --loss-bg: rgba(153, 27, 27, 0.11);
+    --warn-text: #92400E;
+    --warn-bg: rgba(180, 83, 9, 0.12);
+  }
+
+  /* ==========================================================================
+     Theme 4: Velvet Calm Coral (Nodeka-Inspired Midnight Plum + Vermilion Coral)
+     Calm nocturnal luxury: smoked indigo-plum cards, warm alabaster ink, coral focus
+     ========================================================================== */
+  html.velvet {
+    color-scheme: dark;
+    --bg-canvas: #0D0B14;
+    --bg-surface: #161320;
+    --bg-strong: #1B1828;
+    --bg-inset: #211D30;
+    --border-subtle: #2D2842;
+    --border-divider: #231F35;
+    --text-primary: #F6F4FA;
+    --text-secondary: #C6C0D6;
+    --text-muted: #9790AB;
+    --accent-primary: #F9574B;
+    --accent-hover: #FF6B5F;
+    --accent-soft: rgba(249, 87, 75, 0.16);
+    --gain-text: #34D399;
+    --gain-bg: rgba(52, 211, 153, 0.14);
+    --loss-text: #FB6B62;
+    --loss-bg: rgba(251, 107, 98, 0.15);
+    --warn-text: #FBBF24;
+    --warn-bg: rgba(251, 191, 36, 0.15);
   }
 
   html {
@@ -89,15 +131,28 @@
     font-family: var(--font-sans);
   }
 
-  html.theme-switching *,
-  html.theme-switching *::before,
-  html.theme-switching *::after {
-    transition: none !important;
+  html.theme-transition,
+  html.theme-transition *,
+  html.theme-transition *::before,
+  html.theme-transition *::after {
+    transition-property: background-color, border-color, color, fill, stroke, box-shadow;
+    transition-duration: 180ms;
+    transition-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    html.theme-transition,
+    html.theme-transition *,
+    html.theme-transition *::before,
+    html.theme-transition *::after {
+      transition: none !important;
+    }
   }
 
   body,
   html.arctic body,
   html.obsidian body,
+  html.velvet body,
   html.dark body,
   html.parchment body {
     overscroll-behavior-y: contain;
@@ -115,7 +170,7 @@
 }
 
 /* ============================================================================
-   Flat Matte Terminal Backdrop (No noisy radial blobs)
+   Flat Matte Terminal Backdrop + Nodeka Calm Studio Horizon (Velvet Theme)
    ============================================================================ */
 .ambient-theme-canvas {
   position: fixed;
@@ -124,6 +179,13 @@
   pointer-events: none;
   opacity: 1;
   background-color: var(--bg-canvas);
+}
+
+html.velvet .ambient-theme-canvas {
+  background:
+    radial-gradient(ellipse 85% 42% at 50% -8%, rgba(249, 87, 75, 0.14), rgba(88, 36, 68, 0.1) 42%, transparent 74%),
+    radial-gradient(ellipse 50% 35% at 88% 100%, rgba(124, 58, 130, 0.08), transparent 68%),
+    #0D0B14;
 }
 
 /* ============================================================================
@@ -156,9 +218,18 @@
 
 html.obsidian .liquid-glass,
 html.obsidian .liquid-glass-card,
+html.velvet .liquid-glass,
+html.velvet .liquid-glass-card,
 html.dark .liquid-glass,
 html.dark .liquid-glass-card {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.28);
+}
+
+html.velvet .liquid-glass,
+html.velvet .liquid-glass-card {
+  box-shadow:
+    0 2px 10px rgba(4, 2, 10, 0.34),
+    inset 0 1px 0 rgba(255, 255, 255, 0.03);
 }
 
 html.obsidian .liquid-glass-strong,
@@ -166,13 +237,33 @@ html.dark .liquid-glass-strong {
   box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
 }
 
-/* Crisp Electric Cobalt for interactive UI controls (no amber overrides) */
+html.velvet .liquid-glass-strong {
+  box-shadow:
+    0 14px 34px rgba(4, 2, 12, 0.58),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+/* Crisp Electric Cobalt for interactive UI controls (Obsidian) */
 html.obsidian .bg-\[\#0066CC\],
 html.obsidian .bg-\[\#0071E3\],
 html.dark .bg-\[\#0066CC\],
 html.dark .bg-\[\#0071E3\] {
   background-color: #2962FF;
   box-shadow: 0 1px 6px rgba(41, 98, 255, 0.28);
+}
+
+/* Vermilion Coral primary controls (Velvet / Nodeka-inspired) */
+html.velvet .bg-\[\#0066CC\],
+html.velvet .bg-\[\#0071E3\] {
+  background-color: #F9574B;
+  box-shadow: 0 2px 12px rgba(249, 87, 75, 0.28);
+}
+
+html.velvet .text-\[\#38BDF8\],
+html.velvet .text-\[\#60A5FA\],
+html.velvet .text-\[\#0071E3\],
+html.velvet .text-\[\#005BB8\] {
+  color: #FF786E;
 }
 
 html.parchment .bg-\[\#0066CC\],
@@ -182,31 +273,79 @@ html.parchment .bg-\[\#0071E3\] {
 }
 
 /* ============================================================================
-   WCAG High-Contrast Legibility Calibration Across All 3 Themes
+   Calibrated Financial Numeric Scale (Daylight + Night Legibility)
+   IBM Plex Mono with strict tabular-nums, lining-nums, and slashed zero
+   ============================================================================ */
+.font-mono,
+.num-hero,
+.num-card,
+.num-table,
+.num-delta {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums lining-nums;
+  font-feature-settings: "tnum" 1, "lnum" 1, "zero" 1;
+}
+
+.num-hero {
+  font-size: clamp(1.75rem, 2.6vw, 2.35rem);
+  font-weight: 700;
+  line-height: 1.08;
+  letter-spacing: -0.025em;
+}
+
+.num-card {
+  font-size: clamp(1.125rem, 1.5vw, 1.375rem);
+  font-weight: 700;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+}
+
+.num-table {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+}
+
+.num-delta {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+html.obsidian body,
+html.velvet body,
+html.dark body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ============================================================================
+   WCAG High-Contrast Legibility Calibration Across All 4 Themes
    ============================================================================ */
 html.arctic .text-\[\#1C1C1E\],
-html:not(.obsidian):not(.parchment) .text-\[\#1C1C1E\] {
-  color: #0A2540;
+html:not(.obsidian):not(.parchment):not(.velvet) .text-\[\#1C1C1E\] {
+  color: #091E36;
 }
 
 html.arctic .text-\[\#6C6C70\],
 html.arctic .text-\[\#4A4D57\],
-html:not(.obsidian):not(.parchment) .text-\[\#6C6C70\],
-html:not(.obsidian):not(.parchment) .text-\[\#4A4D57\] {
-  color: #425466;
+html:not(.obsidian):not(.parchment):not(.velvet) .text-\[\#6C6C70\],
+html:not(.obsidian):not(.parchment):not(.velvet) .text-\[\#4A4D57\] {
+  color: #334155;
 }
 
 html.parchment .text-\[\#1C1C1E\] {
-  color: #191815;
+  color: #191714;
 }
 
 html.parchment .text-\[\#6C6C70\],
 html.parchment .text-\[\#4A4D57\] {
-  color: #4D473C;
+  color: #3F3A31;
 }
 
 html.parchment .border-\[\#E5E5EA\] {
-  border-color: #D8CFBC;
+  border-color: #CFC4AE;
 }
 
 html.parchment .text-\[\#0071E3\],
@@ -221,7 +360,7 @@ html.dark .text-\[\#8E8E93\] {
 
 html.obsidian .text-\[\#9EB5C8\],
 html.dark .text-\[\#9EB5C8\] {
-  color: #A9B4C4;
+  color: #B6C2D4;
 }
 
 html.obsidian .text-\[\#AEAEB2\],
@@ -229,22 +368,47 @@ html.dark .text-\[\#AEAEB2\] {
   color: #CBD5E1;
 }
 
-html:not(.obsidian) .text-\[\#16803C\] {
-  color: #0F7638;
+html.velvet .text-\[\#8E8E93\] {
+  color: #A29BB6;
+}
+
+html.velvet .text-\[\#9EB5C8\] {
+  color: #C2BCD4;
+}
+
+html.velvet .text-\[\#AEAEB2\] {
+  color: #D5D0E4;
+}
+
+html:not(.obsidian):not(.velvet) .text-\[\#16803C\] {
+  color: #047857;
+}
+
+html.parchment .text-\[\#16803C\] {
+  color: #065F46;
 }
 
 html.obsidian .text-\[\#30D158\],
+html.velvet .text-\[\#30D158\],
 html.dark .text-\[\#30D158\] {
   color: #34D399;
 }
 
-html:not(.obsidian) .text-\[\#D7261C\] {
+html:not(.obsidian):not(.velvet) .text-\[\#D7261C\] {
   color: #B91C1C;
+}
+
+html.parchment .text-\[\#D7261C\] {
+  color: #991B1B;
 }
 
 html.obsidian .text-\[\#FF453A\],
 html.dark .text-\[\#FF453A\] {
   color: #F87171;
+}
+
+html.velvet .text-\[\#FF453A\] {
+  color: #FB6B62;
 }
 
 /* Thin clean scrollbar on desktop, hidden on mobile horizontal carousels */
@@ -363,6 +527,16 @@ html.dark .skeleton-shimmer::after {
   );
 }
 
+html.velvet .skeleton-shimmer::after {
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(249, 87, 75, 0.12) 45%,
+    rgba(255, 255, 255, 0.06) 55%,
+    transparent 100%
+  );
+}
+
 @keyframes terminal-skeleton-shimmer {
   0% {
     transform: translateX(-100%);
@@ -406,6 +580,15 @@ html.dark .spot-plaque-surface {
     inset 0 -2px 0 rgba(0, 0, 0, 0.45);
 }
 
+html.velvet .spot-plaque-surface {
+  background: #1B1828;
+  border: 1px solid #322C4A;
+  box-shadow:
+    0 4px 14px rgba(5, 3, 12, 0.48),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    inset 0 -2px 0 rgba(5, 3, 12, 0.50);
+}
+
 .spot-plaque-surface.spot-plaque-active-buy {
   border-color: rgba(15, 118, 56, 0.55);
   box-shadow:
@@ -414,6 +597,7 @@ html.dark .spot-plaque-surface {
 }
 
 html.obsidian .spot-plaque-surface.spot-plaque-active-buy,
+html.velvet .spot-plaque-surface.spot-plaque-active-buy,
 html.dark .spot-plaque-surface.spot-plaque-active-buy {
   border-color: rgba(38, 166, 154, 0.62);
   box-shadow:
@@ -430,12 +614,13 @@ html.dark .spot-plaque-surface.spot-plaque-active-buy {
 }
 
 html.obsidian .spot-plaque-surface.spot-plaque-active-sell,
+html.velvet .spot-plaque-surface.spot-plaque-active-sell,
 html.dark .spot-plaque-surface.spot-plaque-active-sell {
-  border-color: rgba(239, 83, 80, 0.62);
+  border-color: rgba(249, 87, 75, 0.65);
   box-shadow:
     0 4px 14px rgba(0, 0, 0, 0.45),
-    0 0 0 1px rgba(239, 83, 80, 0.16),
-    inset 0 -2px 0 rgba(239, 83, 80, 0.24);
+    0 0 0 1px rgba(249, 87, 75, 0.18),
+    inset 0 -2px 0 rgba(249, 87, 75, 0.24);
 }
 
 /* Optimal Entry Zone subtle pulse ring around spot plaques */
@@ -455,6 +640,7 @@ html.dark .spot-plaque-surface.spot-plaque-active-sell {
 }
 
 html.obsidian .spot-plaque-entry-pulse-buy::after,
+html.velvet .spot-plaque-entry-pulse-buy::after,
 html.dark .spot-plaque-entry-pulse-buy::after {
   border-color: rgba(52, 211, 153, 0.78);
 }
@@ -464,8 +650,9 @@ html.dark .spot-plaque-entry-pulse-buy::after {
 }
 
 html.obsidian .spot-plaque-entry-pulse-sell::after,
+html.velvet .spot-plaque-entry-pulse-sell::after,
 html.dark .spot-plaque-entry-pulse-sell::after {
-  border-color: rgba(248, 113, 113, 0.78);
+  border-color: rgba(249, 87, 75, 0.8);
 }
 
 @keyframes spot-entry-zone-pulse {
@@ -490,8 +677,9 @@ html.parchment .spot-price-3d-hero {
 }
 
 html.obsidian .spot-price-3d-hero,
+html.velvet .spot-price-3d-hero,
 html.dark .spot-price-3d-hero {
-  color: #F8FAFC;
+  color: #F6F4FA;
   text-shadow: 0 2px 6px rgba(0, 0, 0, 0.65);
 }
 
@@ -505,11 +693,13 @@ html.dark .spot-price-3d-hero {
 }
 
 html.obsidian .spot-price-flash-up,
+html.velvet .spot-price-flash-up,
 html.dark .spot-price-flash-up {
   animation: spot-tick-flash-up-dark 650ms cubic-bezier(0.22, 1, 0.36, 1) 1;
 }
 
 html.obsidian .spot-price-flash-down,
+html.velvet .spot-price-flash-down,
 html.dark .spot-price-flash-down {
   animation: spot-tick-flash-down-dark 650ms cubic-bezier(0.22, 1, 0.36, 1) 1;
 }
@@ -546,8 +736,10 @@ html.dark .spot-price-flash-down {
   .spot-price-flash-up,
   .spot-price-flash-down,
   html.obsidian .spot-price-flash-up,
+  html.velvet .spot-price-flash-up,
   html.dark .spot-price-flash-up,
   html.obsidian .spot-price-flash-down,
+  html.velvet .spot-price-flash-down,
   html.dark .spot-price-flash-down {
     animation: none;
   }
@@ -562,14 +754,15 @@ html.parchment .spot-price-3d-card {
 }
 
 html.obsidian .spot-price-3d-card,
+html.velvet .spot-price-3d-card,
 html.dark .spot-price-3d-card {
-  color: #F0F3FA;
+  color: #F6F4FA;
 }
 
-@keyframes stocks-route-enter {
+@keyframes stocks-route-enter-next {
   from {
-    opacity: 0.72;
-    transform: translate3d(10px, 0, 0);
+    opacity: 0.78;
+    transform: translate3d(18px, 0, 0);
   }
   to {
     opacity: 1;
@@ -577,12 +770,124 @@ html.dark .spot-price-3d-card {
   }
 }
 
-.animate-route-enter {
-  animation: stocks-route-enter 180ms cubic-bezier(0.16, 1, 0.3, 1) both;
+@keyframes stocks-route-enter-prev {
+  from {
+    opacity: 0.78;
+    transform: translate3d(-18px, 0, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+.animate-route-enter,
+.animate-route-enter-next {
+  animation: stocks-route-enter-next 200ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.animate-route-enter-prev {
+  animation: stocks-route-enter-prev 200ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* Subtle WebSocket Trade-Tick Breathe Effect on Dashboard Market Cards (Compositor-Only) */
+.card-tick-breathe {
+  position: relative;
+}
+
+.card-tick-breathe::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  opacity: 0;
+  will-change: opacity, transform;
+}
+
+.card-tick-breathe-gain {
+  animation: card-breathe-scale 700ms cubic-bezier(0.22, 1, 0.36, 1) 1;
+}
+
+.card-tick-breathe-gain::after {
+  box-shadow: inset 0 0 0 1.5px rgba(22, 163, 74, 0.52), 0 0 14px rgba(22, 163, 74, 0.16);
+  background: radial-gradient(circle at 80% 25%, rgba(34, 197, 94, 0.14), transparent 70%);
+  animation: card-breathe-halo 700ms cubic-bezier(0.22, 1, 0.36, 1) 1;
+}
+
+html.obsidian .card-tick-breathe-gain::after,
+html.velvet .card-tick-breathe-gain::after,
+html.dark .card-tick-breathe-gain::after {
+  box-shadow: inset 0 0 0 1.5px rgba(52, 211, 153, 0.55), 0 0 16px rgba(52, 211, 153, 0.18);
+  background: radial-gradient(circle at 80% 25%, rgba(52, 211, 153, 0.16), transparent 70%);
+}
+
+.card-tick-breathe-loss {
+  animation: card-breathe-scale 700ms cubic-bezier(0.22, 1, 0.36, 1) 1;
+}
+
+.card-tick-breathe-loss::after {
+  box-shadow: inset 0 0 0 1.5px rgba(220, 38, 38, 0.5), 0 0 14px rgba(220, 38, 38, 0.15);
+  background: radial-gradient(circle at 80% 25%, rgba(239, 68, 68, 0.13), transparent 70%);
+  animation: card-breathe-halo 700ms cubic-bezier(0.22, 1, 0.36, 1) 1;
+}
+
+html.obsidian .card-tick-breathe-loss::after,
+html.velvet .card-tick-breathe-loss::after,
+html.dark .card-tick-breathe-loss::after {
+  box-shadow: inset 0 0 0 1.5px rgba(249, 87, 75, 0.55), 0 0 16px rgba(249, 87, 75, 0.18);
+  background: radial-gradient(circle at 80% 25%, rgba(249, 87, 75, 0.16), transparent 70%);
+}
+
+.card-tick-breathe-neutral {
+  animation: card-breathe-scale 650ms cubic-bezier(0.22, 1, 0.36, 1) 1;
+}
+
+.card-tick-breathe-neutral::after {
+  box-shadow: inset 0 0 0 1px rgba(29, 78, 216, 0.36);
+  background: radial-gradient(circle at 80% 25%, rgba(56, 189, 248, 0.1), transparent 70%);
+  animation: card-breathe-halo 650ms cubic-bezier(0.22, 1, 0.36, 1) 1;
+}
+
+html.velvet .card-tick-breathe-neutral::after {
+  box-shadow: inset 0 0 0 1px rgba(249, 87, 75, 0.42);
+  background: radial-gradient(circle at 80% 25%, rgba(249, 87, 75, 0.12), transparent 70%);
+}
+
+@keyframes card-breathe-scale {
+  0% {
+    transform: scale(1);
+  }
+  32% {
+    transform: scale(1.014);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes card-breathe-halo {
+  0% {
+    opacity: 0;
+  }
+  28% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .animate-route-enter {
+  .animate-route-enter,
+  .animate-route-enter-next,
+  .animate-route-enter-prev,
+  .card-tick-breathe-gain,
+  .card-tick-breathe-loss,
+  .card-tick-breathe-neutral,
+  .card-tick-breathe-gain::after,
+  .card-tick-breathe-loss::after,
+  .card-tick-breathe-neutral::after {
     animation: none;
   }
 }

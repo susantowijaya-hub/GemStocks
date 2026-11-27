@@ -31,7 +31,7 @@ service cloud.firestore {
     }
 
     function isValidId(id) {
-      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_-]+$');
     }
 
     // =========================================================================
@@ -44,7 +44,6 @@ service cloud.firestore {
         && data.uid == request.auth.uid
         && data.uid == userId
         && data.uid.size() >= 1 && data.uid.size() <= 128
-        && data.uid.matches('^[a-zA-Z0-9_\\-]+$')
         && data.email is string
         && data.email.size() >= 3 && data.email.size() <= 254
         && data.displayName is string
@@ -68,28 +67,27 @@ service cloud.firestore {
         && data.ownerId is string
         && data.ownerId == request.auth.uid
         && data.ownerId == userId
-        && data.ownerId.size() >= 1 && data.ownerId.size() <= 128
-        && data.ownerId.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.ownerId.size() <= 128
         && data.symbol is string
         && data.symbol.size() >= 1 && data.symbol.size() <= 20
-        && data.symbol.matches('^[A-Z0-9._\\-/^=]+$')
+        && data.symbol.matches('^[A-Z0-9._/^=-]+$')
         && data.name is string
         && data.name.size() >= 1 && data.name.size() <= 120
         && data.category is string
         && data.category.size() <= 24
         && data.category in ['Equities', 'Crypto', 'Commodities', 'Cash & FX']
-        && (data.units is int || data.units is float) && data.units >= 0
-        && (data.avgCost is int || data.avgCost is float) && data.avgCost >= 0
-        && (data.currentPrice is int || data.currentPrice is float) && data.currentPrice >= 0
+        && data.units is number && data.units >= 0
+        && data.avgCost is number && data.avgCost >= 0
+        && data.currentPrice is number && data.currentPrice >= 0
         && (!('linkedAssetId' in data) || (
           data.linkedAssetId is string &&
           data.linkedAssetId.size() <= 32 &&
-          data.linkedAssetId.matches('^[a-zA-Z0-9_\\-]*$')
+          data.linkedAssetId.matches('^[a-zA-Z0-9_-]*$')
         ))
         && (!('portfolioId' in data) || (
           data.portfolioId is string &&
           data.portfolioId.size() <= 64 &&
-          data.portfolioId.matches('^[a-zA-Z0-9_\\-]*$')
+          data.portfolioId.matches('^[a-zA-Z0-9_-]*$')
         ))
         && (!('portfolioName' in data) || (
           data.portfolioName is string &&
@@ -101,7 +99,7 @@ service cloud.firestore {
           data.nativeCurrency in ['USD', 'IDR']
         ))
         && (!('nativeAvgCost' in data) || (
-          (data.nativeAvgCost is int || data.nativeAvgCost is float) &&
+          data.nativeAvgCost is number &&
           data.nativeAvgCost >= 0
         ))
         && data.createdAt is timestamp
@@ -120,8 +118,7 @@ service cloud.firestore {
         && data.ownerId is string
         && data.ownerId == request.auth.uid
         && data.ownerId == userId
-        && data.ownerId.size() >= 1 && data.ownerId.size() <= 128
-        && data.ownerId.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.ownerId.size() <= 128
         && data.nfpAlertEnabled is bool
         && data.preferredCurrency is string
         && data.preferredCurrency.size() <= 8
@@ -139,8 +136,7 @@ service cloud.firestore {
         && data.ownerId is string
         && data.ownerId == request.auth.uid
         && data.ownerId == userId
-        && data.ownerId.size() >= 1 && data.ownerId.size() <= 128
-        && data.ownerId.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.ownerId.size() <= 128
         && data.query is string
         && data.query.size() >= 1 && data.query.size() <= 500
         && (!('assetSymbol' in data) || (data.assetSymbol is string && data.assetSymbol.size() <= 24))
@@ -155,6 +151,108 @@ service cloud.firestore {
           data.sources[0].uri is string && data.sources[0].uri.size() <= 1024
         ))
         && data.createdAt is timestamp;
+    }
+
+    // Expression-budget-optimized SignalHistory validation (<650 AST evaluations on create & update)
+    function isValidSignalCoreFields(data, userId) {
+      let keys = data.keys();
+      return keys.hasAll([
+          'ownerId', 'lockKey', 'assetClass', 'sourceEngine', 'symbol',
+          'entryPrice', 'stopLoss', 'tp1', 'tp2', 'status', 'createdAt', 'updatedAt'
+        ])
+        && keys.hasOnly([
+          'ownerId', 'lockKey', 'assetClass', 'sourceEngine', 'symbol', 'assetId',
+          'name', 'currency', 'decimals', 'timeframe', 'direction', 'strategyTag',
+          'confidence', 'firstShownPrice', 'entryPrice', 'entryLow', 'entryHigh',
+          'stopLoss', 'tp1', 'tp2', 'riskReward', 'status', 'filledOnFirstSight',
+          'executionPosture', 'zoneFillVerified', 'verificationStatus', 'verifiedAtMs',
+          'userOutcome', 'journalNote', 'journaledAtMs',
+          'timestamp', 'strategy', 'outcome',
+          'createdAtMs', 'filledAtMs', 'tp1HitAtMs', 'closedAtMs', 'closedPrice',
+          'lastPrice', 'maxFavorablePrice', 'maxAdversePrice',
+          'pnlPct', 'rMultiple', 'lastCheckedAtMs',
+          'mfeR', 'maeR', 'barrierOutcome', 'timeBarrierAtMs',
+          'inKillzone', 'po3Aligned', 'smtConfirmed', 'volatilityRegime', 'htfAligned', 'netRr',
+          'stage2Aligned', 'rsRank', 'vcpDetected', 'sectorLeader',
+          'createdAt', 'updatedAt'
+        ])
+        && data.ownerId == request.auth.uid
+        && data.ownerId == userId
+        && data.lockKey is string && data.lockKey.size() <= 80
+        && data.assetClass in ['stock_id', 'stock_us', 'crypto', 'commodity']
+        && data.sourceEngine in ['idx_scanner', 'us_scanner', 'ict_radar', 'sdcv_radar']
+        && data.symbol is string && data.symbol.size() <= 24
+        && data.assetId is string && data.assetId.size() <= 32
+        && data.name is string && data.name.size() <= 120
+        && data.currency in ['USD', 'IDR']
+        && data.decimals is number
+        && data.timeframe is string && data.timeframe.size() <= 8
+        && data.direction in ['BUY', 'SELL']
+        && data.strategyTag is string && data.strategyTag.size() <= 140
+        && data.confidence is number;
+    }
+
+    function isValidSignalLevelsAndState(data) {
+      return data.firstShownPrice is number
+        && data.entryPrice is number && data.entryPrice > 0
+        && data.entryLow is number
+        && data.entryHigh is number
+        && data.stopLoss is number && data.stopLoss > 0
+        && data.tp1 is number && data.tp1 > 0
+        && data.tp2 is number && data.tp2 > 0
+        && data.riskReward is string && data.riskReward.size() <= 24
+        && data.status in ['PENDING_LIMIT', 'RUNNING', 'TP1_HIT', 'TP2_HIT', 'SL_HIT', 'BE_CLOSED', 'EXPIRED']
+        && data.filledOnFirstSight is bool
+        && data.createdAtMs is number
+        && data.lastPrice is number && data.lastPrice > 0
+        && data.maxFavorablePrice is number
+        && data.maxAdversePrice is number
+        && data.pnlPct is number
+        && data.rMultiple is number
+        && data.lastCheckedAtMs is number
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidSignalOptionalFields(data) {
+      return (!('executionPosture' in data) || (data.executionPosture is string && data.executionPosture.size() <= 24))
+        && (!('zoneFillVerified' in data) || data.zoneFillVerified is bool)
+        && (!('verificationStatus' in data) || data.verificationStatus in ['Pending', 'Verified', 'Expired'])
+        && (!('verifiedAtMs' in data) || data.verifiedAtMs is number)
+        && (!('userOutcome' in data) || data.userOutcome in ['WIN', 'LOSS', 'BE', 'SKIPPED'])
+        && (!('journalNote' in data) || (data.journalNote is string && data.journalNote.size() <= 300))
+        && (!('journaledAtMs' in data) || data.journaledAtMs is number)
+        && (!('timestamp' in data) || data['timestamp'] is number)
+        && (!('strategy' in data) || data.strategy in ['ict_2022', 'sdcv_canonical', 'idx_bandar', 'us_swing'])
+        && (!('outcome' in data) || data.outcome in ['PENDING', 'RUNNING', 'WIN', 'LOSS', 'BE', 'EXPIRED'])
+        && (!('filledAtMs' in data) || data.filledAtMs is number)
+        && (!('tp1HitAtMs' in data) || data.tp1HitAtMs is number)
+        && (!('closedAtMs' in data) || data.closedAtMs is number)
+        && (!('closedPrice' in data) || data.closedPrice is number)
+        && (!('mfeR' in data) || data.mfeR is number)
+        && (!('maeR' in data) || data.maeR is number)
+        && (!('barrierOutcome' in data) || (data.barrierOutcome is string && data.barrierOutcome.size() <= 20))
+        && (!('timeBarrierAtMs' in data) || data.timeBarrierAtMs is number)
+        && (!('inKillzone' in data) || data.inKillzone is bool)
+        && (!('po3Aligned' in data) || data.po3Aligned is bool)
+        && (!('smtConfirmed' in data) || data.smtConfirmed is bool)
+        && (!('volatilityRegime' in data) || (data.volatilityRegime is string && data.volatilityRegime.size() <= 20))
+        && (!('htfAligned' in data) || data.htfAligned is bool)
+        && (!('netRr' in data) || data.netRr is number)
+        && (!('stage2Aligned' in data) || data.stage2Aligned is bool)
+        && (!('rsRank' in data) || data.rsRank is number)
+        && (!('vcpDetected' in data) || data.vcpDetected is bool)
+        && (!('sectorLeader' in data) || data.sectorLeader is bool);
+    }
+
+    function isValidSignalHistoryRecord(data, userId) {
+      return isValidSignalCoreFields(data, userId)
+        && isValidSignalLevelsAndState(data)
+        && isValidSignalOptionalFields(data);
+    }
+
+    function isTerminalSignalStatus(status) {
+      return status in ['TP2_HIT', 'SL_HIT', 'BE_CLOSED', 'EXPIRED'];
     }
 
     // =========================================================================
@@ -267,6 +365,56 @@ service cloud.firestore {
         allow delete: if isVerifiedUser()
           && isValidId(userId)
           && isValidId(briefId)
+          && isOwner(userId);
+      }
+
+      match /signalHistory/{signalId} {
+        allow get: if isValidId(userId) && isValidId(signalId) && isOwner(userId);
+        allow list: if isOwner(userId) && resource.data.ownerId == request.auth.uid;
+
+        allow create: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(signalId)
+          && isOwner(userId)
+          && isValidSignalHistoryRecord(incoming(), userId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/users/$(userId));
+
+        // Action-based update with Terminal State Locking (Action 1) & Trade Journal Annotation (Action 2)
+        allow update: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(signalId)
+          && isOwner(userId)
+          && isValidSignalHistoryRecord(incoming(), userId)
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/users/$(userId))
+          && (
+            // Action 1: Live Mark-to-Market & Lifecycle Transition (Pending -> Running -> TP1 -> Terminal)
+            (
+              !isTerminalSignalStatus(existing().status)
+              && incoming().diff(existing()).affectedKeys().hasOnly([
+                'status', 'outcome', 'verificationStatus', 'verifiedAtMs',
+                'filledAtMs', 'tp1HitAtMs', 'closedAtMs', 'closedPrice',
+                'lastPrice', 'maxFavorablePrice', 'maxAdversePrice',
+                'pnlPct', 'rMultiple', 'lastCheckedAtMs', 'zoneFillVerified',
+                'mfeR', 'maeR', 'barrierOutcome', 'timeBarrierAtMs', 'updatedAt'
+              ])
+            )
+            ||
+            // Action 2: Trader Automated Journal Outcome ('WIN' | 'LOSS' | 'BE' | 'SKIPPED') & Execution Note
+            (
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'userOutcome', 'outcome', 'journalNote', 'journaledAtMs', 'updatedAt'
+              ])
+            )
+          );
+
+        allow delete: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(signalId)
           && isOwner(userId);
       }
     }

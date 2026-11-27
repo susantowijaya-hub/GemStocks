@@ -1,34 +1,26 @@
-import React, { Suspense, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   BarChart3,
   Bookmark,
   Briefcase,
   CalendarDays,
-  Check,
-  ChevronDown,
   Crosshair,
-  Gem,
   LayoutDashboard,
   LayoutGrid,
   Loader2,
   Megaphone,
-  Moon,
   Newspaper,
   RefreshCw,
   Search,
-  Share2,
-  Sun,
-  Sunrise,
+  Settings,
   TrendingUp,
   X,
 } from 'lucide-react';
-import { getThemeMeta, THEME_OPTIONS } from '../hooks/useTheme';
+import { getThemeMeta } from '../hooks/useTheme';
 import {
   AppRoute,
   ClientFeedTransportDiagnostics,
-  EconomicEvent,
   MarketAsset,
-  MarketIntelligenceResponse,
   NewsStory,
   ServerFeedDiagnosticsResponse,
   StockMover,
@@ -36,16 +28,10 @@ import {
   ThemeMode,
 } from '../types/market';
 import { formatAssetPrice, formatWibClock } from '../utils/formatters';
-import { lazyWithRetry } from '../utils/lazyWithRetry';
 import { getAllMarketSessions, isIndexOpenSession } from '../utils/marketSessions';
 import { FeedDiagnosticsBadge } from './FeedDiagnosticsBadge';
 import { GoogleFinanceDeltaPill, GoogleFinanceMiniChart } from './GoogleFinanceMiniChart';
 import { PWAInstallButton } from './PWAInstallButton';
-import { WidgetErrorBoundary } from './WidgetErrorBoundary';
-
-const MorningBriefModal = lazyWithRetry(() =>
-  import('./MorningBriefModal').then((m) => ({ default: m.MorningBriefModal }))
-);
 
 interface HeaderProps {
   activeRoute: AppRoute;
@@ -53,8 +39,7 @@ interface HeaderProps {
   searchQuery: string;
   onSearchChange: (val: string) => void;
   themeMode: ThemeMode;
-  onToggleTheme: () => void;
-  onSelectTheme: (mode: ThemeMode) => void;
+  onOpenSettings: () => void;
   isPulseActive: boolean;
   wsConnected: boolean;
   onTogglePulse: () => void;
@@ -63,8 +48,6 @@ interface HeaderProps {
   assets: MarketAsset[];
   usMovers: StockMover[];
   idxMovers: StockMover[];
-  marketIntelligence?: MarketIntelligenceResponse | null;
-  economicEvents?: EconomicEvent[];
   onSelectAsset: (id: string) => void;
   onInspectSymbol: (yahooSymbol: string, builtInAssetId?: string) => void;
   serverDiagnostics: ServerFeedDiagnosticsResponse | null;
@@ -75,7 +58,7 @@ interface HeaderProps {
   onPrefetchRoute?: (route: AppRoute) => void;
 }
 
-const INDEX_IDS = ['SPX', 'IXIC', 'DJI', 'IHSG', 'EIDO', 'HSI', 'TAIEX', 'KOSPI', 'SSEC', 'NIFTY'];
+const INDEX_IDS = ['SPX', 'IXIC', 'DJI', 'IHSG', 'EIDO', 'N225', 'HSI', 'TAIEX', 'KOSPI', 'SSEC', 'NIFTY'];
 
 const NAV_TABS: {
   id: AppRoute;
@@ -90,7 +73,6 @@ const NAV_TABS: {
   { id: 'ict', label: 'ICT Radar', icon: Crosshair },
   { id: 'news', label: 'News', icon: Newspaper },
   { id: 'calendar', label: 'Calendar', icon: CalendarDays },
-  { id: 'extract', label: 'Share', icon: Share2 },
 ];
 
 function formatDropdownPrice(item: StockSearchResult): string {
@@ -155,8 +137,7 @@ export const Header: React.FC<HeaderProps> = ({
   searchQuery,
   onSearchChange,
   themeMode,
-  onToggleTheme,
-  onSelectTheme,
+  onOpenSettings,
   isPulseActive,
   wsConnected,
   onTogglePulse,
@@ -165,8 +146,6 @@ export const Header: React.FC<HeaderProps> = ({
   assets,
   usMovers,
   idxMovers,
-  marketIntelligence = null,
-  economicEvents = [],
   onSelectAsset,
   onInspectSymbol,
   serverDiagnostics,
@@ -178,14 +157,11 @@ export const Header: React.FC<HeaderProps> = ({
 }) => {
   const [now, setNow] = useState(() => new Date());
   const [searchExpanded, setSearchExpanded] = useState(false);
-  const [morningBriefOpen, setMorningBriefOpen] = useState(false);
-  const [themeMenuOpen, setThemeMenuOpen] = useState(false);
   const [searchResults, setSearchResults] = useState<StockSearchResult[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const [navAwake, setNavAwake] = useState(false);
   const [isRefreshingAll, setIsRefreshingAll] = useState(false);
   const searchWrapRef = useRef<HTMLDivElement | null>(null);
-  const themeMenuRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const headerRef = useRef<HTMLElement | null>(null);
   const navIdleTimerRef = useRef<number | null>(null);
@@ -225,42 +201,6 @@ export const Header: React.FC<HeaderProps> = ({
       return () => window.clearTimeout(t);
     }
   }, [searchExpanded]);
-
-  // Close Morning Briefing Pack pop-up on Escape key
-  useEffect(() => {
-    if (!morningBriefOpen) return;
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        setMorningBriefOpen(false);
-      }
-    };
-    document.addEventListener('keydown', handleKey);
-    return () => document.removeEventListener('keydown', handleKey);
-  }, [morningBriefOpen]);
-
-  // Close Theme selector popover on outside click or Escape
-  useEffect(() => {
-    if (!themeMenuOpen) return;
-    const handleOutside = (e: MouseEvent | TouchEvent) => {
-      const target = e.target as Node;
-      if (!themeMenuRef.current?.contains(target)) {
-        setThemeMenuOpen(false);
-      }
-    };
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        setThemeMenuOpen(false);
-      }
-    };
-    document.addEventListener('mousedown', handleOutside);
-    document.addEventListener('touchstart', handleOutside);
-    document.addEventListener('keydown', handleKey);
-    return () => {
-      document.removeEventListener('mousedown', handleOutside);
-      document.removeEventListener('touchstart', handleOutside);
-      document.removeEventListener('keydown', handleKey);
-    };
-  }, [themeMenuOpen]);
 
   // Close search on outside click or Escape key
   useEffect(() => {
@@ -311,8 +251,6 @@ export const Header: React.FC<HeaderProps> = ({
 
     return () => window.clearTimeout(timer);
   }, [searchQuery, searchExpanded]);
-
-  const clock = formatWibClock(now);
   const marqueeStories = useMemo(
     () => tickerStories.filter((s) => Boolean(s.isBreaking)).slice(0, 12),
     [tickerStories]
@@ -421,73 +359,6 @@ export const Header: React.FC<HeaderProps> = ({
     Math.round(Math.max(1, liveTapeItems.entries.length) * 14)
   );
 
-  // Automated single-sentence Morning Brief + Pop-Up Pack data
-  const morningBriefSentence = useMemo(() => {
-    if (marketIntelligence?.oneSentenceSummary) {
-      return marketIntelligence.oneSentenceSummary;
-    }
-    const byId = new Map(assets.map((a) => [a.id, a]));
-    const spx = byId.get('SPX');
-    const ihsg = byId.get('IHSG');
-    const dxy = byId.get('DXY');
-    const gold = byId.get('XAUUSD');
-    const btc = byId.get('BTCUSD');
-
-    const bullTotal = assets.filter((a) => a.sentiment === 'Bullish').length;
-    const bearTotal = assets.filter((a) => a.sentiment === 'Bearish').length;
-    const moodText =
-      bullTotal >= bearTotal + 3
-        ? 'constructive risk-on sentiment'
-        : bearTotal >= bullTotal + 3
-          ? 'cautious risk-off sentiment'
-          : 'selective cross-asset sentiment';
-
-    const topEcon = economicEvents.find((e) => e.impact === 'HIGH') ?? economicEvents[0];
-    const econPhrase = topEcon
-      ? topEcon.actual && topEcon.actual !== '-' && topEcon.actual !== 'Pending' && topEcon.actual !== '—'
-        ? `following ${topEcon.currency} ${topEcon.title} (${topEcon.actual} vs ${topEcon.forecast})`
-        : `ahead of ${topEcon.currency} ${topEcon.title} (${topEcon.timeWib})`
-      : 'as global desks track sovereign yield spreads';
-
-    const spxPct = spx ? `${spx.changePercent >= 0 ? '+' : ''}${spx.changePercent.toFixed(2)}%` : '0.00%';
-    const ihsgPct = ihsg ? `${ihsg.changePercent >= 0 ? '+' : ''}${ihsg.changePercent.toFixed(2)}%` : '0.00%';
-    const dxyStr = dxy ? dxy.price.toFixed(2) : '—';
-    const goldStr = gold ? `$${gold.price.toLocaleString('en-US', { maximumFractionDigits: 0 })}` : '—';
-    const btcStr = btc ? `$${btc.price.toLocaleString('en-US', { maximumFractionDigits: 0 })}` : '—';
-
-    return `Global markets reflect ${moodText} ${econPhrase}, with S&P 500 (${spxPct}) and IHSG (${ihsgPct}) rotating alongside DXY (${dxyStr}), Gold (${goldStr}), and Bitcoin (${btcStr}).`;
-  }, [marketIntelligence, assets, economicEvents]);
-
-  const morningBriefPack = useMemo(() => {
-    const byId = new Map(assets.map((a) => [a.id, a]));
-    const coreIds = ['SPX', 'IXIC', 'IHSG', 'DXY', 'USDIDR', 'XAUUSD', 'BTCUSD'];
-    const snapshot = coreIds
-      .map((id) => byId.get(id))
-      .filter((a): a is MarketAsset => Boolean(a));
-    const bullCount = assets.filter((a) => a.sentiment === 'Bullish').length;
-    const bearCount = assets.filter((a) => a.sentiment === 'Bearish').length;
-    const moodLabel =
-      bullCount >= bearCount + 3
-        ? 'Risk-On Bias'
-        : bearCount >= bullCount + 3
-          ? 'Defensive Bias'
-          : 'Mixed Rotation';
-    const topCatalyst = economicEvents.find((e) => e.impact === 'HIGH') ?? economicEvents[0] ?? null;
-    return {
-      snapshot,
-      moodLabel,
-      bullCount,
-      bearCount,
-      topCatalyst,
-      conditionNote:
-        marketIntelligence?.sessionConditionAndTrigger ||
-        marketIntelligence?.forwardPrediction ||
-        '',
-      topUs: usMovers[0] ?? null,
-      topIdx: idxMovers[0] ?? null,
-    };
-  }, [assets, economicEvents, marketIntelligence, usMovers, idxMovers]);
-
   const searchPlaceholder =
     activeRoute === 'watchlist'
       ? 'Filter watchlist or lookup symbol (SPX, DXY, BBCA)...'
@@ -528,6 +399,7 @@ export const Header: React.FC<HeaderProps> = ({
   };
 
   return (
+    <>
     <header
       ref={headerRef}
       className="sticky top-0 z-40 pt-safe liquid-glass-strong !border-x-0 !border-t-0"
@@ -551,26 +423,9 @@ export const Header: React.FC<HeaderProps> = ({
           </button>
         </div>
 
-        {/* Right Grid Track: Mobile-Safe Compact Bar (PWA + Briefing + Search + Refresh All + Live Diagnostics + Theme) */}
+        {/* Right Grid Track: Mobile-Safe Compact Bar (PWA + Search + Refresh All + Live Diagnostics + Settings) */}
         <div className="flex items-center gap-1 sm:gap-1.5 shrink-0 lg:justify-self-end" data-testid="header-actions-bar">
           <PWAInstallButton />
-
-          {/* Icon-Only Morning Briefing Pack Pop-Up Trigger */}
-          <button
-            type="button"
-            onClick={() => setMorningBriefOpen((prev) => !prev)}
-            aria-expanded={morningBriefOpen}
-            aria-label="Open Morning Briefing Pack"
-            title="Morning Briefing Pack"
-            className={`relative h-8 w-8 rounded-full flex items-center justify-center transition-all shrink-0 border ${
-              morningBriefOpen
-                ? 'bg-[#C4923E]/25 border-[#C4923E]/60 text-[#8C6218] dark:text-[#FBBF24]'
-                : 'liquid-glass-pill text-[#9A6B16] dark:text-[#FBBF24] hover:brightness-95 dark:hover:brightness-110'
-            }`}
-          >
-            <Sunrise className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
-            <span className="absolute top-1.5 right-1.5 w-1.5 h-1.5 rounded-full bg-[#D97706] dark:bg-[#FBBF24]" />
-          </button>
 
           {/* Expandable Search (Full-row overlay on mobile <640px so icons never overlap, inline on sm+) */}
           <div ref={searchWrapRef} className="sm:relative flex items-center shrink-0">
@@ -719,11 +574,11 @@ export const Header: React.FC<HeaderProps> = ({
             disabled={isRefreshingAll}
             aria-label="Refresh All feeds"
             title="Refresh All (Assets, News & Economic Calendar)"
-            className="h-8 w-8 md:w-auto md:px-2.5 rounded-full liquid-glass-pill hover:border-[#1D4ED8]/60 dark:hover:border-[#2962FF]/70 flex items-center justify-center gap-1.5 text-[11px] sm:text-xs font-bold text-[#0A2540] dark:text-[#F0F3FA] transition-colors shrink-0 whitespace-nowrap disabled:opacity-75"
+            className="h-8 w-8 md:w-auto md:px-2.5 rounded-full liquid-glass-pill hover:border-[#1D4ED8]/60 dark:hover:border-[#2962FF]/70 velvet:hover:border-[#F9574B]/65 flex items-center justify-center gap-1.5 text-[11px] sm:text-xs font-bold text-[#0A2540] dark:text-[#F0F3FA] transition-colors shrink-0 whitespace-nowrap disabled:opacity-75"
           >
             <RefreshCw
               className={`w-3.5 h-3.5 shrink-0 ${
-                isRefreshingAll ? 'animate-spin text-[#1D4ED8] dark:text-[#3B82F6]' : ''
+                isRefreshingAll ? 'animate-spin text-[#1D4ED8] dark:text-[#3B82F6] velvet:text-[#F9574B]' : ''
               }`}
             />
             <span className="hidden md:inline">
@@ -743,110 +598,23 @@ export const Header: React.FC<HeaderProps> = ({
             onRefreshDiagnostics={onRefreshDiagnostics}
           />
 
-          {/* Theme Picker Popover (Desk Slate Pro, Institutional Daylight, Warm Editorial) */}
-          <div ref={themeMenuRef} className="relative shrink-0">
-            {(() => {
-              const activeThemeMeta = getThemeMeta(themeMode);
-              const ThemeIcon =
-                themeMode === 'obsidian'
-                  ? Moon
-                  : themeMode === 'parchment'
-                    ? Gem
-                    : Sun;
-
-              return (
-                <>
-                  <button
-                    type="button"
-                    onClick={() => setThemeMenuOpen((prev) => !prev)}
-                    aria-expanded={themeMenuOpen}
-                    aria-haspopup="menu"
-                    title={`Display Theme: ${activeThemeMeta.label}`}
-                    aria-label={`Current theme ${activeThemeMeta.label}. Click to choose theme.`}
-                    className="h-8 px-2 sm:px-2.5 rounded-full liquid-glass-pill hover:brightness-95 dark:hover:brightness-110 flex items-center justify-center gap-1 sm:gap-1.5 text-[11px] sm:text-xs font-bold text-[#1C1C1E] dark:text-white transition-all shrink-0 whitespace-nowrap"
-                  >
-                    <ThemeIcon className="w-3.5 h-3.5 shrink-0" />
-                    <span className="hidden sm:inline">{activeThemeMeta.shortLabel}</span>
-                    <ChevronDown
-                      className={`w-3 h-3 opacity-70 transition-transform duration-150 ${
-                        themeMenuOpen ? 'rotate-180' : ''
-                      }`}
-                    />
-                  </button>
-
-                  {themeMenuOpen && (
-                    <div
-                      role="menu"
-                      aria-label="Select Display Theme"
-                      className="fixed sm:absolute right-3 sm:right-0 top-[54px] sm:top-full sm:mt-2 w-[276px] z-50 rounded-2xl liquid-glass-strong shadow-2xl overflow-hidden p-2 flex flex-col gap-1"
-                    >
-                      <div className="px-2.5 py-1.5 flex items-center justify-between border-b border-black/8 dark:border-white/10">
-                        <span className="text-[10px] font-bold uppercase tracking-wider text-[#6C6C70] dark:text-[#9EB5C8]">
-                          Curated Themes (3)
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            onToggleTheme();
-                          }}
-                          className="text-[10px] font-bold text-[#0071E3] dark:text-[#38BDF8] hover:underline"
-                        >
-                          Next
-                        </button>
-                      </div>
-
-                      {THEME_OPTIONS.map((opt) => {
-                        const selected = opt.id === themeMode;
-                        return (
-                          <button
-                            key={opt.id}
-                            type="button"
-                            role="menuitemradio"
-                            aria-checked={selected}
-                            onClick={() => {
-                              onSelectTheme(opt.id);
-                              setThemeMenuOpen(false);
-                            }}
-                            className={`w-full text-left px-2.5 py-2 rounded-xl flex items-center gap-2.5 transition-all border ${
-                              selected
-                                ? 'bg-[#0071E3]/12 dark:bg-[#38BDF8]/16 border-[#0071E3]/45 dark:border-[#38BDF8]/45'
-                                : 'border-transparent hover:bg-black/5 dark:hover:bg-white/8'
-                            }`}
-                          >
-                            <span
-                              aria-hidden="true"
-                              className="w-7 h-7 rounded-lg shrink-0 border border-black/15 dark:border-white/25 shadow-inner"
-                              style={{
-                                background: `linear-gradient(135deg, ${opt.swatchTop} 0%, ${opt.swatchBottom} 100%)`,
-                              }}
-                            />
-                            <div className="min-w-0 flex-1">
-                              <div className="flex items-center gap-1.5">
-                                <span className="text-xs font-bold text-[#1C1C1E] dark:text-white truncate">
-                                  {opt.label}
-                                </span>
-                                {opt.recommended && (
-                                  <span className="text-[9px] font-extrabold uppercase tracking-wider text-[#0071E3] dark:text-[#38BDF8] shrink-0">
-                                    Pick
-                                  </span>
-                                )}
-                              </div>
-                              <p className="text-[10px] text-[#6C6C70] dark:text-[#9EB5C8] truncate">
-                                {opt.description}
-                              </p>
-                            </div>
-                            {selected && (
-                              <Check className="w-3.5 h-3.5 text-[#0071E3] dark:text-[#38BDF8] shrink-0" />
-                            )}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
-                </>
-              );
-            })()}
-          </div>
+          {/* Dedicated Settings & Theme Switcher Trigger */}
+          {(() => {
+            const activeThemeMeta = getThemeMeta(themeMode);
+            return (
+              <button
+                type="button"
+                data-testid="header-settings-btn"
+                onClick={onOpenSettings}
+                title={`Settings · Theme: ${activeThemeMeta.label}`}
+                aria-label={`Open Settings (Current theme: ${activeThemeMeta.label})`}
+                className="h-8 w-8 sm:w-auto sm:px-2.5 rounded-full liquid-glass-pill hover:border-[#1D4ED8]/60 dark:hover:border-[#2962FF]/70 velvet:hover:border-[#F9574B]/65 parchment:hover:border-[#B4410E]/60 flex items-center justify-center gap-1.5 text-[11px] sm:text-xs font-bold text-[#0A2540] dark:text-[#F0F3FA] transition-colors shrink-0 whitespace-nowrap"
+              >
+                <Settings className="w-3.5 h-3.5 shrink-0" />
+                <span className="hidden sm:inline">{activeThemeMeta.label}</span>
+              </button>
+            );
+          })()}
         </div>
       </div>
 
@@ -880,7 +648,7 @@ export const Header: React.FC<HeaderProps> = ({
               >
                 {isActive && (
                   <span
-                    className="absolute inset-0 rounded-lg bg-[#1D4ED8] dark:bg-[#2962FF] parchment:bg-[#B4410E] transition-all duration-150"
+                    className="absolute inset-0 rounded-lg bg-[#1D4ED8] dark:bg-[#2962FF] velvet:bg-[#F9574B] parchment:bg-[#B4410E] transition-all duration-150"
                   />
                 )}
                 <span
@@ -897,12 +665,13 @@ export const Header: React.FC<HeaderProps> = ({
         </nav>
       </div>
 
-      {/* Compact Nerve-Style News & Live Tape Bar (Full-width Morning Brief moved to Top Icon Pop-Up) */}
-
+      {/* Compact Nerve-Style News & Live Tape Bar (Non-sticky below header to keep mobile sticky chrome <= 13%) */}
+    </header>
+    <div className="relative z-20">
       {/* Verified High-Impact Breaking News Marquee Ticker Bar */}
       <div
         data-testid="breaking-news-bar"
-        className="bg-[#E5E5EA]/55 dark:bg-black/45 border-t border-black/8 dark:border-white/10 py-1.5 px-4 lg:px-6 flex items-center gap-3 overflow-hidden text-[11px] sm:text-xs"
+        className="bg-[#E5E5EA]/55 dark:bg-black/45 border-b border-black/8 dark:border-white/10 py-1.5 px-4 lg:px-6 flex items-center gap-3 overflow-hidden text-[11px] sm:text-xs"
       >
         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-[#EF4444]/18 text-[#C41C16] dark:text-[#FF6B63] font-bold text-[10px] tracking-wider uppercase shrink-0">
           <Megaphone className="w-3 h-3" />
@@ -1004,22 +773,7 @@ export const Header: React.FC<HeaderProps> = ({
           )}
         </div>
       </div>
-
-      {/* Lazy-Loaded Morning Briefing Pack Pop-Up Modal */}
-      {morningBriefOpen && (
-        <WidgetErrorBoundary widgetName="Morning Briefing Pack">
-          <Suspense fallback={null}>
-            <MorningBriefModal
-              clockFull={clock.full}
-              morningBriefSentence={morningBriefSentence}
-              morningBriefPack={morningBriefPack}
-              onClose={() => setMorningBriefOpen(false)}
-              onSelectAsset={onSelectAsset}
-              onNavigate={onNavigate}
-            />
-          </Suspense>
-        </WidgetErrorBoundary>
-      )}
-    </header>
+    </div>
+    </>
   );
 };

@@ -15,7 +15,6 @@ const ROUTE_CHUNK_LOADERS: Partial<Record<AppRoute, RouteChunkLoader>> = {
   news: () => import('../components/NewsFeedView'),
   calendar: () => import('../components/EconomicCalendarView'),
   ict: () => import('../components/IctRadarView'),
-  extract: () => import('../components/MarketExtractShareView'),
 };
 
 const ADJACENT_ROUTES: Record<AppRoute, AppRoute[]> = {
@@ -24,10 +23,9 @@ const ADJACENT_ROUTES: Record<AppRoute, AppRoute[]> = {
   portfolio: ['watchlist', 'stocks', 'dashboard'],
   stocks: ['heatmap', 'portfolio', 'dashboard'],
   heatmap: ['stocks', 'news', 'dashboard'],
-  news: ['calendar', 'extract', 'dashboard'],
+  news: ['calendar', 'ict', 'dashboard'],
   calendar: ['news', 'ict', 'dashboard'],
   ict: ['watchlist', 'dashboard', 'calendar'],
-  extract: ['news', 'dashboard', 'ict'],
 };
 
 const ROUTE_DATA_ENDPOINTS: Partial<Record<AppRoute, string[]>> = {
@@ -39,7 +37,6 @@ const ROUTE_DATA_ENDPOINTS: Partial<Record<AppRoute, string[]>> = {
   news: ['/api/news/feed', '/api/market/daily-summary'],
   calendar: ['/api/calendar/events'],
   ict: ['/api/market/quotes', '/api/fx/rates'],
-  extract: ['/api/market/intelligence'],
 };
 
 function warmEndpoint(url: string): void {
@@ -116,7 +113,6 @@ export function usePrefetch(activeRoute: AppRoute, priorityReady: boolean) {
         'heatmap',
         'news',
         'calendar',
-        'extract',
       ].filter((r, idx, arr): r is AppRoute => arr.indexOf(r) === idx && !prefetchedRoutes.has(r as AppRoute)) as AppRoute[];
 
       let stepIdx = 0;

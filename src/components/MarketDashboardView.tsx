@@ -1,4 +1,4 @@
-import React, { Suspense, useEffect, useMemo, useState } from 'react';
+import React, { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowDown,
   ArrowRight,
@@ -20,7 +20,6 @@ import {
   AppRoute,
   Asset5mVolatility,
   MarketAsset,
-  MarketIntelligenceResponse,
   NewsStory,
   PriceAlertItem,
   ThemeMode,
@@ -30,16 +29,15 @@ import {
   formatAssetPrice,
   formatFullDelta,
 } from '../utils/formatters';
-import { analyzeHeadlineSentiment } from '../utils/headlineSentiment';
 import { lazyWithRetry } from '../utils/lazyWithRetry';
 import {
   DashboardRegionTab,
   getAllMarketSessions,
+  getAssetSessionStatus,
   getRegionStatusSummary,
 } from '../utils/marketSessions';
 import {
   computeAssetTimeframeReturn,
-  computeUnifiedMarketPulse,
   extractFiveMinuteTrajectory,
   getAssetFearGreed,
   getAssetSignal,
@@ -52,6 +50,7 @@ import {
   getFearGreedTextTone,
   SignalBadge,
 } from './MarketUiPrimitives';
+import { MomentumGauge } from './MomentumGauge';
 import { WidgetErrorBoundary } from './WidgetErrorBoundary';
 
 const PriceAlertDrawer = lazyWithRetry(() =>
@@ -59,15 +58,6 @@ const PriceAlertDrawer = lazyWithRetry(() =>
 );
 const InteractiveChart = lazyWithRetry(() =>
   import('./InteractiveChart').then((m) => ({ default: m.InteractiveChart }))
-);
-const UnifiedMarketPulseCard = lazyWithRetry(() =>
-  import('./UnifiedMarketPulseCard').then((m) => ({ default: m.UnifiedMarketPulseCard }))
-);
-const CorrelationMatrixCard = lazyWithRetry(() =>
-  import('./CorrelationMatrixCard').then((m) => ({ default: m.CorrelationMatrixCard }))
-);
-const MarketIntelligencePanel = lazyWithRetry(() =>
-  import('./MarketIntelligencePanel').then((m) => ({ default: m.MarketIntelligencePanel }))
 );
 
 const DashboardWidgetSkeleton: React.FC<{ label: string; minHeightClass?: string }> = ({
@@ -103,7 +93,7 @@ const DashboardTickerCard: React.FC<DashboardTickerCardProps> = React.memo(
       () => extractFiveMinuteTrajectory(tile, volInfo),
       [tile, volInfo]
     );
-    const isDarkSurface = themeMode === 'obsidian';
+    const isDarkSurface = themeMode === 'obsidian' || themeMode === 'velvet';
 
     const signalTextClass =
       tileSignal.direction === 'bull'
@@ -144,12 +134,56 @@ const DashboardTickerCard: React.FC<DashboardTickerCardProps> = React.memo(
       }
     }
 
+    const prevTickRef = useRef<{ price: number; epoch?: number }>({
+      price: tile.price,
+      epoch: tile.updatedAtEpoch,
+    });
+    const [breatheTone, setBreatheTone] = useState<'gain' | 'loss' | 'neutral' | null>(null);
+    const [breathePulseKey, setBreathePulseKey] = useState(0);
+
+    useEffect(() => {
+      const prev = prevTickRef.current;
+      const priceChanged = prev.price !== tile.price;
+      const epochChanged =
+        typeof tile.updatedAtEpoch === 'number' &&
+        tile.updatedAtEpoch !== prev.epoch &&
+        prev.epoch !== undefined;
+
+      if (!priceChanged && !epochChanged) return;
+
+      const tone: 'gain' | 'loss' | 'neutral' =
+        tile.price > prev.price
+          ? 'gain'
+          : tile.price < prev.price
+            ? 'loss'
+            : tileFlash ?? 'neutral';
+
+      prevTickRef.current = { price: tile.price, epoch: tile.updatedAtEpoch };
+      setBreatheTone(tone);
+      setBreathePulseKey((k) => k + 1);
+
+      const timer = window.setTimeout(() => {
+        setBreatheTone(null);
+      }, 720);
+      return () => window.clearTimeout(timer);
+    }, [tile.price, tile.updatedAtEpoch, tileFlash]);
+
+    const breatheClass =
+      breatheTone === 'gain'
+        ? 'card-tick-breathe card-tick-breathe-gain'
+        : breatheTone === 'loss'
+          ? 'card-tick-breathe card-tick-breathe-loss'
+          : breatheTone === 'neutral'
+            ? 'card-tick-breathe card-tick-breathe-neutral'
+            : 'card-tick-breathe';
+
     return (
       <button
         type="button"
         onClick={() => onSelect(tile.id)}
         style={volHeatStyle}
-        className={`text-left shrink-0 xl:min-w-0 liquid-glass-card overflow-hidden transition-colors duration-150 flex flex-col justify-between ${
+        data-tick-pulse={breathePulseKey}
+        className={`text-left shrink-0 xl:min-w-0 liquid-glass-card overflow-hidden transition-colors duration-150 flex flex-col justify-between ${breatheClass} ${
           isCompactCards
             ? 'min-w-[140px] rounded-xl px-2.5 py-1.5'
             : 'min-w-[152px] rounded-xl px-2.5 py-1.5'
@@ -195,13 +229,13 @@ const DashboardTickerCard: React.FC<DashboardTickerCardProps> = React.memo(
         <div className="mt-0.5 w-full flex items-center justify-between gap-1.5">
           <div
             className={`font-bold tabular-nums font-mono tracking-tight ${
-              isCompactCards ? 'text-xs sm:text-[13px]' : 'text-sm sm:text-[15px]'
+              isCompactCards ? 'text-[13px] sm:text-sm' : 'text-[15px] sm:text-base'
             } ${
               tileFlash === 'gain'
-                ? 'text-[#0F7638] dark:text-[#34D399]'
+                ? 'text-[#047857] dark:text-[#34D399]'
                 : tileFlash === 'loss'
                   ? 'text-[#B91C1C] dark:text-[#F87171]'
-                  : 'text-[#0A2540] dark:text-[#F0F3FA]'
+                  : 'text-[#091E36] dark:text-[#F0F3FA]'
             }`}
           >
             {formatAssetPrice(tile)}
@@ -285,9 +319,6 @@ interface MarketDashboardViewProps {
   themeMode: ThemeMode;
   newsStories?: NewsStory[];
   onOpenStory?: (story: NewsStory) => void;
-  marketIntelligence?: MarketIntelligenceResponse | null;
-  intelligenceLoading?: boolean;
-  onRefreshIntelligence?: () => void;
   alerts?: PriceAlertItem[];
   unreadAlertCount?: number;
   volatility5mMap?: Record<string, Asset5mVolatility>;
@@ -309,6 +340,18 @@ const REGION_TABS: { id: DashboardRegionTab; label: string }[] = [
   { id: 'currencies', label: 'Currencies & Yields' },
 ];
 
+const PRIORITY_OPEN_ORDER: readonly string[] = [
+  'SPX',
+  'IXIC',
+  'IHSG',
+  'HSI',
+  'KOSPI',
+  'BTCUSD',
+  'XAUUSD',
+  'USDIDR',
+  'DXY',
+];
+
 export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
   assets,
   selectedAssetId,
@@ -318,9 +361,6 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
   onNavigate,
   onLoadTimeframe,
   themeMode,
-  newsStories = [],
-  onOpenStory,
-  marketIntelligence = null,
   alerts = [],
   unreadAlertCount = 0,
   volatility5mMap = {},
@@ -336,6 +376,7 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
   useRenderPerformance('MarketDashboardView');
   const [timeframe, setTimeframe] = useState<Timeframe>('1D');
   const [regionTab, setRegionTab] = useState<DashboardRegionTab>('all');
+  const [openSessionsOnly, setOpenSessionsOnly] = useState<boolean>(true);
   const [isCompactCards, setIsCompactCards] = useState<boolean>(false);
   const [isAlertDrawerOpen, setIsAlertDrawerOpen] = useState<boolean>(false);
   const [showVolHeatmap, setShowVolHeatmap] = useState<boolean>(false);
@@ -381,30 +422,25 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
   const sessions = useMemo(() => getAllMarketSessions(now), [now]);
   const sessionList = [sessions.us, sessions.idx, sessions.asia, sessions.crypto];
 
-  const yieldCurveInfo = useMemo(() => {
-    const us10y = assets.find((a) => a.id === 'US10Y');
-    const us30y = assets.find((a) => a.id === 'US30Y');
-    const id10y = assets.find((a) => a.id === 'ID10Y');
-    const spreadBps = ((us30y?.price ?? 4.62) - (us10y?.price ?? 4.44)) * 100;
-    const prevSpreadBps = ((us30y?.prevClose ?? 4.61) - (us10y?.prevClose ?? 4.45)) * 100;
-    const deltaBps = spreadBps - prevSpreadBps;
-    const posture =
-      spreadBps < 0 ? 'Inverted' : deltaBps >= 0.3 ? 'Steepening' : deltaBps <= -0.3 ? 'Flattening' : 'Steady';
-    const idUsSpreadBps = ((id10y?.price ?? 7.607) - (us10y?.price ?? 4.44)) * 100;
-    return {
-      spreadBps,
-      posture,
-      us10yVal: us10y?.price.toFixed(3) ?? '—',
-      us30yVal: us30y?.price.toFixed(3) ?? '—',
-      id10yVal: id10y?.price.toFixed(3) ?? '—',
-      idUsSpreadBps,
+  const { snapshotAssets, openSessionCount } = useMemo(() => {
+    const isAssetOpen = (a: MarketAsset): boolean => {
+      const liveStatus = getAssetSessionStatus(a.id, a.category, now);
+      return liveStatus.isLiveRunning || liveStatus.tone === 'open';
     };
-  }, [assets]);
 
-  const snapshotAssets = useMemo(() => {
-    const baseTiles =
+    const sortByPriority = (list: MarketAsset[]) =>
+      [...list].sort((a, b) => {
+        const ia = PRIORITY_OPEN_ORDER.indexOf(a.id);
+        const ib = PRIORITY_OPEN_ORDER.indexOf(b.id);
+        const ra = ia === -1 ? 999 : ia;
+        const rb = ib === -1 ? 999 : ib;
+        if (ra !== rb) return ra - rb;
+        return 0;
+      });
+
+    const regionPool =
       regionTab === 'all'
-        ? assets.filter((a) => a.isSnapshotTile)
+        ? assets
         : regionTab === 'us'
           ? assets.filter((a) => a.category === 'us-indices')
           : regionTab === 'asia'
@@ -413,19 +449,43 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
               ? assets.filter((a) => a.category === 'commodities-crypto')
               : assets.filter((a) => a.category === 'forex-yields');
 
-    const q = searchQuery.toLowerCase().trim();
-    const list = baseTiles.length > 0 ? baseTiles : assets.filter((a) => a.isSnapshotTile);
-    if (!q) return list;
+    const openPool = sortByPriority(regionPool.filter(isAssetOpen));
+    const openSessionCount = openPool.length;
 
-    const matchingAll = assets.filter(
-      (a) =>
-        a.symbol.toLowerCase().includes(q) ||
-        a.name.toLowerCase().includes(q) ||
-        a.shortName.toLowerCase().includes(q) ||
-        a.id.toLowerCase().includes(q)
-    );
-    return matchingAll.length > 0 ? matchingAll.slice(0, 6) : list;
-  }, [assets, regionTab, searchQuery]);
+    const q = searchQuery.toLowerCase().trim();
+    if (q) {
+      const matchingAll = assets.filter(
+        (a) =>
+          a.symbol.toLowerCase().includes(q) ||
+          a.name.toLowerCase().includes(q) ||
+          a.shortName.toLowerCase().includes(q) ||
+          a.id.toLowerCase().includes(q)
+      );
+      if (matchingAll.length > 0) {
+        return { snapshotAssets: sortByPriority(matchingAll).slice(0, 9), openSessionCount };
+      }
+    }
+
+    if (openSessionsOnly) {
+      if (openPool.length > 0) {
+        return { snapshotAssets: openPool.slice(0, 9), openSessionCount };
+      }
+      // Graceful fallback if every market in the selected region tab is closed (e.g. weekend US tab)
+      const fallback = sortByPriority(regionPool).slice(0, 6);
+      return { snapshotAssets: fallback, openSessionCount };
+    }
+
+    const allOrdered =
+      regionTab === 'all'
+        ? sortByPriority(
+            assets.filter((a) => PRIORITY_OPEN_ORDER.includes(a.id) || a.isSnapshotTile)
+          )
+        : sortByPriority(regionPool);
+    return {
+      snapshotAssets: allOrdered.length > 0 ? allOrdered.slice(0, 9) : assets.slice(0, 9),
+      openSessionCount,
+    };
+  }, [assets, regionTab, searchQuery, openSessionsOnly, now]);
 
   const regionBanner = useMemo(
     () => getRegionStatusSummary(regionTab, now),
@@ -445,20 +505,6 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
   const isGain = activeAsset.changePercent >= 0;
   const flash = flashMap[activeAsset.id];
   const activeSignal = useMemo(() => getAssetSignal(activeAsset), [activeAsset]);
-  const headlineSentimentSummary = useMemo(
-    () => analyzeHeadlineSentiment(newsStories),
-    [newsStories]
-  );
-  const unifiedPulse = useMemo(
-    () =>
-      computeUnifiedMarketPulse({
-        activeAsset,
-        assets,
-        volatility5mMap,
-        headlineSentimentScore: headlineSentimentSummary.score,
-      }),
-    [activeAsset, assets, volatility5mMap, headlineSentimentSummary.score]
-  );
   const timeframeReturn = useMemo(
     () => computeAssetTimeframeReturn(activeAsset, timeframe, inspectedChartIndex),
     [activeAsset, timeframe, inspectedChartIndex]
@@ -529,6 +575,28 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
               )}
               <span className="font-semibold">{regionBanner.text}</span>
             </div>
+
+            <button
+              type="button"
+              data-testid="open-sessions-toggle"
+              onClick={() => setOpenSessionsOnly((prev) => !prev)}
+              aria-pressed={openSessionsOnly}
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-bold border whitespace-nowrap shrink-0 transition-colors ${
+                openSessionsOnly
+                  ? 'bg-[#16A34A]/14 dark:bg-[#22C55E]/18 border-[#16A34A]/45 text-[#0B5D2A] dark:text-[#4ADE80]'
+                  : 'liquid-glass-pill text-[#425466] dark:text-[#9CA3AF] hover:text-[#0A2540] dark:hover:text-[#F0F3FA]'
+              }`}
+              title="Show currently open trading sessions only, ordered by priority (SPX, IXIC, IHSG, HSI, KOSPI, BTC, XAU, USD/IDR, DXY)"
+            >
+              <span
+                className={`w-1.5 h-1.5 rounded-full ${
+                  openSessionsOnly ? 'bg-[#16A34A] dark:bg-[#4ADE80]' : 'bg-[#8E8E93]'
+                }`}
+              />
+              <span>
+                {openSessionsOnly ? `Open Sessions (${openSessionCount})` : 'All Sessions'}
+              </span>
+            </button>
 
             <button
               type="button"
@@ -717,12 +785,12 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
 
               <div className="text-left sm:text-right">
                 <div
-                  className={`text-2xl sm:text-3xl font-extrabold tabular-nums font-mono tracking-tight transition-colors ${
+                  className={`num-hero transition-colors ${
                     flash === 'gain'
-                      ? 'text-[#16803C] dark:text-[#4ADE80]'
+                      ? 'text-[#047857] dark:text-[#34D399]'
                       : flash === 'loss'
-                        ? 'text-[#D7261C] dark:text-[#FF6B63]'
-                        : 'text-[#1C1C1E] dark:text-white'
+                        ? 'text-[#B91C1C] dark:text-[#F87171]'
+                        : 'text-[#091E36] dark:text-[#F0F3FA]'
                   }`}
                 >
                   {formatAssetPrice(activeAsset)}
@@ -792,31 +860,16 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
             </WidgetErrorBoundary>
           </div>
 
-          {/* CHILD 2 (Order 2 on mobile — ABOVE Correlation Matrix, Col 2 spanning rows on desktop): Single Unified Market Pulse & Insights Rail */}
-          <aside className="order-2 xl:col-start-2 xl:row-start-1 xl:row-span-2 flex flex-col gap-4 min-w-0">
-            {/* Single Consolidated Sentiment, Risk Regime, Technicals, Headlines & Order Book Card */}
-            <WidgetErrorBoundary widgetName="Market Pulse & Sentiment">
-              <Suspense
-                fallback={
-                  <DashboardWidgetSkeleton
-                    label="Loading Market Pulse & Order Book..."
-                    minHeightClass="min-h-[320px]"
-                  />
-                }
-              >
-                <UnifiedMarketPulseCard
-                  pulse={unifiedPulse}
-                  activeAsset={activeAsset}
-                  stories={newsStories}
-                  themeMode={themeMode}
-                  yieldCurveInfo={yieldCurveInfo}
-                  onOpenStory={onOpenStory}
-                  onNavigate={onNavigate}
-                />
-              </Suspense>
-            </WidgetErrorBoundary>
+          {/* CHILD 2 (Order 2 on mobile, Col 2 on desktop): Compact Insights & Shortcuts Rail */}
+          <aside className="order-2 xl:col-start-2 xl:row-start-1 flex flex-col gap-4 min-w-0">
+            {/* Real-Time WebSocket Price Velocity Momentum Gauge */}
+            <MomentumGauge
+              asset={activeAsset}
+              volInfo={volatility5mMap[activeAsset.id]}
+              themeMode={themeMode}
+            />
 
-            {/* 3. Live 5m Volatility Leaders Widget */}
+            {/* Live 5m Volatility Leaders Widget */}
             <section className="rounded-2xl liquid-glass-card p-4 flex flex-col gap-3">
               <div className="flex items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
@@ -963,46 +1016,6 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
               </button>
             </section>
           </aside>
-
-          {/* CHILD 3 (Order 3 on mobile — BELOW Technicals & Sentiment, Col 1 Row 2 on desktop): Correlation Matrix & Briefings */}
-          <div
-            data-testid="correlation-matrix-section"
-            className="order-3 xl:col-start-1 flex flex-col gap-5 min-w-0"
-          >
-            <WidgetErrorBoundary widgetName="Watchlist Correlation Matrix">
-              <Suspense
-                fallback={
-                  <DashboardWidgetSkeleton
-                    label="Loading Watchlist Correlation Matrix..."
-                    minHeightClass="min-w-0 min-h-[280px]"
-                  />
-                }
-              >
-                <CorrelationMatrixCard
-                  assets={assets}
-                  selectedAssetId={activeAsset.id}
-                  onSelectAsset={onSelectAsset}
-                  themeMode={themeMode}
-                />
-              </Suspense>
-            </WidgetErrorBoundary>
-
-            <WidgetErrorBoundary widgetName="Multi-Source Market Intelligence">
-              <Suspense
-                fallback={
-                  <DashboardWidgetSkeleton
-                    label="Loading Market Intelligence..."
-                    minHeightClass="min-h-[240px]"
-                  />
-                }
-              >
-                <MarketIntelligencePanel
-                  intelligence={marketIntelligence}
-                  onNavigate={onNavigate}
-                />
-              </Suspense>
-            </WidgetErrorBoundary>
-          </div>
         </div>
       </div>
     </div>

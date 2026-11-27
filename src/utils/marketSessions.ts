@@ -150,6 +150,63 @@ function getSingleIndexSession(assetId: string, now: Date): MarketSessionStatus 
     };
   }
 
+  if (assetId === 'N225') {
+    const tyo = getTzClock(now, 'Asia/Tokyo');
+    if (tyo.isWeekend) {
+      return {
+        id: 'asia',
+        label: 'TSE Tokyo',
+        shortLabel: 'TSE',
+        stateLabel: 'Closed',
+        detail: 'Weekend · Opens Mon 07:00 WIB',
+        tone: 'closed',
+        isLiveRunning: false,
+      };
+    }
+    if (tyo.totalMin >= 9 * 60 && tyo.totalMin < 11 * 60 + 30) {
+      return {
+        id: 'asia',
+        label: 'TSE Tokyo',
+        shortLabel: 'TSE',
+        stateLabel: 'Open (AM)',
+        detail: 'Tokyo Morning Session · Break 09:30 WIB',
+        tone: 'open',
+        isLiveRunning: true,
+      };
+    }
+    if (tyo.totalMin >= 11 * 60 + 30 && tyo.totalMin < 12 * 60 + 30) {
+      return {
+        id: 'asia',
+        label: 'TSE Tokyo',
+        shortLabel: 'TSE',
+        stateLabel: 'Lunch Break',
+        detail: 'Resumes 10:30 WIB',
+        tone: 'break',
+        isLiveRunning: false,
+      };
+    }
+    if (tyo.totalMin >= 12 * 60 + 30 && tyo.totalMin < 15 * 60 + 30) {
+      return {
+        id: 'asia',
+        label: 'TSE Tokyo',
+        shortLabel: 'TSE',
+        stateLabel: 'Open (PM)',
+        detail: 'Tokyo Afternoon Session · Closes 13:30 WIB',
+        tone: 'open',
+        isLiveRunning: true,
+      };
+    }
+    return {
+      id: 'asia',
+      label: 'TSE Tokyo',
+      shortLabel: 'TSE',
+      stateLabel: 'Closed',
+      detail: 'Last Session Close · Opens 07:00 WIB',
+      tone: 'closed',
+      isLiveRunning: false,
+    };
+  }
+
   if (assetId === 'HSI') {
     const hkg = getTzClock(now, 'Asia/Hong_Kong');
     if (hkg.isWeekend) {
@@ -309,7 +366,7 @@ export function getAllMarketSessions(
   const us = getSingleIndexSession('SPX', now)!;
   const idx = getSingleIndexSession('IHSG', now)!;
 
-  const asiaOpenCount = ['HSI', 'TAIEX', 'KOSPI', 'SSEC', 'NIFTY'].filter((id) =>
+  const asiaOpenCount = ['N225', 'HSI', 'TAIEX', 'KOSPI', 'SSEC', 'NIFTY'].filter((id) =>
     isIndexOpenSession(id, now)
   ).length;
 
@@ -412,6 +469,15 @@ export function getSessionProgressRatio(assetId: string, now: Date): number {
     if (jkt.isWeekend) return 1;
     if (jkt.totalMin >= 9 * 60 && jkt.totalMin < 16 * 60) {
       return clamp((jkt.totalMin - 9 * 60) / (7 * 60));
+    }
+    return 1;
+  }
+
+  if (assetId === 'N225') {
+    const tyo = getTzClock(now, 'Asia/Tokyo');
+    if (tyo.isWeekend) return 1;
+    if (tyo.totalMin >= 9 * 60 && tyo.totalMin < 15 * 60 + 30) {
+      return clamp((tyo.totalMin - 9 * 60) / 390);
     }
     return 1;
   }

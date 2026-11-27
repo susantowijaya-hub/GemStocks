@@ -27,12 +27,12 @@
     <link
       rel="preload"
       as="style"
-      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap"
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap"
       onload="this.onload=null;this.rel='stylesheet'"
     />
     <noscript>
       <link
-        href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap"
+        href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap"
         rel="stylesheet"
       />
     </noscript>
@@ -40,11 +40,14 @@
       (function () {
         try {
           var saved = localStorage.getItem('stocks-theme') || localStorage.getItem('stocks-theme-mode');
-          var mode = saved === 'arctic' || saved === 'parchment' || saved === 'obsidian' ? saved : 'obsidian';
+          var mode =
+            saved === 'arctic' || saved === 'parchment' || saved === 'obsidian' || saved === 'velvet'
+              ? saved
+              : 'obsidian';
           var root = document.documentElement;
-          root.classList.remove('obsidian', 'dark', 'arctic', 'parchment');
+          root.classList.remove('obsidian', 'velvet', 'dark', 'arctic', 'parchment');
           root.classList.add(mode);
-          if (mode === 'obsidian') root.classList.add('dark');
+          if (mode === 'obsidian' || mode === 'velvet') root.classList.add('dark');
         } catch (e) {}
       })();
     </script>
@@ -65,6 +68,10 @@
         background: #f4f0e6;
         color: #191815;
       }
+      html.velvet #boot-shell {
+        background: radial-gradient(ellipse 85% 42% at 50% -8%, rgba(249, 87, 75, 0.14), rgba(88, 36, 68, 0.1) 42%, transparent 74%), #0d0b14;
+        color: #f6f4fa;
+      }
       .boot-bar {
         height: 56px;
         padding: 0 18px;
@@ -81,6 +88,13 @@
       html.parchment .boot-bar {
         background: #fcf9f2;
         border-bottom-color: #d8cfbc;
+      }
+      html.velvet .boot-bar {
+        background: #161320;
+        border-bottom-color: #2d2842;
+      }
+      html.velvet .boot-dot {
+        background: #f9574b;
       }
       .boot-brand {
         display: flex;
@@ -155,6 +169,21 @@
       html.parchment .boot-main {
         background: #fdfbf7;
         border-color: #d8cfbc;
+      }
+      html.velvet .boot-card,
+      html.velvet .boot-main {
+        background: #161320;
+        border-color: #2d2842;
+      }
+      html.velvet .boot-card::after,
+      html.velvet .boot-main::after {
+        background: linear-gradient(
+          90deg,
+          transparent 0%,
+          rgba(249, 87, 75, 0.12) 45%,
+          rgba(255, 255, 255, 0.06) 55%,
+          transparent 100%
+        );
       }
       html.arctic .boot-card::after,
       html.arctic .boot-main::after,
@@ -291,9 +320,9 @@
 
         window.setTimeout(function () {
           if (!window.__STOCKS_MOUNTED__ && document.getElementById('boot-shell')) {
-            showRetry('Slow connection — still loading');
+            showRetry('Slow connection — tap to reload');
           }
-        }, 12000);
+        }, 10000);
       })();
     </script>
     <script type="module" src="/src/main.tsx"></script>

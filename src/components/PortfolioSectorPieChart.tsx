@@ -479,11 +479,13 @@ export const PortfolioSectorPieChart: React.FC<PortfolioSectorPieChartProps> = (
                       fill={datum.data.color}
                       fillOpacity={isDimmed ? 0.36 : 0.96}
                       stroke={
-                        themeMode === 'obsidian'
-                          ? '#0A0F18'
-                          : themeMode === 'parchment'
-                            ? '#FBF8F0'
-                            : '#FFFFFF'
+                        themeMode === 'velvet'
+                          ? '#161320'
+                          : themeMode === 'obsidian'
+                            ? '#0A0F18'
+                            : themeMode === 'parchment'
+                              ? '#FBF8F0'
+                              : '#FFFFFF'
                       }
                       strokeWidth={isSelected ? 2 : 1.2}
                       className="cursor-pointer transition-all duration-200"

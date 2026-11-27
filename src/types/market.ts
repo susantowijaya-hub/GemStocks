@@ -1,6 +1,6 @@
-export type AppRoute = 'dashboard' | 'watchlist' | 'portfolio' | 'stocks' | 'heatmap' | 'news' | 'calendar' | 'ict' | 'extract';
+export type AppRoute = 'dashboard' | 'watchlist' | 'portfolio' | 'stocks' | 'heatmap' | 'news' | 'calendar' | 'ict';
 
-export type ThemeMode = 'obsidian' | 'arctic' | 'parchment';
+export type ThemeMode = 'obsidian' | 'arctic' | 'parchment' | 'velvet';
 
 export interface CandlePoint {
   t: number;
@@ -196,6 +196,25 @@ export interface IctSignalAnalysis {
   placementSummary?: string;
   survivalBlocked?: boolean;
   survivalNote?: string;
+  // Phase 1 Institutional Upgrades: PO3 / Calendar Anchors, SMT Divergence, Liquidity Pools, Vol Regime & Net-of-Friction R:R
+  midnightOpen?: number;
+  ny0830Open?: number;
+  pdh?: number;
+  pdl?: number;
+  po3Phase?: 'Accumulation' | 'Manipulation' | 'Distribution';
+  po3Aligned?: boolean;
+  po3Note?: string;
+  smtStatus?: 'Bullish SMT' | 'Bearish SMT' | 'No Divergence' | 'Unavailable';
+  smtPair?: string;
+  smtDetail?: string;
+  displacementRvol?: number;
+  sweptPoolLabel?: string;
+  volatilityRegime?: 'R1_COMPRESSION' | 'NORMAL' | 'R2_EXPANSION';
+  atrBaselineRatio?: number;
+  netRr?: number;
+  frictionCost?: number;
+  frictionLabel?: string;
+  htfAligned?: boolean;
 }
 
 export interface SdCandleVolumeSignal {
@@ -269,6 +288,25 @@ export interface SdCandleVolumeSignal {
   placementSummary?: string;
   survivalBlocked?: boolean;
   survivalNote?: string;
+  // Phase 1 Institutional Upgrades: PO3 / Calendar Anchors, SMT Divergence, Liquidity Pools, Vol Regime & Net-of-Friction R:R
+  midnightOpen?: number;
+  ny0830Open?: number;
+  pdh?: number;
+  pdl?: number;
+  po3Phase?: 'Accumulation' | 'Manipulation' | 'Distribution';
+  po3Aligned?: boolean;
+  po3Note?: string;
+  smtStatus?: 'Bullish SMT' | 'Bearish SMT' | 'No Divergence' | 'Unavailable';
+  smtPair?: string;
+  smtDetail?: string;
+  displacementRvol?: number;
+  sweptPoolLabel?: string;
+  volatilityRegime?: 'R1_COMPRESSION' | 'NORMAL' | 'R2_EXPANSION';
+  atrBaselineRatio?: number;
+  netRr?: number;
+  frictionCost?: number;
+  frictionLabel?: string;
+  htfAligned?: boolean;
 }
 
 export type WatchlistCategory =
@@ -488,6 +526,72 @@ export interface StockTradePlan {
   scannerScore?: number; // 0..100 composite buy readiness score
   buyReasons?: string[];
   cautionNote?: string;
+  dataValidity?: 'verified' | 'partial' | 'invalid';
+  dataValidityNote?: string;
+  setupGrade?: 'A+' | 'A' | 'B' | 'WATCH';
+  atrPct?: number;
+  extensionPct?: number;
+  positionSizeNote?: string;
+  invalidationRule?: string;
+  gatesPassed?: number;
+  gatesTotal?: number;
+  // Stocks Phase 1: Stage 2 / Minervini 8-Point Trend Template, Benchmark RS Rank, True 14D ATR/ADR, 20D ADTV & ARA/ARB Guard
+  stage?: 'Stage 1 Base' | 'Stage 2 Advancing' | 'Stage 3 Topping' | 'Stage 4 Declining';
+  minerviniPassedCount?: number;
+  minerviniTotalCount?: number;
+  trendTemplateSummary?: string;
+  rsRank?: number; // 1..99 cross-sectional & benchmark-relative strength rank
+  rsVsBenchPct?: number; // excess return vs IHSG or SPX
+  atr14Pct?: number; // true 14-day Wilder ATR %
+  adr20Pct?: number; // 20-day Average Daily Range %
+  w52HighDistPct?: number; // % below 52W high (0 = at high, -20 = 20% below)
+  w52LowGainPct?: number; // % above 52W low
+  adtv20d?: number; // 20-day Average Daily Traded Value (native currency)
+  adtvLabel?: string;
+  adtvPassed?: boolean;
+  araArbBlocked?: boolean;
+  araArbGuardNote?: string;
+  // Stocks Phase 2: Macro Regime Throttle, VCP Tightness & Volume Dry-Up, Multi-Day Accumulation Persistence
+  macroRegimeThrottled?: boolean;
+  macroRegimeNote?: string;
+  vcpDetected?: boolean;
+  vcpContractionPct?: number; // latest swing contraction depth %
+  vcpDryUpRatio?: number; // pre-breakout 5d vol / 20d vol
+  vcpSummary?: string;
+  accPersistence5d?: number; // 0..5 positive institutional accumulation sessions in last 5 days
+  // Stocks Phase 3: Hybrid Runner Trailing MA Exit, Episodic Pivot Catalyst & Sector Leadership
+  ema10Num?: number;
+  sma50Num?: number;
+  sma150Num?: number;
+  sma200Num?: number;
+  trailingExitNote?: string;
+  episodicPivot?: boolean;
+  epNote?: string;
+  sector?: string;
+  sectorRank?: number;
+  isTopSector?: boolean;
+}
+
+export interface StockDeskSurvivalStatus {
+  mode: 'NORMAL' | 'CAUTION' | 'DEFENSIVE';
+  riskPerTradePct: number;
+  maxConcurrentPositions: number;
+  minConvictionRequired: number;
+  breadthPct: number;
+  idxRegime: 'Bullish' | 'Neutral' | 'Defensive';
+  usRegime: 'Bullish' | 'Neutral' | 'Defensive';
+  ledgerWinRatePct: number | null;
+  consecutiveLosses: number;
+  netR: number;
+  verifiedDataCount: number;
+  filteredOutCount: number;
+  headline: string;
+  rules: Array<{
+    id: string;
+    label: string;
+    passed: boolean;
+    detail: string;
+  }>;
 }
 
 export interface ChartTradeOverlays {
@@ -526,6 +630,7 @@ export interface StockMover {
   foreignNetLabel?: string;
   foreignFlowSide?: 'BUY' | 'SELL';
   foreignSourceLabel?: string;
+  sector?: string;
   bandarmology?: BandarmologyAnalysis;
   tradePlan?: StockTradePlan;
 }
@@ -818,6 +923,23 @@ export interface UnifiedMarketSynthesis {
     bearTrigger: string;
     bearTarget: string;
   };
+  macroPillars?: Array<{
+    id: string;
+    label: string;
+    symbol: string;
+    valueText: string;
+    changePct: number;
+    role: string;
+    bias: 'bull' | 'bear' | 'neutral';
+  }>;
+  divergences?: string[];
+  invalidationLevel?: string;
+  tacticalPosture?: {
+    riskBudget: string;
+    favoredLongs: string;
+    favoredHedges: string;
+    eventRiskNote: string;
+  };
 }
 
 export interface MarketIntelligenceResponse {
@@ -948,13 +1070,7 @@ export interface MarketDepthSnapshot {
   updatedAt: string;
 }
 
-export interface CorrelationMatrixResponse {
-  timeframe: '1M' | '3M';
-  assetIds: string[];
-  matrix: number[][];
-  sampleDays: number;
-  updatedAt: string;
-}
+export type PriorityStreamStatus = 'ws-live' | 'reconnecting' | 'http-fallback';
 
 export type ProviderHealthStatus = 'live' | 'failover' | 'cached' | 'offline';
 
@@ -981,6 +1097,8 @@ export interface ServerFeedDiagnosticsResponse {
 export interface ClientFeedTransportDiagnostics {
   quotesRttMs: number | null;
   wsConnected: boolean;
+  wsTimedOut?: boolean;
+  cachedFallbackActive?: boolean;
   lastWsTickAt: number | null;
   wsFresh: boolean;
   usingBootstrapCache: boolean;
@@ -1071,6 +1189,100 @@ export interface UnifiedMarketPulse {
   activeFearGreed: FearGreedInfo;
 }
 
+export type SignalHistoryStatus =
+  | 'PENDING_LIMIT'
+  | 'RUNNING'
+  | 'TP1_HIT'
+  | 'TP2_HIT'
+  | 'SL_HIT'
+  | 'BE_CLOSED'
+  | 'EXPIRED';
 
+export type SignalSourceEngine =
+  | 'idx_scanner'
+  | 'us_scanner'
+  | 'ict_radar'
+  | 'sdcv_radar';
 
+export type SignalAssetClass = 'stock_id' | 'stock_us' | 'crypto' | 'commodity';
 
+export type SignalUserOutcome = 'WIN' | 'LOSS' | 'BE' | 'SKIPPED';
+
+export type SignalStrategyKey = 'ict_2022' | 'sdcv_canonical' | 'idx_bandar' | 'us_swing';
+
+export type SignalIndexedOutcome = 'PENDING' | 'RUNNING' | 'WIN' | 'LOSS' | 'BE' | 'EXPIRED';
+
+export type SignalExecutionPostureTag = 'enter_now' | 'armed_limit' | 'limit_pullback_only';
+
+export type SignalVerificationStatus = 'Pending' | 'Verified' | 'Expired';
+
+export type SignalBarrierOutcome =
+  | 'UPPER_TP'
+  | 'LOWER_SL'
+  | 'TIME_BARRIER'
+  | 'BREAK_EVEN'
+  | 'OPEN';
+
+export interface SignalHistoryRecord {
+  id: string;
+  ownerId: string;
+  lockKey: string;
+  assetClass: SignalAssetClass;
+  sourceEngine: SignalSourceEngine;
+  symbol: string;
+  assetId: string;
+  name: string;
+  currency: 'USD' | 'IDR';
+  decimals: number;
+  timeframe: string;
+  direction: 'BUY' | 'SELL';
+  strategyTag: string;
+  strategy?: SignalStrategyKey;
+  outcome?: SignalIndexedOutcome;
+  timestamp?: number;
+  confidence: number;
+  firstShownPrice: number;
+  entryPrice: number;
+  entryLow: number;
+  entryHigh: number;
+  stopLoss: number;
+  tp1: number;
+  tp2: number;
+  riskReward: string;
+  status: SignalHistoryStatus;
+  filledOnFirstSight: boolean;
+  executionPosture?: SignalExecutionPostureTag;
+  zoneFillVerified?: boolean;
+  verificationStatus?: SignalVerificationStatus;
+  verifiedAtMs?: number;
+  userOutcome?: SignalUserOutcome;
+  journalNote?: string;
+  journaledAtMs?: number;
+  createdAtMs: number;
+  filledAtMs?: number;
+  tp1HitAtMs?: number;
+  closedAtMs?: number;
+  closedPrice?: number;
+  lastPrice: number;
+  maxFavorablePrice: number;
+  maxAdversePrice: number;
+  pnlPct: number;
+  rMultiple: number;
+  lastCheckedAtMs: number;
+  // Phase 2 Triple-Barrier & Meta-Labeling Feature Tags
+  mfeR?: number;
+  maeR?: number;
+  barrierOutcome?: SignalBarrierOutcome;
+  timeBarrierAtMs?: number;
+  inKillzone?: boolean;
+  po3Aligned?: boolean;
+  smtConfirmed?: boolean;
+  volatilityRegime?: 'R1_COMPRESSION' | 'NORMAL' | 'R2_EXPANSION';
+  htfAligned?: boolean;
+  netRr?: number;
+  // Stocks Phase 3 Institutional Meta-Labeling Feature Tags
+  stage2Aligned?: boolean;
+  rsRank?: number;
+  vcpDetected?: boolean;
+  sectorLeader?: boolean;
+}

@@ -18,6 +18,7 @@ import {
   MarketHeatmapResponse,
   MarketIntelligenceResponse,
   NewsStory,
+  PriorityStreamStatus,
   ServerFeedDiagnosticsResponse,
   StocksMoversBucket,
   Timeframe,
@@ -69,6 +70,8 @@ interface BackoffTracker {
 const JITTER_WINDOW_SIZE = 5;
 const BOOTSTRAP_CACHE_KEY = 'stocks-bootstrap-cache-v1';
 const BOOTSTRAP_MAX_AGE_MS = 2 * 60 * 60 * 1000;
+const WS_CONNECT_TIMEOUT_MS = 10_000;
+const BOOTSTRAP_TIMEOUT_MS = 10_000;
 
 interface BootstrapCachePayload {
   savedAt: number;
@@ -234,6 +237,11 @@ export function useLiveMarket() {
   const [intelligenceLoading, setIntelligenceLoading] = useState<boolean>(false);
   const [isPulseActive, setIsPulseActive] = useState(true);
   const [wsConnected, setWsConnected] = useState(false);
+  const [wsTimedOut, setWsTimedOut] = useState(false);
+  const [cachedFallbackActive, setCachedFallbackActive] = useState(false);
+  const [priorityStreamStatus, setPriorityStreamStatus] =
+    useState<PriorityStreamStatus>('reconnecting');
+  const [prioritySources, setPrioritySources] = useState<Record<string, string>>({});
   const [feedsLive, setFeedsLive] = useState(false);
   const [flashMap, setFlashMap] = useState<Record<string, 'gain' | 'loss'>>({});
   const [serverDiagnostics, setServerDiagnostics] = useState<ServerFeedDiagnosticsResponse | null>(
@@ -245,7 +253,12 @@ export function useLiveMarket() {
 
   const isPulseRef = useRef(isPulseActive);
   isPulseRef.current = isPulseActive;
+  const wsConnectedRef = useRef(false);
+  wsConnectedRef.current = wsConnected;
+  const feedsLiveRef = useRef(false);
+  feedsLiveRef.current = feedsLive;
   const quotesInFlightRef = useRef(false);
+  const priorityRadarInFlightRef = useRef(false);
   const stocksInFlightRef = useRef(false);
   const heatmapInFlightRef = useRef(false);
   const summaryInFlightRef = useRef(false);
@@ -254,6 +267,29 @@ export function useLiveMarket() {
   const lastClosedPollAtRef = useRef(0);
   const lastFullQuotesAtRef = useRef(0);
   const lastWsTickAtRef = useRef<Record<string, number>>({});
+
+  // Forces immediate fallback to cached local snapshot (or bundled INITIAL_ASSETS) if WS or boot exceeds 10s
+  const activateCachedLocalFallback = useCallback(() => {
+    setCachedFallbackActive(true);
+    const cached = typeof window !== 'undefined' ? readBootstrapCache() : null;
+    if (cached?.assets && cached.assets.length > 0) {
+      setAssets((prev) => mergeBootstrapAssets(prev, cached.assets));
+      if (cached.fxRates) {
+        setFxRates((prev) => ({ ...prev, ...cached.fxRates }));
+      }
+      if (cached.fxPairTiles && cached.fxPairTiles.length > 0) {
+        setFxPairTiles(cached.fxPairTiles);
+      }
+      if (cached.newsStories && cached.newsStories.length > 0) {
+        setNewsStories(cached.newsStories);
+      }
+      if (cached.economicEvents && cached.economicEvents.length > 0) {
+        setEconomicEvents(cached.economicEvents);
+      }
+    }
+    setStocksLoading(false);
+    setHeatmapLoading(false);
+  }, []);
 
   // Jitter-buffer, adaptive EMA filter, spike guard, and per-endpoint exponential backoff
   const tickWindowRef = useRef<Record<string, number[]>>({});
@@ -352,6 +388,133 @@ export function useLiveMarket() {
     }, 650);
   }, []);
 
+  // Top-Priority Fast-Lane strictly for BTC/USD, XAU/USD, and DXY (highest refresh priority above all feeds)
+  const refreshPriorityRadar = useCallback(
+    async (force = false) => {
+      if ((!force && priorityRadarInFlightRef.current) || shouldSkipForBackoff('priorityRadar', force)) {
+        return;
+      }
+      priorityRadarInFlightRef.current = true;
+      try {
+        const data = await fetchJsonWithTimeout<{
+          quotes?: Array<{
+            id: 'BTCUSD' | 'XAUUSD' | 'DXY';
+            price: number;
+            prevClose: number;
+            changeValue: number;
+            changePercent: number;
+            dayHigh?: number;
+            dayLow?: number;
+            marketSessionOpen: boolean;
+            sessionStateLabel: string;
+            updatedAtEpoch: number;
+            sourceLabel: string;
+          }>;
+          updatedAt?: string;
+          latencyMs?: number;
+        }>('/api/market/priority-radar', 3500);
+
+        if (!data || !Array.isArray(data.quotes) || data.quotes.length === 0) {
+          recordFetchOutcome('priorityRadar', false, 1500, 10_000);
+          return;
+        }
+        recordFetchOutcome('priorityRadar', true);
+        setFeedsLive(true);
+        setCachedFallbackActive(false);
+
+        const patchMap = new Map(data.quotes.map((q) => [q.id, q]));
+        const flashes: Array<{ id: string; dir: 'gain' | 'loss' }> = [];
+
+        setAssets((prev) =>
+          prev.map((asset) => {
+            const patch = patchMap.get(asset.id as 'BTCUSD' | 'XAUUSD' | 'DXY');
+            if (!patch || !Number.isFinite(patch.price) || patch.price <= 0) return asset;
+
+            // Preserve active /ws/priority-radar ticks if a socket tick arrived within 3s
+            if (
+              asset.id === 'BTCUSD' ||
+              asset.id === 'XAUUSD' ||
+              asset.id === 'DXY' ||
+              asset.id === 'ETHUSD'
+            ) {
+              const lastWs = lastWsTickAtRef.current[asset.id] ?? 0;
+              if (Date.now() - lastWs < 3000) {
+                return asset;
+              }
+            }
+
+            const smoothed = smoothTickPrice(
+              asset.id,
+              patch.price,
+              asset.decimals,
+              patch.marketSessionOpen,
+              asset.price
+            );
+            if (smoothed !== asset.price && asset.price > 0) {
+              flashes.push({ id: asset.id, dir: smoothed > asset.price ? 'gain' : 'loss' });
+            }
+
+            const nextCandles = asset.chartCandles ? { ...asset.chartCandles } : undefined;
+            if (nextCandles) {
+              for (const tfKey of ['1m', '5m', '15m', '30m', '1h', '4h'] as Timeframe[]) {
+                const bars = nextCandles[tfKey];
+                if (Array.isArray(bars) && bars.length > 0) {
+                  const last = bars[bars.length - 1];
+                  if (last.c !== smoothed) {
+                    nextCandles[tfKey] = [
+                      ...bars.slice(0, -1),
+                      {
+                        ...last,
+                        c: smoothed,
+                        h: Math.max(last.h, smoothed),
+                        l: Math.min(last.l, smoothed),
+                      },
+                    ];
+                  }
+                }
+              }
+            }
+
+            const next1D =
+              asset.chartSeries['1D'] && asset.chartSeries['1D'].length > 0
+                ? [...asset.chartSeries['1D'].slice(0, -1), smoothed]
+                : asset.chartSeries['1D'];
+
+            const fmtHiLo = (v?: number) =>
+              typeof v === 'number' && Number.isFinite(v) && v > 0
+                ? v.toLocaleString('en-US', {
+                    minimumFractionDigits: asset.decimals,
+                    maximumFractionDigits: asset.decimals,
+                  })
+                : undefined;
+
+            return {
+              ...asset,
+              price: smoothed,
+              prevClose: patch.prevClose > 0 ? patch.prevClose : asset.prevClose,
+              changeValue: Number((smoothed - (patch.prevClose > 0 ? patch.prevClose : asset.prevClose)).toFixed(asset.decimals >= 3 ? asset.decimals : 2)),
+              changePercent: patch.changePercent,
+              dayHigh: fmtHiLo(patch.dayHigh) ?? asset.dayHigh,
+              dayLow: fmtHiLo(patch.dayLow) ?? asset.dayLow,
+              marketSessionOpen: patch.marketSessionOpen,
+              sessionStateLabel: patch.sessionStateLabel,
+              updatedAtEpoch: patch.updatedAtEpoch,
+              chartSeries: { ...asset.chartSeries, '1D': next1D },
+              ...(nextCandles ? { chartCandles: nextCandles } : {}),
+            };
+          })
+        );
+
+        for (const f of flashes) {
+          triggerFlash(f.id, f.dir);
+        }
+      } finally {
+        priorityRadarInFlightRef.current = false;
+      }
+    },
+    [recordFetchOutcome, shouldSkipForBackoff, smoothTickPrice, triggerFlash]
+  );
+
   // Fetch all live market quotes from backend aggregator (1s compact ticks after initial full series hydration)
   const refreshQuotes = useCallback(
     async (force = false) => {
@@ -392,15 +555,19 @@ export function useLiveMarket() {
         const patchMap = new Map(patches.map((p) => [p.id, p]));
         anySessionOpenRef.current = patches.some((p) => p.marketSessionOpen !== false);
         setFeedsLive(true);
+        setCachedFallbackActive(false);
 
         setAssets((prev) =>
           prev.map((asset) => {
             const patch = patchMap.get(asset.id);
             if (!patch) return asset;
-            // Preserve live Coinbase WS crypto ticks when WS ticked recently so REST never ping-pongs
+            // Preserve live /ws/priority-radar ticks for BTC/XAU/DXY/ETH so REST quotes never ping-pong
             const wsFresh =
-              (asset.id === 'BTCUSD' || asset.id === 'ETHUSD') &&
-              Date.now() - (lastWsTickAtRef.current[asset.id] ?? 0) < 5000;
+              (asset.id === 'BTCUSD' ||
+                asset.id === 'XAUUSD' ||
+                asset.id === 'DXY' ||
+                asset.id === 'ETHUSD') &&
+              Date.now() - (lastWsTickAtRef.current[asset.id] ?? 0) < 5500;
 
             const sessionOpen = patch.marketSessionOpen !== false;
             const nextPrice = wsFresh
@@ -775,32 +942,50 @@ export function useLiveMarket() {
     return () => window.clearTimeout(timer);
   }, [feedsLive, assets, fxRates, fxPairTiles, newsStories, economicEvents, usMoversBucket, idxMoversBucket]);
 
-  // Prioritized staggered initial fetch + 1-second live polling + background refresh strategy
+  // 10-second bootstrap liveness safeguard: guarantees the terminal never stalls on "Initializing live feeds"
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const bootstrapSafeguardTimer = window.setTimeout(() => {
+      if (!feedsLiveRef.current) {
+        activateCachedLocalFallback();
+        setPriorityStreamStatus((prev) => (prev === 'ws-live' ? prev : 'http-fallback'));
+      }
+    }, BOOTSTRAP_TIMEOUT_MS);
+
+    return () => {
+      window.clearTimeout(bootstrapSafeguardTimer);
+    };
+  }, [activateCachedLocalFallback]);
+
+  // Priority-Based Data Stream Architecture:
+  // - Tier 1 (High-Frequency): XAU/USD & BTC/USD (+ DXY/ETH) via dedicated /ws/priority-radar WebSocket (with 2.5s HTTP failover)
+  // - Tier 2 (Throttled Background Sync): Broad market quotes (4s), stocks movers (12s), heatmap (30s), news/FX (60s), intel (75s), summary (90s)
   useEffect(() => {
     let isTabHidden =
       typeof document !== 'undefined' ? document.visibilityState === 'hidden' : false;
     let lastBackgroundPollAt = 0;
 
-    // T=0: Critical first-paint quotes & FX rates only (zero secondary contention)
+    // T=0: Tier-1 Priority Radar + initial core quotes & FX snapshot
+    void refreshPriorityRadar(true);
     void refreshQuotes(true);
     void refreshFxRates(true);
 
-    // T=320ms: Stocks movers & live news/calendar after initial paint and quote packet
+    // T=450ms: Tier-2 Stocks movers & live news/calendar after initial interactive paint
     const t1 = window.setTimeout(() => {
       void refreshStocks(true);
       void refreshSecondaryFeeds(true);
-    }, 320);
+    }, 450);
 
-    // T=750ms: Dashboard market intelligence panel
+    // T=900ms: Dashboard market intelligence panel
     const t2 = window.setTimeout(() => {
       void fetchMarketIntelligence(true);
-    }, 750);
+    }, 900);
 
-    // T=1500ms: Secondary analytics (heatmap, 24h summary) deferred past initial interactive budget
+    // T=1600ms: Heavy secondary analytics (heatmap, 24h summary) deferred past initial interactive budget
     const t3 = window.setTimeout(() => {
       void refreshHeatmap(true);
       void fetchDailySummary(true);
-    }, 1500);
+    }, 1600);
 
     const handleVisibilityChange = () => {
       if (typeof document === 'undefined') return;
@@ -809,7 +994,8 @@ export function useLiveMarket() {
       isTabHidden = nowHidden;
 
       if (!nowHidden && wasHidden && isPulseRef.current) {
-        // Immediate stale-while-revalidate refresh on resume for instant updated tickers
+        // Immediate Tier-1 refresh for XAU/BTC first, then Tier-2 background sync
+        void refreshPriorityRadar(true);
         void refreshQuotes(true);
         void refreshFxRates(false);
         void refreshStocks(false);
@@ -820,13 +1006,26 @@ export function useLiveMarket() {
       document.addEventListener('visibilitychange', handleVisibilityChange);
     }
 
+    // Tier-1 HTTP failover strictly when /ws/priority-radar is disconnected, timed out, or stale (>6s)
+    const priorityRadarTimer = window.setInterval(() => {
+      if (!isPulseRef.current || isTabHidden) return;
+      const now = Date.now();
+      const btcFresh = now - (lastWsTickAtRef.current['BTCUSD'] ?? 0) < 6000;
+      const xauFresh = now - (lastWsTickAtRef.current['XAUUSD'] ?? 0) < 6000;
+      if (wsConnectedRef.current && btcFresh && xauFresh) {
+        return;
+      }
+      void refreshPriorityRadar(false);
+    }, 2_500);
+
+    // Tier-2 Throttled Background Sync for non-priority markets (4s open, 60s closed, 20s tab hidden)
     const quoteTimer = window.setInterval(() => {
       if (!isPulseRef.current) return;
       const now = Date.now();
       if (isTabHidden) {
-        // Background pre-fetch cadence keeps ticker quotes warm while app sits in background
-        if (now - lastBackgroundPollAt >= 15_000) {
+        if (now - lastBackgroundPollAt >= 20_000) {
           lastBackgroundPollAt = now;
+          void refreshPriorityRadar(false);
           void refreshQuotes(false);
           void refreshFxRates(false);
         }
@@ -839,28 +1038,38 @@ export function useLiveMarket() {
         lastClosedPollAtRef.current = now;
         void refreshQuotes(false);
       }
-    }, 1_000);
+    }, 4_000);
 
     const stocksTimer = window.setInterval(() => {
       if (isPulseRef.current && !isTabHidden) {
         void refreshStocks(false);
       }
-    }, 5_000);
+    }, 12_000);
 
     const heatmapTimer = window.setInterval(() => {
       if (isPulseRef.current && !isTabHidden) {
         void refreshHeatmap(false);
       }
-    }, 20_000);
+    }, 30_000);
 
     const secondaryTimer = window.setInterval(() => {
       if (isPulseRef.current && !isTabHidden) {
         void refreshFxRates(false);
         void refreshSecondaryFeeds(false);
-        void fetchDailySummary(false);
-        void fetchMarketIntelligence(false);
       }
     }, 60_000);
+
+    const intelligenceTimer = window.setInterval(() => {
+      if (isPulseRef.current && !isTabHidden) {
+        void fetchMarketIntelligence(false);
+      }
+    }, 75_000);
+
+    const dailySummaryTimer = window.setInterval(() => {
+      if (isPulseRef.current && !isTabHidden) {
+        void fetchDailySummary(false);
+      }
+    }, 90_000);
 
     return () => {
       if (typeof document !== 'undefined') {
@@ -869,12 +1078,16 @@ export function useLiveMarket() {
       window.clearTimeout(t1);
       window.clearTimeout(t2);
       window.clearTimeout(t3);
+      window.clearInterval(priorityRadarTimer);
       window.clearInterval(quoteTimer);
       window.clearInterval(stocksTimer);
       window.clearInterval(heatmapTimer);
       window.clearInterval(secondaryTimer);
+      window.clearInterval(intelligenceTimer);
+      window.clearInterval(dailySummaryTimer);
     };
   }, [
+    refreshPriorityRadar,
     refreshQuotes,
     refreshFxRates,
     refreshSecondaryFeeds,
@@ -884,149 +1097,338 @@ export function useLiveMarket() {
     fetchMarketIntelligence,
   ]);
 
-  // Politely pre-warm real OHLC candles (15m, 5m, 1h, 4h) strictly for BTCUSD & XAUUSD
-  // so HTF structure, Survival checks, and background alerts are ready immediately
+  // Top-Priority OHLCV Candle Warmer & High-Frequency Refresher strictly for BTC/USD & XAU/USD
+  // Boots at 200ms (15m & 5m first) and refreshes intraday candles every 20s so ICT/S&D accuracy never lags spot
   useEffect(() => {
-    const ICT_WARM_IDS = ['BTCUSD', 'XAUUSD'];
+    const ICT_WARM_IDS = ['XAUUSD', 'BTCUSD'];
     let cancelled = false;
 
-    const warmBatches = async () => {
-      const tfs: Timeframe[] = ['15m', '5m', '1h', '4h'];
-      for (const tf of tfs) {
+    const warmIntraday = async () => {
+      const fastTfs: Timeframe[] = ['15m', '5m'];
+      for (const tf of fastTfs) {
         if (cancelled) return;
         await Promise.allSettled(ICT_WARM_IDS.map((id) => loadChartTimeframe(id, tf)));
-        if (cancelled) return;
-        await new Promise((r) => window.setTimeout(r, 150));
       }
     };
 
-    const bootWarmTimer = window.setTimeout(() => {
-      void warmBatches();
-    }, 3500);
+    const warmHtf = async () => {
+      const htfTfs: Timeframe[] = ['1h', '4h'];
+      for (const tf of htfTfs) {
+        if (cancelled) return;
+        await Promise.allSettled(ICT_WARM_IDS.map((id) => loadChartTimeframe(id, tf)));
+      }
+    };
 
-    const periodicWarmTimer = window.setInterval(() => {
+    const bootFastTimer = window.setTimeout(() => {
+      void warmIntraday();
+    }, 200);
+
+    const bootHtfTimer = window.setTimeout(() => {
+      void warmHtf();
+    }, 850);
+
+    const fastCandleTimer = window.setInterval(() => {
       if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
       if (!isPulseRef.current) return;
-      void warmBatches();
-    }, 180_000);
+      void warmIntraday();
+    }, 20_000);
+
+    const htfCandleTimer = window.setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      if (!isPulseRef.current) return;
+      void warmHtf();
+    }, 60_000);
 
     return () => {
       cancelled = true;
-      window.clearTimeout(bootWarmTimer);
-      window.clearInterval(periodicWarmTimer);
+      window.clearTimeout(bootFastTimer);
+      window.clearTimeout(bootHtfTimer);
+      window.clearInterval(fastCandleTimer);
+      window.clearInterval(htfCandleTimer);
     };
   }, [loadChartTimeframe]);
 
-  // Unified Coinbase Exchange USD WebSocket with jitter-buffer EMA smoothing for BTC/USD & ETH/USD
+  // Dedicated High-Frequency Server WebSocket (/ws/priority-radar) for XAU/USD, BTC/USD, DXY & ETH/USD
+  // Streams real-time Coinbase Exchange WS + TradingView OANDA WS frames with 220ms micro-batching
   useEffect(() => {
+    if (typeof window === 'undefined') return;
     let ws: WebSocket | null = null;
     let reconnectTimer: number | null = null;
+    let connectTimeoutTimer: number | null = null;
+    let flushTimer: number | null = null;
     let attempts = 0;
     let isDisposed = false;
 
+    const clearConnectTimeout = () => {
+      if (connectTimeoutTimer !== null) {
+        window.clearTimeout(connectTimeoutTimer);
+        connectTimeoutTimer = null;
+      }
+    };
+
+    interface WsPriorityQuote {
+      id: 'BTCUSD' | 'XAUUSD' | 'DXY' | 'ETHUSD';
+      price: number;
+      prevClose?: number;
+      changeValue?: number;
+      changePercent?: number;
+      dayHigh?: number;
+      dayLow?: number;
+      marketSessionOpen?: boolean;
+      sessionStateLabel?: string;
+      updatedAtEpoch?: number;
+      sourceLabel?: string;
+    }
+
+    const pendingTicks = new Map<string, WsPriorityQuote>();
+
+    const flushPendingTicks = () => {
+      flushTimer = null;
+      if (isDisposed || pendingTicks.size === 0) return;
+      const batch = Array.from(pendingTicks.values());
+      pendingTicks.clear();
+
+      const batchMap = new Map(batch.map((q) => [q.id, q]));
+      const flashes: Array<{ id: string; dir: 'gain' | 'loss' }> = [];
+      const sourceUpdates: Record<string, string> = {};
+
+      for (const q of batch) {
+        if (q.sourceLabel) {
+          sourceUpdates[q.id] = q.sourceLabel;
+        }
+      }
+      if (Object.keys(sourceUpdates).length > 0) {
+        setPrioritySources((prev) => {
+          let changed = false;
+          for (const [k, v] of Object.entries(sourceUpdates)) {
+            if (prev[k] !== v) {
+              changed = true;
+              break;
+            }
+          }
+          return changed ? { ...prev, ...sourceUpdates } : prev;
+        });
+      }
+
+      setAssets((prev) =>
+        prev.map((asset) => {
+          const patch = batchMap.get(asset.id as WsPriorityQuote['id']);
+          if (!patch || !Number.isFinite(patch.price) || patch.price <= 0) return asset;
+
+          const sessionOpen = patch.marketSessionOpen !== false;
+          const smoothedPrice = smoothTickPrice(
+            asset.id,
+            patch.price,
+            asset.decimals,
+            sessionOpen,
+            asset.price
+          );
+          if (Math.abs(smoothedPrice - asset.price) > Math.pow(10, -(asset.decimals + 1)) && asset.price > 0) {
+            flashes.push({
+              id: asset.id,
+              dir: smoothedPrice >= asset.price ? 'gain' : 'loss',
+            });
+          }
+
+          const anchorPrev =
+            typeof patch.prevClose === 'number' && Number.isFinite(patch.prevClose) && patch.prevClose > 0
+              ? patch.prevClose
+              : asset.prevClose > 0
+                ? asset.prevClose
+                : smoothedPrice;
+
+          const changeValue = Number(
+            (smoothedPrice - anchorPrev).toFixed(asset.decimals >= 3 ? asset.decimals : 2)
+          );
+          const changePercent =
+            typeof patch.changePercent === 'number' && Number.isFinite(patch.changePercent)
+              ? Number(patch.changePercent.toFixed(2))
+              : Number((((smoothedPrice - anchorPrev) / Math.max(1e-6, anchorPrev)) * 100).toFixed(2));
+
+          // Keep active forming intraday candles locked to live WebSocket ticks for ICT/S&D accuracy
+          const nextCandles = asset.chartCandles ? { ...asset.chartCandles } : undefined;
+          if (nextCandles) {
+            for (const tfKey of ['1m', '5m', '15m', '30m', '1h', '4h', '1D'] as Timeframe[]) {
+              const bars = nextCandles[tfKey];
+              if (Array.isArray(bars) && bars.length > 0) {
+                const last = bars[bars.length - 1];
+                if (last.c !== smoothedPrice) {
+                  nextCandles[tfKey] = [
+                    ...bars.slice(0, -1),
+                    {
+                      ...last,
+                      c: smoothedPrice,
+                      h: Math.max(last.h, smoothedPrice),
+                      l: Math.min(last.l, smoothedPrice),
+                    },
+                  ];
+                }
+              }
+            }
+          }
+
+          const nextSeries1D =
+            asset.chartSeries['1D'] && asset.chartSeries['1D'].length > 0
+              ? [...asset.chartSeries['1D'].slice(0, -1), smoothedPrice]
+              : asset.chartSeries['1D'];
+
+          const nextSentiment: 'Bullish' | 'Bearish' | 'Neutral' =
+            changePercent >= 0.35
+              ? 'Bullish'
+              : changePercent <= -0.35
+                ? 'Bearish'
+                : 'Neutral';
+
+          const fmtHiLo = (v?: number) =>
+            typeof v === 'number' && Number.isFinite(v) && v > 0
+              ? v.toLocaleString('en-US', {
+                  minimumFractionDigits: asset.decimals,
+                  maximumFractionDigits: asset.decimals,
+                })
+              : undefined;
+
+          return {
+            ...asset,
+            price: smoothedPrice,
+            prevClose: anchorPrev,
+            changeValue,
+            changePercent,
+            dayHigh: fmtHiLo(patch.dayHigh) ?? asset.dayHigh,
+            dayLow: fmtHiLo(patch.dayLow) ?? asset.dayLow,
+            sentiment: nextSentiment,
+            marketSessionOpen: patch.marketSessionOpen ?? asset.marketSessionOpen,
+            sessionStateLabel: patch.sessionStateLabel ?? asset.sessionStateLabel,
+            updatedAtEpoch: patch.updatedAtEpoch ?? Date.now(),
+            chartSeries: {
+              ...asset.chartSeries,
+              '1D': nextSeries1D,
+            },
+            ...(nextCandles ? { chartCandles: nextCandles } : {}),
+          };
+        })
+      );
+
+      for (const f of flashes) {
+        triggerFlash(f.id, f.dir);
+      }
+    };
+
+    const scheduleFlush = (immediate = false) => {
+      if (immediate) {
+        if (flushTimer !== null) {
+          window.clearTimeout(flushTimer);
+          flushTimer = null;
+        }
+        flushPendingTicks();
+        return;
+      }
+      if (flushTimer === null) {
+        flushTimer = window.setTimeout(flushPendingTicks, 220);
+      }
+    };
+
     const connect = () => {
       if (isDisposed) return;
+      clearConnectTimeout();
       try {
-        ws = new WebSocket('wss://ws-feed.exchange.coinbase.com');
+        const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${wsProto}//${window.location.host}/ws/priority-radar`;
+        setPriorityStreamStatus(attempts === 0 ? 'reconnecting' : 'http-fallback');
+        const socket = new WebSocket(wsUrl);
+        ws = socket;
 
-        ws.onopen = () => {
-          if (isDisposed || !ws) return;
+        // 10-second WebSocket handshake timeout safeguard:
+        // If WS stalls in CONNECTING > 10s, immediately fall back to cached local data + HTTP priority failover
+        connectTimeoutTimer = window.setTimeout(() => {
+          connectTimeoutTimer = null;
+          if (isDisposed || socket !== ws) return;
+          if (socket.readyState === WebSocket.CONNECTING) {
+            setWsTimedOut(true);
+            setWsConnected(false);
+            setPriorityStreamStatus('http-fallback');
+            activateCachedLocalFallback();
+            void refreshPriorityRadar(true);
+            try {
+              socket.close();
+            } catch {
+              // ignore close error on hung handshake
+            }
+          }
+        }, WS_CONNECT_TIMEOUT_MS);
+
+        socket.onopen = () => {
+          clearConnectTimeout();
+          if (isDisposed || socket !== ws) return;
           setWsConnected(true);
+          setWsTimedOut(false);
+          setCachedFallbackActive(false);
+          setPriorityStreamStatus('ws-live');
           attempts = 0;
-          ws.send(
-            JSON.stringify({
-              type: 'subscribe',
-              product_ids: ['BTC-USD', 'ETH-USD'],
-              channels: ['ticker'],
-            })
-          );
         };
 
-        ws.onmessage = (event) => {
-          if (isDisposed || !isPulseRef.current) return;
+        socket.onmessage = (event) => {
+          if (isDisposed || !isPulseRef.current || socket !== ws) return;
           try {
             const payload = JSON.parse(event.data) as {
-              type?: string;
-              product_id?: string;
-              price?: string;
-              open_24h?: string;
+              type?: 'snapshot' | 'tick';
+              quotes?: WsPriorityQuote[];
+              quote?: WsPriorityQuote;
             };
-            if (payload?.type !== 'ticker' || !payload.product_id || !payload.price) return;
-
-            const id =
-              payload.product_id === 'BTC-USD'
-                ? 'BTCUSD'
-                : payload.product_id === 'ETH-USD'
-                  ? 'ETHUSD'
-                  : null;
-            if (!id) return;
-
-            const rawPrice = parseFloat(payload.price);
-            if (!Number.isFinite(rawPrice) || rawPrice <= 0) return;
-
             const nowTick = Date.now();
-            lastWsTickAtRef.current[id] = nowTick;
-            setLastWsTickState(nowTick);
-
-            setAssets((prev) =>
-              prev.map((asset) => {
-                if (asset.id !== id) return asset;
-                const smoothedPrice = smoothTickPrice(id, rawPrice, asset.decimals, true, asset.price);
-                const dir = smoothedPrice >= asset.price ? 'gain' : 'loss';
-                if (Math.abs(smoothedPrice - asset.price) > 0.01) {
-                  triggerFlash(id, dir);
+            if (payload.type === 'snapshot' && Array.isArray(payload.quotes)) {
+              for (const q of payload.quotes) {
+                if (q && q.id && Number.isFinite(q.price) && q.price > 0) {
+                  lastWsTickAtRef.current[q.id] = nowTick;
+                  pendingTicks.set(q.id, q);
                 }
-                const fallbackOpen = parseFloat(payload.open_24h ?? '');
-                const anchorPrev =
-                  Number.isFinite(fallbackOpen) && fallbackOpen > 0
-                    ? fallbackOpen
-                    : asset.prevClose > 0
-                      ? asset.prevClose
-                      : smoothedPrice;
-                const changeValue = Number((smoothedPrice - anchorPrev).toFixed(2));
-                const changePercent = Number(
-                  (((smoothedPrice - anchorPrev) / Math.max(1e-6, anchorPrev)) * 100).toFixed(2)
-                );
-                const nextSeries1D = [...asset.chartSeries['1D'].slice(0, -1), smoothedPrice];
-                const nextSentiment: 'Bullish' | 'Bearish' | 'Neutral' =
-                  changePercent >= 0.35
-                    ? 'Bullish'
-                    : changePercent <= -0.35
-                      ? 'Bearish'
-                      : 'Neutral';
-                return {
-                  ...asset,
-                  price: smoothedPrice,
-                  prevClose: anchorPrev,
-                  changeValue,
-                  changePercent,
-                  sentiment: nextSentiment,
-                  updatedAtEpoch: Date.now(),
-                  chartSeries: {
-                    ...asset.chartSeries,
-                    '1D': nextSeries1D,
-                  },
-                };
-              })
-            );
+              }
+              if (pendingTicks.size > 0) {
+                setFeedsLive(true);
+                setCachedFallbackActive(false);
+                setLastWsTickState(nowTick);
+                scheduleFlush(true);
+              }
+              return;
+            }
+            if (payload.type === 'tick' && payload.quote && payload.quote.id) {
+              const q = payload.quote;
+              if (!Number.isFinite(q.price) || q.price <= 0) return;
+              lastWsTickAtRef.current[q.id] = nowTick;
+              setFeedsLive(true);
+              setCachedFallbackActive(false);
+              setLastWsTickState(nowTick);
+              pendingTicks.set(q.id, q);
+              scheduleFlush(false);
+            }
           } catch {
-            // ignore malformed tick
+            // ignore malformed frame
           }
         };
 
-        ws.onerror = () => {
+        socket.onerror = () => {
+          clearConnectTimeout();
+          if (socket !== ws) return;
           setWsConnected(false);
         };
 
-        ws.onclose = () => {
+        socket.onclose = () => {
+          clearConnectTimeout();
+          if (socket !== ws) return;
           setWsConnected(false);
-          if (!isDisposed && attempts < 4) {
+          if (!isDisposed) {
             attempts += 1;
-            reconnectTimer = window.setTimeout(connect, 4000);
+            setPriorityStreamStatus(attempts >= 2 ? 'http-fallback' : 'reconnecting');
+            const delay = Math.min(15_000, 1000 * Math.pow(2, Math.min(4, attempts - 1)));
+            reconnectTimer = window.setTimeout(connect, delay);
           }
         };
       } catch {
+        clearConnectTimeout();
         setWsConnected(false);
+        setWsTimedOut(true);
+        setPriorityStreamStatus('http-fallback');
+        activateCachedLocalFallback();
+        void refreshPriorityRadar(true);
       }
     };
 
@@ -1034,12 +1436,14 @@ export function useLiveMarket() {
 
     return () => {
       isDisposed = true;
-      if (reconnectTimer) window.clearTimeout(reconnectTimer);
-      if (ws && ws.readyState === WebSocket.OPEN) {
+      clearConnectTimeout();
+      if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
+      if (flushTimer !== null) window.clearTimeout(flushTimer);
+      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
         ws.close();
       }
     };
-  }, [smoothTickPrice, triggerFlash]);
+  }, [activateCachedLocalFallback, refreshPriorityRadar, smoothTickPrice, triggerFlash]);
 
   const togglePulse = useCallback(() => {
     setIsPulseActive((prev) => !prev);
@@ -1059,6 +1463,7 @@ export function useLiveMarket() {
   }, [quotesRttMs]);
 
   const refreshAll = useCallback(async () => {
+    await refreshPriorityRadar(true);
     await Promise.allSettled([
       refreshQuotes(true),
       refreshFxRates(true),
@@ -1070,6 +1475,7 @@ export function useLiveMarket() {
       refreshDiagnostics(),
     ]);
   }, [
+    refreshPriorityRadar,
     refreshQuotes,
     refreshFxRates,
     refreshSecondaryFeeds,
@@ -1092,9 +1498,12 @@ export function useLiveMarket() {
   const clientTransport: ClientFeedTransportDiagnostics = {
     quotesRttMs,
     wsConnected,
+    wsTimedOut,
+    cachedFallbackActive,
     lastWsTickAt: lastWsTickState,
     wsFresh: Boolean(wsConnected && lastWsTickState && nowMs - lastWsTickState < 15_000),
-    usingBootstrapCache: !feedsLive && Boolean(boot?.assets && boot.assets.length > 0),
+    usingBootstrapCache:
+      cachedFallbackActive || (!feedsLive && Boolean(boot?.assets && boot.assets.length > 0)),
     bootstrapSavedAt: boot?.savedAt ?? null,
     activeBackoffs,
     lastQuotesAt,
@@ -1124,6 +1533,8 @@ export function useLiveMarket() {
     refreshMarketIntelligence: () => fetchMarketIntelligence(true),
     isPulseActive,
     wsConnected,
+    priorityStreamStatus,
+    prioritySources,
     feedsLive,
     flashMap,
     serverDiagnostics,

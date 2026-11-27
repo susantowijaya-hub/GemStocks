@@ -8,7 +8,9 @@ import {
   RiskRegimeInfo,
   RiskRegimeSectorBreakdown,
   RiskRegimeStatus,
+  SignalHistoryRecord,
   SignalTier,
+  StockDeskSurvivalStatus,
   StockExecutionAction,
   StockMover,
   StocksMoversBucket,
@@ -1280,7 +1282,578 @@ function deriveIdxVerdictAndScore(
   return { verdictLabel, scannerScore, buyReasons, cautionNote };
 }
 
-export function computeStockTradeStrategy(stock: StockMover): StockTradePlan {
+// ============================================================================
+// STOCKS PHASE 1, 2 & 3 INSTITUTIONAL STRATEGY INFRASTRUCTURE
+// ============================================================================
+
+const CANONICAL_SECTOR_MAP: Record<string, string> = {
+  // US Mega-Cap & Leaders
+  NVDA: 'Semiconductors', AMD: 'Semiconductors', AVGO: 'Semiconductors', TSM: 'Semiconductors',
+  INTC: 'Semiconductors', QCOM: 'Semiconductors', MU: 'Semiconductors', ARM: 'Semiconductors',
+  AMAT: 'Semiconductors', LRCX: 'Semiconductors', KLAC: 'Semiconductors', MRVL: 'Semiconductors',
+  AAPL: 'Big Tech', MSFT: 'Big Tech', GOOGL: 'Big Tech', GOOG: 'Big Tech', META: 'Big Tech',
+  AMZN: 'Big Tech', ORCL: 'Software & Cloud', CRM: 'Software & Cloud', PLTR: 'Software & Cloud',
+  NOW: 'Software & Cloud', SNOW: 'Software & Cloud', CRWD: 'Software & Cloud', PANW: 'Software & Cloud',
+  NFLX: 'Comm Services', DIS: 'Comm Services', SPOT: 'Comm Services',
+  TSLA: 'Auto & EV', RIVN: 'Auto & EV', F: 'Auto & EV', GM: 'Auto & EV',
+  JPM: 'Financials', BAC: 'Financials', GS: 'Financials', MS: 'Financials', WFC: 'Financials',
+  V: 'Financials', MA: 'Financials', BRK: 'Financials', 'BRK-B': 'Financials', COIN: 'Financials',
+  XOM: 'Energy', CVX: 'Energy', COP: 'Energy', SLB: 'Energy', OXY: 'Energy',
+  LLY: 'Healthcare', UNH: 'Healthcare', JNJ: 'Healthcare', NVO: 'Healthcare', ABBV: 'Healthcare', MRK: 'Healthcare',
+  WMT: 'Consumer', COST: 'Consumer', HD: 'Consumer', NKE: 'Consumer', SBUX: 'Consumer', MCD: 'Consumer',
+  CAT: 'Industrials', BA: 'Industrials', GE: 'Industrials', LMT: 'Industrials', RTX: 'Industrials',
+  MSTR: 'Digital Assets', MARA: 'Digital Assets', RIOT: 'Digital Assets',
+  // IDX Blue-Chips & Institutional Movers
+  BBCA: 'Banking', BBRI: 'Banking', BMRI: 'Banking', BBNI: 'Banking', BRIS: 'Banking',
+  BBTN: 'Banking', BDMN: 'Banking', BNGA: 'Banking', ARTO: 'Banking',
+  ADRO: 'Energy & Coal', AADI: 'Energy & Coal', ITMG: 'Energy & Coal', PTBA: 'Energy & Coal',
+  BUMI: 'Energy & Coal', INDY: 'Energy & Coal', HRUM: 'Energy & Coal', PGAS: 'Energy & Coal',
+  MEDC: 'Energy & Coal', AKRA: 'Energy & Coal', ENRG: 'Energy & Coal', RAJA: 'Energy & Coal',
+  AMMN: 'Metals & Mining', ANTM: 'Metals & Mining', INCO: 'Metals & Mining', MDKA: 'Metals & Mining',
+  MBMA: 'Metals & Mining', NCKL: 'Metals & Mining', TINS: 'Metals & Mining', BRMS: 'Metals & Mining',
+  PSAB: 'Metals & Mining', UNTR: 'Metals & Mining',
+  BREN: 'Renewables & Chem', TPIA: 'Renewables & Chem', BRPT: 'Renewables & Chem',
+  PGEO: 'Renewables & Chem', CUAN: 'Renewables & Chem', PTRO: 'Renewables & Chem',
+  TLKM: 'Telecom & Infra', ISAT: 'Telecom & Infra', EXCL: 'Telecom & Infra',
+  TOWR: 'Telecom & Infra', TBIG: 'Telecom & Infra', JSMR: 'Telecom & Infra',
+  ASII: 'Industrials & Auto', AUTO: 'Industrials & Auto', INTP: 'Industrials & Auto', SMGR: 'Industrials & Auto',
+  ICBP: 'Consumer', INDF: 'Consumer', UNVR: 'Consumer', KLBF: 'Consumer',
+  AMRT: 'Consumer', MAPI: 'Consumer', ACES: 'Consumer', MYOR: 'Consumer', CPIN: 'Consumer', JPFA: 'Consumer',
+  GOTO: 'Tech & Media', BUKA: 'Tech & Media', EMTK: 'Tech & Media', SCMA: 'Tech & Media', DCII: 'Tech & Media',
+  BSDE: 'Property', CTRA: 'Property', PWON: 'Property', SMRA: 'Property', PANI: 'Property',
+};
+
+export function getStockSector(symbol: string, market: 'US' | 'ID'): string {
+  const clean = symbol.trim().toUpperCase().replace(/\.JK$/i, '');
+  if (CANONICAL_SECTOR_MAP[clean]) return CANONICAL_SECTOR_MAP[clean];
+  return market === 'ID' ? 'IDX Diversified' : 'US Broad Market';
+}
+
+export interface StockMacroRegimeContext {
+  idxThrottled: boolean;
+  usThrottled: boolean;
+  ihsgChgPct: number;
+  spxChgPct: number;
+  usdidrChgPct: number;
+  dxyChgPct: number;
+  idxNote: string;
+  usNote: string;
+}
+
+export function extractStockMacroContext(assets: MarketAsset[] = []): StockMacroRegimeContext {
+  const byId = new Map(assets.map((a) => [a.id, a]));
+  const ihsg = byId.get('IHSG');
+  const spx = byId.get('SPX');
+  const usdidr = byId.get('USDIDR');
+  const dxy = byId.get('DXY');
+
+  const ihsgChgPct = ihsg?.changePercent ?? 0;
+  const spxChgPct = spx?.changePercent ?? 0;
+  const usdidrChgPct = usdidr?.changePercent ?? 0;
+  const dxyChgPct = dxy?.changePercent ?? 0;
+
+  // Check if benchmark index is trading below its medium-term candle average if available
+  const isBelowBenchMa = (asset?: MarketAsset): boolean => {
+    const candles = asset?.chartCandles?.['1D'] ?? asset?.chartCandles?.['1h'];
+    if (!candles || candles.length < 15) return false;
+    const recent = candles.slice(-20);
+    const avg = recent.reduce((s, c) => s + c.c, 0) / recent.length;
+    return asset!.price < avg * 0.992;
+  };
+
+  const ihsgBelowMa = isBelowBenchMa(ihsg);
+  const spxBelowMa = isBelowBenchMa(spx);
+
+  const idxThrottled = ihsgChgPct <= -0.55 || usdidrChgPct >= 0.45 || (ihsgBelowMa && ihsgChgPct < 0);
+  const usThrottled = spxChgPct <= -0.65 || (dxyChgPct >= 0.55 && spxChgPct < 0) || (spxBelowMa && spxChgPct < -0.2);
+
+  const idxNote = idxThrottled
+    ? `IDX Macro Throttle: IHSG ${ihsgChgPct >= 0 ? '+' : ''}${ihsgChgPct.toFixed(2)}% · USD/IDR ${usdidrChgPct >= 0 ? '+' : ''}${usdidrChgPct.toFixed(2)}% — require Stage 2 + RS≥75`
+    : `IDX Macro Constructive: IHSG ${ihsgChgPct >= 0 ? '+' : ''}${ihsgChgPct.toFixed(2)}% · USD/IDR stable`;
+
+  const usNote = usThrottled
+    ? `US Macro Throttle: SPX ${spxChgPct >= 0 ? '+' : ''}${spxChgPct.toFixed(2)}% · DXY ${dxyChgPct >= 0 ? '+' : ''}${dxyChgPct.toFixed(2)}% — require Stage 2 + RS≥75`
+    : `US Macro Constructive: SPX ${spxChgPct >= 0 ? '+' : ''}${spxChgPct.toFixed(2)}% · DXY orderly`;
+
+  return {
+    idxThrottled,
+    usThrottled,
+    ihsgChgPct,
+    spxChgPct,
+    usdidrChgPct,
+    dxyChgPct,
+    idxNote,
+    usNote,
+  };
+}
+
+export interface SectorLeaderSummary {
+  sector: string;
+  rank: number;
+  avgRsRank: number;
+  avgChangePct: number;
+  stockCount: number;
+  topSymbol: string;
+  isTop3: boolean;
+}
+
+export interface StockCrossSectionalContext {
+  bySymbol: Map<
+    string,
+    {
+      rsRank: number;
+      rsVsBenchPct: number;
+      sector: string;
+      sectorRank: number;
+      isTopSector: boolean;
+    }
+  >;
+  sectorLeaderboard: SectorLeaderSummary[];
+}
+
+export function computeCrossSectionalStockContext(
+  stocks: StockMover[],
+  market: 'US' | 'ID',
+  benchmarkChgPct = 0
+): StockCrossSectionalContext {
+  const deduped = new Map<string, StockMover>();
+  for (const s of stocks) {
+    if (s.market !== market) continue;
+    const sym = s.symbol.trim().toUpperCase().replace(/\.JK$/i, '');
+    if (!sym || s.price <= 0) continue;
+    if (!deduped.has(sym)) deduped.set(sym, s);
+  }
+
+  const list = Array.from(deduped.entries()).map(([sym, s]) => {
+    const rawRet =
+      typeof s.tradePlan?.rsVsBenchPct === 'number' && Number.isFinite(s.tradePlan.rsVsBenchPct)
+        ? s.tradePlan.rsVsBenchPct
+        : s.changePercent * 3.2;
+    const excessRet = Number((rawRet - benchmarkChgPct * 2.5).toFixed(2));
+    const sector = s.sector || getStockSector(sym, market);
+    return { sym, stock: s, excessRet, sector };
+  });
+
+  // Compute percentile RS Rank (1..99)
+  const sorted = [...list].sort((a, b) => a.excessRet - b.excessRet);
+  const rankMap = new Map<string, { rsRank: number; rsVsBenchPct: number; sector: string }>();
+  const total = sorted.length;
+  sorted.forEach((item, idx) => {
+    const pct = total <= 1 ? 50 : Math.round(1 + (idx / (total - 1)) * 98);
+    rankMap.set(item.sym, {
+      rsRank: Math.max(1, Math.min(99, pct)),
+      rsVsBenchPct: item.excessRet,
+      sector: item.sector,
+    });
+  });
+
+  // Aggregate Sector Leadership Ranking
+  const sectorAgg = new Map<
+    string,
+    { rsSum: number; chgSum: number; count: number; bestSym: string; bestRs: number }
+  >();
+  for (const item of list) {
+    const entry = rankMap.get(item.sym)!;
+    const prev = sectorAgg.get(item.sector);
+    if (!prev) {
+      sectorAgg.set(item.sector, {
+        rsSum: entry.rsRank,
+        chgSum: item.stock.changePercent,
+        count: 1,
+        bestSym: item.sym,
+        bestRs: entry.rsRank,
+      });
+    } else {
+      prev.rsSum += entry.rsRank;
+      prev.chgSum += item.stock.changePercent;
+      prev.count += 1;
+      if (entry.rsRank > prev.bestRs) {
+        prev.bestRs = entry.rsRank;
+        prev.bestSym = item.sym;
+      }
+    }
+  }
+
+  const sectorLeaderboard: SectorLeaderSummary[] = Array.from(sectorAgg.entries())
+    .map(([sector, v]) => ({
+      sector,
+      rank: 0,
+      avgRsRank: Math.round(v.rsSum / v.count),
+      avgChangePct: Number((v.chgSum / v.count).toFixed(2)),
+      stockCount: v.count,
+      topSymbol: v.bestSym,
+      isTop3: false,
+    }))
+    .sort((a, b) => b.avgRsRank - a.avgRsRank || b.avgChangePct - a.avgChangePct)
+    .map((row, idx) => ({
+      ...row,
+      rank: idx + 1,
+      isTop3: idx < 3,
+    }));
+
+  const sectorRankLookup = new Map(sectorLeaderboard.map((s) => [s.sector, s]));
+  const bySymbol = new Map<
+    string,
+    {
+      rsRank: number;
+      rsVsBenchPct: number;
+      sector: string;
+      sectorRank: number;
+      isTopSector: boolean;
+    }
+  >();
+  for (const [sym, r] of rankMap.entries()) {
+    const secInfo = sectorRankLookup.get(r.sector);
+    bySymbol.set(sym, {
+      rsRank: r.rsRank,
+      rsVsBenchPct: r.rsVsBenchPct,
+      sector: r.sector,
+      sectorRank: secInfo?.rank ?? 99,
+      isTopSector: Boolean(secInfo?.isTop3),
+    });
+  }
+
+  return { bySymbol, sectorLeaderboard };
+}
+
+function checkIdxAraArbGuard(stock: StockMover): { blocked: boolean; note?: string } {
+  if (stock.market !== 'ID' || stock.currency !== 'IDR') return { blocked: false };
+  const refPx = stock.prevClose > 0 ? stock.prevClose : stock.price;
+  // BEI / IDX symmetric Auto-Rejection tiers
+  const limitPct = refPx < 200 ? 35 : refPx <= 5000 ? 25 : 20;
+  const araWarnThreshold = limitPct * 0.78;
+  const arbWarnThreshold = -limitPct * 0.75;
+  if (stock.changePercent >= araWarnThreshold) {
+    return {
+      blocked: true,
+      note: `IDX ARA Guard (+${stock.changePercent.toFixed(1)}% near +${limitPct}% ceiling) — do not chase into Auto-Rejection.`,
+    };
+  }
+  if (stock.changePercent <= arbWarnThreshold) {
+    return {
+      blocked: true,
+      note: `IDX ARB Guard (${stock.changePercent.toFixed(1)}% near -${limitPct}% floor) — lock-down liquidity trap.`,
+    };
+  }
+  return { blocked: false };
+}
+
+export interface StockDataValidityReport {
+  status: 'verified' | 'partial' | 'invalid';
+  note: string;
+  hasValidPrice: boolean;
+  hasLiquidity: boolean;
+  hasRangeSanity: boolean;
+  hasSeriesDepth: boolean;
+}
+
+/**
+ * Multi-check institutional data validity filter:
+ * Blocks corrupt, stale, zero-liquidity, or bad-tick quotes from generating actionable BUY/SELL calls.
+ */
+export function validateStockData(stock: StockMover): StockDataValidityReport {
+  const hasValidPrice =
+    Number.isFinite(stock.price) &&
+    stock.price > 0 &&
+    Number.isFinite(stock.prevClose) &&
+    stock.prevClose > 0;
+
+  const hasRangeSanity =
+    stock.dayHigh <= 0 ||
+    stock.dayLow <= 0 ||
+    (stock.dayHigh >= stock.dayLow && stock.price >= stock.dayLow * 0.985 && stock.price <= stock.dayHigh * 1.015);
+
+  const volStr = (stock.volume ?? '').trim().toUpperCase();
+  const hasLiquidity =
+    (Number.isFinite(stock.volumeRaw) && stock.volumeRaw > 0) ||
+    (volStr.length > 0 && volStr !== '0' && volStr !== '—' && volStr !== 'N/A');
+
+  const absChg = Math.abs(stock.changePercent);
+  const badTickArtifact = absChg > 38 && !hasLiquidity;
+  const minPriceOk = stock.currency === 'IDR' ? stock.price >= 50 : stock.price >= 1.0;
+
+  const validPts = (stock.sparklinePoints ?? []).filter(
+    (v) => typeof v === 'number' && Number.isFinite(v) && v > 0
+  );
+  const hasSeriesDepth = validPts.length >= 4;
+
+  if (!hasValidPrice || !hasRangeSanity || badTickArtifact || !minPriceOk) {
+    const reasons: string[] = [];
+    if (!hasValidPrice) reasons.push('missing live/prev close');
+    if (!hasRangeSanity) reasons.push('OHLC range mismatch');
+    if (badTickArtifact) reasons.push('unverified extreme tick');
+    if (!minPriceOk) reasons.push(stock.currency === 'IDR' ? 'penny/FCA < Rp 50' : 'sub-$1 illiquid');
+    return {
+      status: 'invalid',
+      note: `Filtered (${reasons.join(', ')})`,
+      hasValidPrice,
+      hasLiquidity,
+      hasRangeSanity,
+      hasSeriesDepth,
+    };
+  }
+
+  const adtvFailed = stock.tradePlan?.adtvPassed === false;
+  const araArb = checkIdxAraArbGuard(stock);
+
+  if (!hasLiquidity || !hasSeriesDepth || adtvFailed || araArb.blocked) {
+    return {
+      status: 'partial',
+      note: araArb.blocked
+        ? araArb.note!
+        : adtvFailed
+          ? `Low 20D ADTV (${stock.tradePlan?.adtvLabel ?? 'thin'}) — below institutional liquidity floor`
+          : !hasLiquidity
+            ? 'Volume feed partial — verify orderbook depth before sizing'
+            : 'Limited intraday bars — confirm on full chart',
+      hasValidPrice,
+      hasLiquidity: hasLiquidity && !adtvFailed,
+      hasRangeSanity,
+      hasSeriesDepth,
+    };
+  }
+
+  return {
+    status: 'verified',
+    note: 'Live price, OHLC range & 20D ADTV liquidity verified',
+    hasValidPrice,
+    hasLiquidity,
+    hasRangeSanity,
+    hasSeriesDepth,
+  };
+}
+
+function attachInstitutionalTradeMetadata(
+  stock: StockMover,
+  plan: StockTradePlan,
+  validity: StockDataValidityReport,
+  rangePos: number,
+  isOverextended: boolean,
+  macroCtx?: StockMacroRegimeContext,
+  crossCtx?: StockCrossSectionalContext
+): StockTradePlan {
+  const px = Math.max(stock.price, stock.prevClose, 1);
+  const daySpanPct =
+    stock.dayHigh > 0 && stock.dayLow > 0 && stock.dayHigh >= stock.dayLow
+      ? ((stock.dayHigh - stock.dayLow) / px) * 100
+      : Math.max(1.2, Math.abs(stock.changePercent));
+  // Phase 1: prefer true 14-day Wilder ATR% from server 1y bars over single-day span
+  const atrPct = Number(
+    (plan.atr14Pct && plan.atr14Pct > 0
+      ? plan.atr14Pct
+      : Math.max(0.8, Math.min(12, daySpanPct))
+    ).toFixed(2)
+  );
+
+  const demHi = plan.demandHighNum ?? plan.entryPrice;
+  const extensionPct = Number((((px - demHi) / Math.max(1e-6, demHi)) * 100).toFixed(2));
+  const atrMultipleExtension = extensionPct / Math.max(0.8, atrPct);
+
+  // Cross-sectional Relative Strength & Sector Leadership (Phase 1 & 3)
+  const cleanSym = stock.symbol.trim().toUpperCase().replace(/\.JK$/i, '');
+  const cs = crossCtx?.bySymbol.get(cleanSym);
+  const sector = cs?.sector ?? plan.sector ?? stock.sector ?? getStockSector(cleanSym, stock.market);
+  const rsRank =
+    cs?.rsRank ??
+    plan.rsRank ??
+    Math.max(10, Math.min(95, Math.round(50 + stock.changePercent * 6)));
+  const rsVsBenchPct = cs?.rsVsBenchPct ?? plan.rsVsBenchPct;
+  const sectorRank = cs?.sectorRank ?? plan.sectorRank;
+  const isTopSector = cs?.isTopSector ?? plan.isTopSector ?? false;
+
+  // Stage 2 / Minervini alignment refined with real RS Rank >= 70
+  const baseMinervini = plan.minerviniPassedCount ?? (plan.trendFilterLabel === 'Uptrend (EMA20 > EMA50)' ? 6 : 3);
+  const rsBonusPoint = rsRank >= 70 && !plan.minerviniPassedCount ? 1 : 0;
+  const minerviniPassedCount = Math.min(8, baseMinervini + rsBonusPoint);
+  const stage: StockTradePlan['stage'] =
+    plan.stage ??
+    (plan.trendFilterLabel === 'Uptrend (EMA20 > EMA50)' && rsRank >= 60
+      ? 'Stage 2 Advancing'
+      : plan.trendFilterLabel === 'Downtrend (EMA20 < EMA50)'
+        ? 'Stage 4 Declining'
+        : 'Stage 1 Base');
+
+  const araArb = checkIdxAraArbGuard(stock);
+  const macroThrottled =
+    stock.market === 'ID' ? Boolean(macroCtx?.idxThrottled) : Boolean(macroCtx?.usThrottled);
+  const macroRegimeNote = macroCtx
+    ? stock.market === 'ID'
+      ? macroCtx.idxNote
+      : macroCtx.usNote
+    : undefined;
+
+  const volRatio = stock.bandarmology?.volumeRatio ?? 1.0;
+  const accPersistence5d = plan.accPersistence5d ?? (stock.changePercent > 0 ? 3 : 2);
+  const hasFlowSponsorship =
+    stock.foreignFlowSide === 'BUY' ||
+    (stock.foreignNetAmount ?? 0) > 0 ||
+    stock.bandarmology?.phase === 'Strong Accumulation' ||
+    stock.bandarmology?.phase === 'Early Accumulation' ||
+    accPersistence5d >= 3 ||
+    volRatio >= 1.15;
+
+  const trendOk =
+    stage !== 'Stage 4 Declining' &&
+    plan.trendFilterLabel !== 'Downtrend (EMA20 < EMA50)' &&
+    (stage === 'Stage 2 Advancing' || plan.trendFilterLabel === 'Uptrend (EMA20 > EMA50)' || Boolean(plan.episodicPivot));
+
+  const riskDist = Math.abs(plan.entryPrice - plan.stopLoss);
+  const rewardDist = Math.abs(plan.takeProfit2 - plan.entryPrice);
+  const rrNumeric = riskDist > 0 ? rewardDist / riskDist : 0;
+  const rrPassed = rrNumeric >= 1.95;
+
+  // 7-Gate Institutional Checklist (Minervini / O'Neil / Bandarmology / Van Tharp / Qullamaggie)
+  const gate1Data = validity.status !== 'invalid' && plan.adtvPassed !== false;
+  const gate2Stage2 = trendOk;
+  const gate3Flow = hasFlowSponsorship;
+  const gate4NotExtended = !isOverextended && !araArb.blocked && atrMultipleExtension <= 2.35;
+  const gate5AsymmetricRr = rrPassed;
+  const gate6RsLeader = rsRank >= 65 || Boolean(plan.episodicPivot);
+  const gate7MacroClear = !macroThrottled || (stage === 'Stage 2 Advancing' && rsRank >= 75);
+
+  const gatesPassed = [
+    gate1Data,
+    gate2Stage2,
+    gate3Flow,
+    gate4NotExtended,
+    gate5AsymmetricRr,
+    gate6RsLeader,
+    gate7MacroClear,
+  ].filter(Boolean).length;
+  const gatesTotal = 7;
+
+  // Enforce hard data-validity, Stage 4 filter, IDX ARA/ARB guard, Macro Throttle & anti-chase survival discipline
+  let finalAction: StockExecutionAction = plan.action;
+  let finalVerdict = plan.verdictLabel;
+  let finalCaution = plan.cautionNote;
+
+  if (validity.status === 'invalid') {
+    finalAction = 'WAIT';
+    finalVerdict = 'WATCH';
+    finalCaution = `Data Guard: ${validity.note} — blocked from active BUY/SELL execution.`;
+  } else if (finalAction === 'BUY' && araArb.blocked) {
+    finalAction = 'WAIT';
+    finalVerdict = 'WAIT PULLBACK';
+    finalCaution = araArb.note;
+  } else if (finalAction === 'BUY' && plan.adtvPassed === false) {
+    finalAction = 'WAIT';
+    finalVerdict = 'WATCH';
+    finalCaution = `Liquidity Floor: 20D ADTV (${plan.adtvLabel}) below institutional floor — blocked from active BUY.`;
+  } else if (finalAction === 'BUY' && stage === 'Stage 4 Declining' && !plan.episodicPivot) {
+    finalAction = 'WAIT';
+    finalVerdict = 'AVOID / SELL';
+    finalCaution = `Stage 4 Downtrend Filter (${minerviniPassedCount}/8) — avoid catching falling knives below 50/150/200D SMA.`;
+  } else if (finalAction === 'BUY' && (atrMultipleExtension > 2.4 || !rrPassed) && !plan.episodicPivot) {
+    finalAction = 'WAIT';
+    finalVerdict = 'WAIT PULLBACK';
+    finalCaution = !rrPassed
+      ? `R:R below 1:2.0 minimum (${rrNumeric.toFixed(1)}R) — wait deeper Demand retest.`
+      : `Stretched +${extensionPct.toFixed(1)}% (${atrMultipleExtension.toFixed(1)}x 14D ATR) above Demand — do not chase.`;
+  } else if (finalAction === 'BUY' && macroThrottled && !(stage === 'Stage 2 Advancing' && rsRank >= 75 && (plan.vcpDetected || plan.episodicPivot || rangePos <= 0.48))) {
+    finalAction = 'WAIT';
+    finalVerdict = 'WAIT PULLBACK';
+    finalCaution = `${macroRegimeNote ?? 'Macro Regime Throttled'} — deferred to Demand pullback.`;
+  }
+
+  // Upgrade scannerScore with Phase 1–3 structural edge bonuses
+  const baseScanner = plan.scannerScore ?? 50;
+  const phaseBonus =
+    (stage === 'Stage 2 Advancing' ? 8 : stage === 'Stage 4 Declining' ? -16 : 0) +
+    (rsRank >= 80 ? 7 : rsRank >= 65 ? 3 : rsRank < 35 ? -8 : 0) +
+    (plan.vcpDetected ? 7 : 0) +
+    (plan.episodicPivot ? 8 : 0) +
+    (isTopSector ? 4 : 0) +
+    (accPersistence5d >= 4 ? 4 : 0) -
+    (araArb.blocked ? 20 : 0) -
+    (plan.adtvPassed === false ? 15 : 0);
+  const scannerScore = Math.round(Math.max(5, Math.min(99, baseScanner + phaseBonus)));
+
+  // Enrich buyReasons with Phase 1-3 institutional drivers
+  const enhancedReasons = [...(plan.buyReasons ?? [])];
+  if (stage === 'Stage 2 Advancing' && !enhancedReasons.some((r) => r.includes('Stage 2'))) {
+    enhancedReasons.unshift(`Stage 2 (${minerviniPassedCount}/8)`);
+  }
+  if (rsRank >= 75 && !enhancedReasons.some((r) => r.includes('RS '))) {
+    enhancedReasons.push(`RS Rank ${rsRank}`);
+  }
+  if (plan.vcpDetected && !enhancedReasons.some((r) => r.includes('VCP'))) {
+    enhancedReasons.push(`VCP Tight (${plan.vcpContractionPct ?? 6}% · ${plan.vcpDryUpRatio ?? 0.7}x Vol)`);
+  }
+  if (plan.episodicPivot && !enhancedReasons.some((r) => r.includes('EP'))) {
+    enhancedReasons.unshift('Episodic Pivot (EP)');
+  }
+  if (isTopSector && !enhancedReasons.some((r) => r.includes('Top Sector'))) {
+    enhancedReasons.push(`Top-${sectorRank ?? 3} Sector (${sector})`);
+  }
+
+  const setupGrade: StockTradePlan['setupGrade'] =
+    finalAction === 'WAIT' || validity.status === 'invalid'
+      ? 'WATCH'
+      : gatesPassed >= 6 && plan.conviction >= 68 && !macroThrottled
+        ? 'A+'
+        : gatesPassed >= 5 && plan.conviction >= 58
+          ? 'A'
+          : 'B';
+
+  const positionSizeNote =
+    setupGrade === 'A+'
+      ? 'Full Risk Unit (1.0R) · 50% at TP1 → Trail 10D/20D EMA'
+      : setupGrade === 'A'
+        ? macroThrottled
+          ? 'Throttled Size (0.5R) · Macro headwind active'
+          : 'Standard Risk (0.75R) · Confirm closing volume'
+        : setupGrade === 'B'
+          ? 'Half Size (0.5R) · Strict hard stop discipline'
+          : '0R Flat · Wait for limit fill inside Demand';
+
+  const invalidationRule =
+    finalAction === 'SELL'
+      ? `Thesis invalidated on daily close above ${formatStockCurrencyValue(plan.stopLoss, stock.currency)}`
+      : `Thesis invalidated on close below ${formatStockCurrencyValue(plan.stopLoss, stock.currency)} (Demand broken)`;
+
+  const trailingExitNote =
+    plan.trailingExitNote ??
+    `Scale 50% at TP1 (${formatStockCurrencyValue(plan.takeProfit1, stock.currency)}) → SL to BE → Trail runner on daily close < 10D/20D EMA.`;
+
+  return {
+    ...plan,
+    action: finalAction,
+    verdictLabel: finalVerdict,
+    cautionNote: finalCaution,
+    scannerScore,
+    buyReasons: enhancedReasons.slice(0, 5),
+    dataValidity: validity.status,
+    dataValidityNote: validity.note,
+    setupGrade,
+    atrPct,
+    extensionPct,
+    positionSizeNote,
+    invalidationRule,
+    gatesPassed,
+    gatesTotal,
+    stage,
+    minerviniPassedCount,
+    minerviniTotalCount: 8,
+    rsRank,
+    rsVsBenchPct,
+    araArbBlocked: araArb.blocked,
+    araArbGuardNote: araArb.note,
+    macroRegimeThrottled: macroThrottled,
+    macroRegimeNote,
+    accPersistence5d,
+    trailingExitNote,
+    sector,
+    sectorRank,
+    isTopSector,
+  };
+}
+
+export function computeStockTradeStrategy(
+  stock: StockMover,
+  macroCtx?: StockMacroRegimeContext,
+  crossCtx?: StockCrossSectionalContext
+): StockTradePlan {
+  const validity = validateStockData(stock);
   const px = Math.max(stock.price, stock.prevClose, 1);
   if (
     stock.tradePlan &&
@@ -1294,10 +1867,18 @@ export function computeStockTradeStrategy(stock: StockMover): StockTradePlan {
     const posInSd = (px - demHi) / Math.max(1e-6, supLo - demHi);
     const overextended = stock.changePercent >= 8.5 || (posInSd >= 0.78 && stock.changePercent >= 3.0);
     const enriched = deriveIdxVerdictAndScore(stock, stock.tradePlan, posInSd, overextended);
-    return {
-      ...stock.tradePlan,
-      ...enriched,
-    };
+    return attachInstitutionalTradeMetadata(
+      stock,
+      {
+        ...stock.tradePlan,
+        ...enriched,
+      },
+      validity,
+      posInSd,
+      overextended,
+      macroCtx,
+      crossCtx
+    );
   }
 
   const cur = stock.currency;
@@ -1459,9 +2040,190 @@ export function computeStockTradeStrategy(stock: StockMover): StockTradePlan {
     };
   }
 
+  return attachInstitutionalTradeMetadata(
+    stock,
+    {
+      ...basePlan,
+      ...deriveIdxVerdictAndScore(stock, basePlan, rangePos, isOverextended),
+    },
+    validity,
+    rangePos,
+    isOverextended,
+    macroCtx,
+    crossCtx
+  );
+}
+
+/**
+ * Combined Macro Regime + Breadth + Signal Ledger Survival Engine (Minervini / Van Tharp / Seykota).
+ * Dynamically adapts stock position sizing and selectivity when market breadth deteriorates or ledger hits drawdown.
+ */
+export function computeStockDeskSurvival(
+  assets: MarketAsset[],
+  idxBucket: StocksMoversBucket,
+  usBucket: StocksMoversBucket,
+  signalHistory: SignalHistoryRecord[] = []
+): StockDeskSurvivalStatus {
+  const byId = new Map(assets.map((a) => [a.id, a]));
+  const spx = byId.get('SPX');
+  const ihsg = byId.get('IHSG');
+  const dxy = byId.get('DXY');
+  const usdidr = byId.get('USDIDR');
+
+  const allStocks = [
+    ...(idxBucket.impact ?? []),
+    ...(idxBucket.gainers ?? []),
+    ...(idxBucket.losers ?? []),
+    ...(usBucket.impact ?? []),
+    ...(usBucket.gainers ?? []),
+    ...(usBucket.losers ?? []),
+  ];
+  const uniqueMap = new Map<string, StockMover>();
+  for (const s of allStocks) {
+    uniqueMap.set(`${s.market}:${s.symbol}`, s);
+  }
+  const uniqueStocks = Array.from(uniqueMap.values());
+
+  let verifiedDataCount = 0;
+  let filteredOutCount = 0;
+  let advancingCount = 0;
+
+  for (const s of uniqueStocks) {
+    const v = validateStockData(s);
+    if (v.status === 'invalid') {
+      filteredOutCount += 1;
+    } else {
+      verifiedDataCount += 1;
+      if (s.changePercent > 0.1) advancingCount += 1;
+    }
+  }
+
+  const breadthPct =
+    verifiedDataCount > 0 ? Math.round((advancingCount / verifiedDataCount) * 100) : 50;
+
+  const idxChg = ihsg?.changePercent ?? 0;
+  const spxChg = spx?.changePercent ?? 0;
+  const fxStress = (dxy?.changePercent ?? 0) >= 0.45 || (usdidr?.changePercent ?? 0) >= 0.35;
+
+  const idxRegime: StockDeskSurvivalStatus['idxRegime'] =
+    idxChg >= 0.25 && (usdidr?.changePercent ?? 0) < 0.3
+      ? 'Bullish'
+      : idxChg <= -0.45 || (usdidr?.changePercent ?? 0) >= 0.45
+        ? 'Defensive'
+        : 'Neutral';
+
+  const usRegime: StockDeskSurvivalStatus['usRegime'] =
+    spxChg >= 0.25 && (dxy?.changePercent ?? 0) < 0.45
+      ? 'Bullish'
+      : spxChg <= -0.45
+        ? 'Defensive'
+        : 'Neutral';
+
+  // Evaluate stock ledger drawdown & consecutive losses from unified Signal History
+  const stockRecords = signalHistory
+    .filter((r) => r.assetClass === 'stock_id' || r.assetClass === 'stock_us')
+    .sort((a, b) => (b.closedAtMs ?? b.createdAtMs) - (a.closedAtMs ?? a.createdAtMs));
+
+  let wins = 0;
+  let losses = 0;
+  let netR = 0;
+  let consecutiveLosses = 0;
+  let streakBroken = false;
+
+  for (const r of stockRecords) {
+    if (r.status === 'TP1_HIT' || r.status === 'TP2_HIT') {
+      wins += 1;
+      netR += r.rMultiple;
+      streakBroken = true;
+    } else if (r.status === 'SL_HIT') {
+      losses += 1;
+      netR += r.rMultiple;
+      if (!streakBroken) consecutiveLosses += 1;
+    } else if (r.status === 'BE_CLOSED') {
+      netR += r.rMultiple;
+      streakBroken = true;
+    }
+  }
+  const decided = wins + losses;
+  const ledgerWinRatePct = decided > 0 ? Math.round((wins / decided) * 100) : null;
+
+  const macroDefensive = idxRegime === 'Defensive' && usRegime === 'Defensive';
+  const breadthWeak = breadthPct < 36;
+  const ledgerDrawdown = consecutiveLosses >= 3 || netR <= -2.5;
+  const ledgerCaution = consecutiveLosses === 2 || netR <= -1.2;
+
+  let mode: StockDeskSurvivalStatus['mode'] = 'NORMAL';
+  if (macroDefensive || ledgerDrawdown || (breadthWeak && fxStress)) {
+    mode = 'DEFENSIVE';
+  } else if (
+    idxRegime === 'Defensive' ||
+    usRegime === 'Defensive' ||
+    breadthPct < 46 ||
+    fxStress ||
+    ledgerCaution
+  ) {
+    mode = 'CAUTION';
+  }
+
+  const riskPerTradePct = mode === 'NORMAL' ? 1.0 : mode === 'CAUTION' ? 0.5 : 0.25;
+  const maxConcurrentPositions = mode === 'NORMAL' ? 5 : mode === 'CAUTION' ? 3 : 2;
+  const minConvictionRequired = mode === 'NORMAL' ? 60 : mode === 'CAUTION' ? 68 : 76;
+
+  const headline =
+    mode === 'NORMAL'
+      ? 'Constructive tape & clean ledger — execute A+/A Demand & Accumulation setups at 1.0% risk/trade.'
+      : mode === 'CAUTION'
+        ? 'Mixed macro breadth or FX pressure — cut size to 0.5% risk/trade and avoid mid-range entries.'
+        : 'Capital Preservation Protocol active — cap risk at 0.25%/trade, A+ verified setups only, keep cash heavy.';
+
+  const rules: StockDeskSurvivalStatus['rules'] = [
+    {
+      id: 'macro-regime',
+      label: 'Index & FX Regime',
+      passed: idxRegime !== 'Defensive' && usRegime !== 'Defensive' && !fxStress,
+      detail: `IDX ${idxRegime} (${idxChg >= 0 ? '+' : ''}${idxChg.toFixed(2)}%) · US ${usRegime} (${spxChg >= 0 ? '+' : ''}${spxChg.toFixed(2)}%)${fxStress ? ' · FX Stress' : ''}`,
+    },
+    {
+      id: 'market-breadth',
+      label: 'Screener Breadth',
+      passed: breadthPct >= 46,
+      detail: `${breadthPct}% advancing across ${verifiedDataCount} verified tickers`,
+    },
+    {
+      id: 'data-validity',
+      label: 'Data Validity Guard',
+      passed: filteredOutCount === 0,
+      detail:
+        filteredOutCount > 0
+          ? `${verifiedDataCount} verified · ${filteredOutCount} corrupt/illiquid blocked`
+          : `${verifiedDataCount} quotes passed OHLC & liquidity audit`,
+    },
+    {
+      id: 'ledger-guard',
+      label: 'Drawdown & Streak Guard',
+      passed: !ledgerDrawdown && !ledgerCaution,
+      detail:
+        decided > 0
+          ? `${wins}W/${losses}L (${ledgerWinRatePct}% WR · ${netR >= 0 ? '+' : ''}${netR.toFixed(1)}R · ${consecutiveLosses} streak L)`
+          : 'No closed stock drawdowns — fresh risk budget',
+    },
+  ];
+
   return {
-    ...basePlan,
-    ...deriveIdxVerdictAndScore(stock, basePlan, rangePos, isOverextended),
+    mode,
+    riskPerTradePct,
+    maxConcurrentPositions,
+    minConvictionRequired,
+    breadthPct,
+    idxRegime,
+    usRegime,
+    ledgerWinRatePct,
+    consecutiveLosses,
+    netR: Number(netR.toFixed(2)),
+    verifiedDataCount,
+    filteredOutCount,
+    headline,
+    rules,
   };
 }
 
@@ -1474,7 +2236,11 @@ export interface IdxScannerCandidate {
   isPullbackQueue: boolean;
 }
 
-export function buildIdxBuyScannerList(idxBucket: StocksMoversBucket): IdxScannerCandidate[] {
+export function buildIdxBuyScannerList(
+  idxBucket: StocksMoversBucket,
+  macroCtx?: StockMacroRegimeContext,
+  crossCtx?: StockCrossSectionalContext
+): IdxScannerCandidate[] {
   const pool = [
     ...(idxBucket.foreignBuy ?? []),
     ...(idxBucket.impact ?? []),
@@ -1505,9 +2271,13 @@ export function buildIdxBuyScannerList(idxBucket: StocksMoversBucket): IdxScanne
     }
   }
 
+  const dedupedList = Array.from(deduped.values());
+  const effectiveCrossCtx =
+    crossCtx ?? computeCrossSectionalStockContext(dedupedList, 'ID', macroCtx?.ihsgChgPct ?? 0);
+
   const results: IdxScannerCandidate[] = [];
-  for (const stock of deduped.values()) {
-    const plan = computeStockTradeStrategy(stock);
+  for (const stock of dedupedList) {
+    const plan = computeStockTradeStrategy(stock, macroCtx, effectiveCrossCtx);
     const verdictLabel = plan.verdictLabel ?? 'WATCH';
     const scannerScore = plan.scannerScore ?? 50;
     const isBuyReady =

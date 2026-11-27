@@ -6,7 +6,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  fetchCorrelationMatrix,
   fetchDailyMarketSummary,
   fetchLiveCalendar,
   fetchLiveChart,
@@ -19,6 +18,7 @@ import {
   fetchPortfolioMoversBrief,
   fetchPortfolioQuotes,
   fetchPortfolioSymbolSeries,
+  fetchPriorityRadarQuotes,
   fetchScheduledShareSnapshot,
   fetchSymbolDetail,
   fetchTopStockMovers,
@@ -27,6 +27,7 @@ import {
   warmServerCaches,
   type ShareScheduleSlot,
 } from './server/liveFeeds.ts';
+import { attachPriorityRadarSocket } from './server/prioritySocketHub.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -98,6 +99,18 @@ async function startServer() {
     } catch (err) {
       console.error('Failed to fetch live quotes:', err);
       return res.status(502).json({ error: 'Unable to fetch live market quotes.' });
+    }
+  });
+
+  // Top-Priority Ultra-Fast Radar Quote Lane (BTC/USD, XAU/USD, DXY)
+  app.get('/api/market/priority-radar', async (_req: Request, res: Response) => {
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      const payload = await fetchPriorityRadarQuotes();
+      return res.json(payload);
+    } catch (err) {
+      console.error('Failed to fetch priority radar quotes:', err);
+      return res.status(502).json({ error: 'Unable to fetch priority radar quotes.' });
     }
   });
 
@@ -188,19 +201,6 @@ async function startServer() {
     } catch (err) {
       console.error('Failed to fetch market depth:', err);
       return res.status(502).json({ error: 'Unable to fetch market depth.' });
-    }
-  });
-
-  // Watchlist Cross-Asset Correlation Matrix
-  app.get('/api/market/correlations', async (req: Request, res: Response) => {
-    try {
-      const rawTf = typeof req.query.timeframe === 'string' ? req.query.timeframe.toUpperCase() : '1M';
-      const timeframe: '1M' | '3M' = rawTf === '3M' ? '3M' : '1M';
-      const payload = await fetchCorrelationMatrix(timeframe);
-      return res.json(payload);
-    } catch (err) {
-      console.error('Failed to fetch correlation matrix:', err);
-      return res.status(502).json({ error: 'Unable to fetch correlation matrix.' });
     }
   });
 
@@ -855,6 +855,9 @@ export class ErrorOverlay {}
     console.log(`Stocks Global Market Terminal running at http://0.0.0.0:${PORT}`);
     warmServerCaches();
   });
+
+  // Attach dedicated low-latency WebSocket server for BTC/USD, XAU/USD & DXY (/ws/priority-radar)
+  attachPriorityRadarSocket(httpServer);
 
   httpServer.on('error', (err: NodeJS.ErrnoException) => {
     console.error(`Server failed to bind port ${PORT}:`, err.message);
