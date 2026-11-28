@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import * as d3 from 'd3';
 import { TrendingUp, TrendingDown, Activity, BarChart3 } from 'lucide-react';
 import { CurrencyCode, SignalHistoryRecord, ThemeMode } from '../types/market';
+import { normalizeSignalStatus } from '../utils/signalHistoryEngine';
 
 type ChartRange = '7D' | '30D' | '90D' | 'ALL';
 type MetricMode = 'equity' | 'cumR' | 'dailyPct';
@@ -48,10 +49,11 @@ function getRecordOutcomeContribution(rec: SignalHistoryRecord): {
   if (rec.userOutcome === 'SKIPPED') {
     return { included: false, rVal: 0, pnlPct: 0, outcome: 'open', eventMs: rec.createdAtMs };
   }
-  if (rec.status === 'PENDING_LIMIT' && !rec.userOutcome) {
+  const st = normalizeSignalStatus(rec.status);
+  if (st === 'PENDING' && !rec.userOutcome) {
     return { included: false, rVal: 0, pnlPct: 0, outcome: 'open', eventMs: rec.createdAtMs };
   }
-  if (rec.status === 'EXPIRED' && !rec.zoneFillVerified && !rec.userOutcome) {
+  if (st === 'EXPIRED' && !rec.zoneFillVerified && !rec.userOutcome) {
     return { included: false, rVal: 0, pnlPct: 0, outcome: 'open', eventMs: rec.createdAtMs };
   }
 
@@ -72,18 +74,18 @@ function getRecordOutcomeContribution(rec: SignalHistoryRecord): {
   const safeR = Number.isFinite(rec.rMultiple) ? rec.rMultiple : 0;
   const safePct = Number.isFinite(rec.pnlPct) ? rec.pnlPct : 0;
 
-  if (rec.status === 'TP2_HIT' || rec.status === 'TP1_HIT') {
+  if (st === 'TP') {
     const rVal = safeR > 0 ? safeR : rec.status === 'TP2_HIT' ? 2.0 : 1.0;
     return { included: true, rVal, pnlPct: safePct > 0 ? safePct : rVal, outcome: 'win', eventMs };
   }
-  if (rec.status === 'SL_HIT') {
+  if (st === 'SL') {
     const rVal = safeR < 0 ? safeR : -1.0;
     return { included: true, rVal, pnlPct: safePct < 0 ? safePct : rVal, outcome: 'loss', eventMs };
   }
-  if (rec.status === 'BE_CLOSED') {
+  if (rec.status === 'BE_CLOSED' || rec.barrierOutcome === 'BREAK_EVEN') {
     return { included: true, rVal: safeR, pnlPct: safePct, outcome: 'be', eventMs };
   }
-  if (rec.status === 'RUNNING') {
+  if (st === 'FILLED') {
     return { included: true, rVal: safeR, pnlPct: safePct, outcome: 'open', eventMs };
   }
   return { included: false, rVal: 0, pnlPct: 0, outcome: 'open', eventMs };
@@ -294,25 +296,28 @@ export const D3PortfolioPerformanceChart: React.FC<D3PortfolioPerformanceChartPr
 
     const lastVal = values[values.length - 1] ?? baselineVal;
     const isPositive = lastVal >= baselineVal;
-    const isDarkTheme = themeMode === 'obsidian' || themeMode === 'velvet';
-    const strokeColor = isPositive
-      ? isDarkTheme
-        ? '#34d399'
-        : '#059669'
-      : themeMode === 'velvet'
-        ? '#f9574b'
-        : isDarkTheme
-          ? '#f87171'
-          : '#dc2626';
+    const isDarkTheme = themeMode === 'obsidian' || themeMode === 'monochrome';
+    const strokeColor =
+      themeMode === 'monochrome'
+        ? isPositive
+          ? '#ffffff'
+          : '#c4c4cc'
+        : isPositive
+          ? isDarkTheme
+            ? '#34d399'
+            : '#059669'
+          : isDarkTheme
+            ? '#f87171'
+            : '#dc2626';
     const gridColor =
-      themeMode === 'velvet'
-        ? 'rgba(198, 192, 214, 0.13)'
+      themeMode === 'monochrome'
+        ? 'rgba(255, 255, 255, 0.12)'
         : isDarkTheme
           ? 'rgba(148, 163, 184, 0.14)'
           : 'rgba(100, 116, 139, 0.18)';
     const textColor =
-      themeMode === 'velvet'
-        ? '#9790ab'
+      themeMode === 'monochrome'
+        ? '#d4d4d8'
         : isDarkTheme
           ? '#94a3b8'
           : themeMode === 'parchment'
@@ -433,7 +438,7 @@ export const D3PortfolioPerformanceChart: React.FC<D3PortfolioPerformanceChartPr
       .attr('fill', strokeColor)
       .attr(
         'stroke',
-        themeMode === 'velvet' ? '#161320' : isDarkTheme ? '#0f172a' : '#ffffff'
+        themeMode === 'monochrome' ? '#0a0a0b' : isDarkTheme ? '#0f172a' : '#ffffff'
       )
       .attr('stroke-width', 1.8);
 

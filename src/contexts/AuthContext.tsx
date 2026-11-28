@@ -1,5 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
-import type { User } from 'firebase/auth';
+import { onAuthStateChanged, signInWithPopup, signOut, type User } from 'firebase/auth';
+import { doc, getDoc, onSnapshot, serverTimestamp, setDoc, updateDoc } from 'firebase/firestore';
 import { getFirebaseAuthServices, getFirebaseServices } from '../lib/firebase';
 import { OperationType, handleFirestoreError } from '../lib/firestoreErrors';
 import { CurrencyCode } from '../types/market';
@@ -61,10 +62,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const ensureUserProfile = useCallback(async (firebaseUser: User): Promise<boolean> => {
     const userPath = `users/${firebaseUser.uid}`;
-    const [{ db }, { doc, getDoc, serverTimestamp, setDoc, updateDoc }] = await Promise.all([
-      getFirebaseServices(),
-      import('firebase/firestore'),
-    ]);
+    const { db } = await getFirebaseServices();
     const userRef = doc(db, 'users', firebaseUser.uid);
 
     const safeDisplayName = (
@@ -131,10 +129,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     const attachAuth = async () => {
       try {
-        const [{ auth }, { onAuthStateChanged }] = await Promise.all([
-          getFirebaseAuthServices(),
-          import('firebase/auth'),
-        ]);
+        const { auth } = await getFirebaseAuthServices();
         if (disposed) return;
 
         unsubscribeAuth = onAuthStateChanged(auth, (currentUser) => {
@@ -192,10 +187,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     let unsubscribePref: (() => void) | undefined;
 
     const attachPrefs = async () => {
-      const [{ db }, { doc, onSnapshot }] = await Promise.all([
-        getFirebaseServices(),
-        import('firebase/firestore'),
-      ]);
+      const { db } = await getFirebaseServices();
       if (disposed) return;
 
       const prefPath = `users/${user.uid}/preferences/settings`;
@@ -245,10 +237,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (!user || !profileReady) return;
 
       const prefPath = `users/${user.uid}/preferences/settings`;
-      const [{ db }, { doc, getDoc, serverTimestamp, setDoc, updateDoc }] = await Promise.all([
-        getFirebaseServices(),
-        import('firebase/firestore'),
-      ]);
+      const { db } = await getFirebaseServices();
       const prefRef = doc(db, 'users', user.uid, 'preferences', 'settings');
       try {
         const snap = await getDoc(prefRef);
@@ -284,10 +273,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setAuthError(null);
     setAuthLoading(true);
     try {
-      const [{ auth, googleProvider }, { signInWithPopup }] = await Promise.all([
-        getFirebaseAuthServices(),
-        import('firebase/auth'),
-      ]);
+      const { auth, googleProvider } = await getFirebaseAuthServices();
       const cred = await signInWithPopup(auth, googleProvider);
       if (cred?.user) {
         await ensureUserProfile(cred.user);
@@ -307,10 +293,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const logout = useCallback(async () => {
     setAuthError(null);
     try {
-      const [{ auth }, { signOut }] = await Promise.all([
-        getFirebaseAuthServices(),
-        import('firebase/auth'),
-      ]);
+      const { auth } = await getFirebaseAuthServices();
       await signOut(auth);
       setProfileReady(false);
     } catch (error: unknown) {

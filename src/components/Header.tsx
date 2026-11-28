@@ -1,6 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ArrowDown,
+  ArrowUp,
+  ArrowUpDown,
   BarChart3,
+  BookOpen,
   Bookmark,
   Briefcase,
   CalendarDays,
@@ -19,6 +23,7 @@ import {
 import { getThemeMeta } from '../hooks/useTheme';
 import {
   AppRoute,
+  AssetSortOption,
   ClientFeedTransportDiagnostics,
   MarketAsset,
   NewsStory,
@@ -56,7 +61,17 @@ interface HeaderProps {
   onRefreshAll: () => void | Promise<void>;
   onRefreshDiagnostics: () => void;
   onPrefetchRoute?: (route: AppRoute) => void;
+  assetSort?: AssetSortOption;
+  assetSortDir?: 'desc' | 'asc';
+  onChangeAssetSort?: (sort: AssetSortOption) => void;
 }
+
+const HEADER_SORT_OPTIONS: { id: AssetSortOption; label: string }[] = [
+  { id: 'default', label: 'Default' },
+  { id: 'change_pct', label: '% Chg' },
+  { id: 'volume', label: 'Volume' },
+  { id: 'price', label: 'Price' },
+];
 
 const INDEX_IDS = ['SPX', 'IXIC', 'DJI', 'IHSG', 'EIDO', 'N225', 'HSI', 'TAIEX', 'KOSPI', 'SSEC', 'NIFTY'];
 
@@ -71,6 +86,7 @@ const NAV_TABS: {
   { id: 'stocks', label: 'Stocks', icon: BarChart3 },
   { id: 'heatmap', label: 'Heatmap', icon: LayoutGrid },
   { id: 'ict', label: 'ICT Radar', icon: Crosshair },
+  { id: 'journal', label: 'Journal', icon: BookOpen },
   { id: 'news', label: 'News', icon: Newspaper },
   { id: 'calendar', label: 'Calendar', icon: CalendarDays },
 ];
@@ -154,7 +170,12 @@ export const Header: React.FC<HeaderProps> = ({
   onRefreshAll,
   onRefreshDiagnostics,
   onPrefetchRoute,
+  assetSort = 'default',
+  assetSortDir = 'desc',
+  onChangeAssetSort,
 }) => {
+  const showHeaderSortToggle =
+    Boolean(onChangeAssetSort) && (activeRoute === 'dashboard' || activeRoute === 'watchlist');
   const [now, setNow] = useState(() => new Date());
   const [searchExpanded, setSearchExpanded] = useState(false);
   const [searchResults, setSearchResults] = useState<StockSearchResult[]>([]);
@@ -574,11 +595,11 @@ export const Header: React.FC<HeaderProps> = ({
             disabled={isRefreshingAll}
             aria-label="Refresh All feeds"
             title="Refresh All (Assets, News & Economic Calendar)"
-            className="h-8 w-8 md:w-auto md:px-2.5 rounded-full liquid-glass-pill hover:border-[#1D4ED8]/60 dark:hover:border-[#2962FF]/70 velvet:hover:border-[#F9574B]/65 flex items-center justify-center gap-1.5 text-[11px] sm:text-xs font-bold text-[#0A2540] dark:text-[#F0F3FA] transition-colors shrink-0 whitespace-nowrap disabled:opacity-75"
+            className="h-8 w-8 md:w-auto md:px-2.5 rounded-full liquid-glass-pill hover:border-[#1D4ED8]/60 dark:hover:border-[#2962FF]/70 monochrome:hover:border-white/70 flex items-center justify-center gap-1.5 text-[11px] sm:text-xs font-bold text-[#0A2540] dark:text-[#F0F3FA] transition-colors shrink-0 whitespace-nowrap disabled:opacity-75"
           >
             <RefreshCw
               className={`w-3.5 h-3.5 shrink-0 ${
-                isRefreshingAll ? 'animate-spin text-[#1D4ED8] dark:text-[#3B82F6] velvet:text-[#F9574B]' : ''
+                isRefreshingAll ? 'animate-spin text-[#1D4ED8] dark:text-[#3B82F6] monochrome:text-white' : ''
               }`}
             />
             <span className="hidden md:inline">
@@ -608,7 +629,7 @@ export const Header: React.FC<HeaderProps> = ({
                 onClick={onOpenSettings}
                 title={`Settings · Theme: ${activeThemeMeta.label}`}
                 aria-label={`Open Settings (Current theme: ${activeThemeMeta.label})`}
-                className="h-8 w-8 sm:w-auto sm:px-2.5 rounded-full liquid-glass-pill hover:border-[#1D4ED8]/60 dark:hover:border-[#2962FF]/70 velvet:hover:border-[#F9574B]/65 parchment:hover:border-[#B4410E]/60 flex items-center justify-center gap-1.5 text-[11px] sm:text-xs font-bold text-[#0A2540] dark:text-[#F0F3FA] transition-colors shrink-0 whitespace-nowrap"
+                className="h-8 w-8 sm:w-auto sm:px-2.5 rounded-full liquid-glass-pill hover:border-[#1D4ED8]/60 dark:hover:border-[#2962FF]/70 monochrome:hover:border-white/70 parchment:hover:border-[#B4410E]/60 flex items-center justify-center gap-1.5 text-[11px] sm:text-xs font-bold text-[#0A2540] dark:text-[#F0F3FA] transition-colors shrink-0 whitespace-nowrap"
               >
                 <Settings className="w-3.5 h-3.5 shrink-0" />
                 <span className="hidden sm:inline">{activeThemeMeta.label}</span>
@@ -618,8 +639,8 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
       </div>
 
-      {/* Desktop Row 2: Dedicated CSS Grid Centered Top Menu (zero overlap with Brand & Clock; hidden on mobile) */}
-      <div className="hidden lg:grid lg:grid-cols-[1fr_auto_1fr] lg:items-center px-6 pb-2">
+      {/* Desktop Row 2: Dedicated CSS Grid Centered Top Menu + Right-Aligned Asset Sort Toggle */}
+      <div className="hidden lg:grid lg:grid-cols-[1fr_auto_1fr] lg:items-center px-6 pb-2 gap-3">
         <nav
           aria-label="Primary Navigation"
           onMouseEnter={() => setNavAwake(true)}
@@ -642,13 +663,13 @@ export const Header: React.FC<HeaderProps> = ({
                 onClick={() => handleNavClick(tab.id)}
                 className={`relative px-2.5 xl:px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors duration-150 focus:outline-none ${
                   isActive
-                    ? 'text-white'
+                    ? 'text-white monochrome:text-black'
                     : 'text-[#425466] dark:text-[#9CA3AF] hover:text-[#0A2540] dark:hover:text-[#F0F3FA]'
                 }`}
               >
                 {isActive && (
                   <span
-                    className="absolute inset-0 rounded-lg bg-[#1D4ED8] dark:bg-[#2962FF] velvet:bg-[#F9574B] parchment:bg-[#B4410E] transition-all duration-150"
+                    className="absolute inset-0 rounded-lg bg-[#1D4ED8] dark:bg-[#2962FF] monochrome:bg-white parchment:bg-[#B4410E] transition-all duration-150"
                   />
                 )}
                 <span
@@ -663,7 +684,86 @@ export const Header: React.FC<HeaderProps> = ({
             );
           })}
         </nav>
+
+        {showHeaderSortToggle && onChangeAssetSort && (
+          <div
+            data-testid="header-asset-sort-toggle"
+            className="lg:col-start-3 lg:justify-self-end flex items-center gap-1 p-1 rounded-xl liquid-glass-pill shrink-0"
+            role="group"
+            aria-label="Sort asset lists"
+          >
+            <ArrowUpDown className="w-3 h-3 ml-1.5 mr-0.5 text-[#526375] dark:text-[#9CA3AF] shrink-0" />
+            {HEADER_SORT_OPTIONS.map((opt) => {
+              const active = assetSort === opt.id;
+              return (
+                <button
+                  key={opt.id}
+                  type="button"
+                  onClick={() => onChangeAssetSort(opt.id)}
+                  aria-pressed={active}
+                  title={`Sort assets by ${opt.label}${active && opt.id !== 'default' ? ` (${assetSortDir.toUpperCase()} — click to flip)` : ''}`}
+                  className={`px-2 py-1 rounded-lg text-[11px] font-bold inline-flex items-center gap-0.5 whitespace-nowrap transition-colors ${
+                    active
+                      ? 'bg-[#1D4ED8] dark:bg-[#2962FF] monochrome:bg-white monochrome:text-black parchment:bg-[#B4410E] text-white'
+                      : 'text-[#425466] dark:text-[#9CA3AF] hover:text-[#0A2540] dark:hover:text-[#F0F3FA]'
+                  }`}
+                >
+                  <span>{opt.label}</span>
+                  {active && opt.id !== 'default' && (
+                    assetSortDir === 'desc' ? (
+                      <ArrowDown className="w-2.5 h-2.5 shrink-0" />
+                    ) : (
+                      <ArrowUp className="w-2.5 h-2.5 shrink-0" />
+                    )
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        )}
       </div>
+
+      {/* Mobile/Tablet Compact Header Asset Sort Bar (Dashboard & Watchlist) */}
+      {showHeaderSortToggle && onChangeAssetSort && (
+        <div
+          data-testid="header-asset-sort-toggle-mobile"
+          className="lg:hidden px-3 sm:px-4 pb-2 flex items-center justify-between gap-2 overflow-x-auto no-scrollbar"
+          role="group"
+          aria-label="Sort asset lists"
+        >
+          <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-[#526375] dark:text-[#9CA3AF] shrink-0">
+            <ArrowUpDown className="w-3 h-3" />
+            Sort
+          </span>
+          <div className="flex items-center gap-1 p-0.5 rounded-xl liquid-glass-pill shrink-0">
+            {HEADER_SORT_OPTIONS.map((opt) => {
+              const active = assetSort === opt.id;
+              return (
+                <button
+                  key={opt.id}
+                  type="button"
+                  onClick={() => onChangeAssetSort(opt.id)}
+                  aria-pressed={active}
+                  className={`px-2 py-1 rounded-lg text-[11px] font-bold inline-flex items-center gap-0.5 whitespace-nowrap transition-colors ${
+                    active
+                      ? 'bg-[#1D4ED8] dark:bg-[#2962FF] monochrome:bg-white monochrome:text-black parchment:bg-[#B4410E] text-white'
+                      : 'text-[#425466] dark:text-[#9CA3AF]'
+                  }`}
+                >
+                  <span>{opt.label}</span>
+                  {active && opt.id !== 'default' && (
+                    assetSortDir === 'desc' ? (
+                      <ArrowDown className="w-2.5 h-2.5 shrink-0" />
+                    ) : (
+                      <ArrowUp className="w-2.5 h-2.5 shrink-0" />
+                    )
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* Compact Nerve-Style News & Live Tape Bar (Non-sticky below header to keep mobile sticky chrome <= 13%) */}
     </header>

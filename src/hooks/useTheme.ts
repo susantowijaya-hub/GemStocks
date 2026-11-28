@@ -19,10 +19,10 @@ export const THEME_STORAGE_KEY = 'stocks-theme';
 
 /**
  * Curated Terminal Themes:
- * - obsidian  : Deep charcoal surfaces with 1px structural hairlines & cobalt controls
- * - arctic    : Crisp studio daylight canvas, pure white elevated cards & midnight ink
- * - parchment : Matte warm ivory editorial surfaces with burnt-copper accents
- * - velvet    : Nodeka-inspired midnight-plum surfaces with smoked cards & vermilion coral accents
+ * - obsidian   : Deep charcoal surfaces with 1px structural hairlines & cobalt controls
+ * - monochrome : Full black-and-white monochrome with carbon surfaces & high-contrast numbers
+ * - arctic     : Crisp studio daylight canvas, pure white elevated cards & midnight ink
+ * - parchment  : Matte warm ivory editorial surfaces with burnt-copper accents
  */
 export const THEME_OPTIONS: ThemeOptionMeta[] = [
   {
@@ -39,15 +39,15 @@ export const THEME_OPTIONS: ThemeOptionMeta[] = [
     isDarkSurface: true,
   },
   {
-    id: 'velvet',
-    label: 'Velvet',
-    shortLabel: 'Velvet',
-    subtitle: 'Calm Coral',
-    description: 'Midnight-plum smoked surfaces with warm alabaster ink & vermilion coral focus',
-    swatchTop: '#0D0B14',
-    swatchSurface: '#161320',
-    swatchBottom: '#F9574B',
-    accent: '#F9574B',
+    id: 'monochrome',
+    label: 'Monochrome',
+    shortLabel: 'Mono',
+    subtitle: 'Black & White',
+    description: 'Pure black-and-white editorial monochrome with carbon surfaces & high-contrast numbers',
+    swatchTop: '#000000',
+    swatchSurface: '#141416',
+    swatchBottom: '#FFFFFF',
+    accent: '#FFFFFF',
     recommended: true,
     isDarkSurface: true,
   },
@@ -78,19 +78,19 @@ export const THEME_OPTIONS: ThemeOptionMeta[] = [
   },
 ];
 
-const THEME_ORDER: ThemeMode[] = ['obsidian', 'velvet', 'arctic', 'parchment'];
+const THEME_ORDER: ThemeMode[] = ['obsidian', 'monochrome', 'arctic', 'parchment'];
 
 function normalizeThemeMode(value: string | null): ThemeMode {
   if (value === 'obsidian' || value === 'aurora' || value === 'dark') {
     return 'obsidian';
   }
-  if (value === 'velvet' || value === 'nodeka') {
-    return 'velvet';
+  if (value === 'monochrome' || value === 'mono' || value === 'velvet' || value === 'nodeka') {
+    return 'monochrome';
   }
   if (value === 'arctic' || value === 'light') {
     return 'arctic';
   }
-  if (value === 'parchment' || value === 'champagne' || value === 'monochrome') {
+  if (value === 'parchment' || value === 'champagne') {
     return 'parchment';
   }
   return 'obsidian';
@@ -150,8 +150,8 @@ export function useTheme() {
       const metaColor =
         themeMode === 'obsidian'
           ? '#0B0E14'
-          : themeMode === 'velvet'
-            ? '#0D0B14'
+          : themeMode === 'monochrome'
+            ? '#000000'
             : themeMode === 'parchment'
               ? '#F4F0E6'
               : '#F4F6F9';
@@ -191,7 +191,7 @@ export function useTheme() {
   return {
     themeMode,
     setThemeMode,
-    isDark: themeMode === 'obsidian' || themeMode === 'velvet',
+    isDark: themeMode === 'obsidian' || themeMode === 'monochrome',
     toggleTheme,
   };
 }

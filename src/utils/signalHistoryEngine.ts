@@ -5,6 +5,7 @@ import {
   SdCandleVolumeSignal,
   SignalAssetClass,
   SignalBarrierOutcome,
+  SignalExpiredReason,
   SignalHistoryRecord,
   SignalHistoryStatus,
   SignalIndexedOutcome,
@@ -15,15 +16,109 @@ import {
   StockMover,
 } from '../types/market';
 
+export function getExpiredReasonMeta(reason?: SignalExpiredReason, zoneFillVerified?: boolean): {
+  shortLabel: string;
+  detailLabel: string;
+  isInvalidated: boolean;
+} {
+  switch (reason) {
+    case 'INVALIDATED_SL':
+      return {
+        shortLabel: 'Invalidated · SL Hit',
+        detailLabel: 'Expired because price hit SL before filling entry zone',
+        isInvalidated: true,
+      };
+    case 'MISSED_TP1':
+      return {
+        shortLabel: 'Not Filled · Missed TP1',
+        detailLabel: 'Expired because price ran to TP1 without filling entry limit',
+        isInvalidated: false,
+      };
+    case 'UNFILLED_TIMEOUT':
+      return {
+        shortLabel: 'Closed / Expired (48h)',
+        detailLabel: 'Automatically moved to Closed/Expired after 48 hours without entry trigger',
+        isInvalidated: false,
+      };
+    case 'TIME_BARRIER':
+      return {
+        shortLabel: 'Time Barrier Exit',
+        detailLabel: 'Closed at vertical time barrier without hitting TP or SL',
+        isInvalidated: false,
+      };
+    default:
+      if (zoneFillVerified) {
+        return {
+          shortLabel: 'Time Barrier Exit',
+          detailLabel: 'Closed at time barrier after fill',
+          isInvalidated: false,
+        };
+      }
+      return {
+        shortLabel: 'Not Filled · Expired',
+        detailLabel: 'Pending limit order expired unfilled',
+        isInvalidated: false,
+      };
+  }
+}
+
 export const TERMINAL_SIGNAL_STATUSES: ReadonlySet<SignalHistoryStatus> = new Set([
+  'TP',
+  'SL',
+  'EXPIRED',
   'TP2_HIT',
   'SL_HIT',
   'BE_CLOSED',
-  'EXPIRED',
 ]);
+
+export function normalizeSignalStatus(status: SignalHistoryStatus | string | undefined): 'PENDING' | 'FILLED' | 'EXPIRED' | 'TP' | 'SL' {
+  switch (status) {
+    case 'PENDING':
+    case 'PENDING_LIMIT':
+      return 'PENDING';
+    case 'FILLED':
+    case 'RUNNING':
+    case 'TP1_HIT':
+      return 'FILLED';
+    case 'TP':
+    case 'TP2_HIT':
+    case 'BE_CLOSED':
+      return 'TP';
+    case 'SL':
+    case 'SL_HIT':
+      return 'SL';
+    case 'EXPIRED':
+    default:
+      return 'EXPIRED';
+  }
+}
 
 export function isTerminalSignalStatus(status: SignalHistoryStatus): boolean {
   return TERMINAL_SIGNAL_STATUSES.has(status);
+}
+
+/**
+ * Returns true when a signal expired before filling due to early invalidation or missed TP1.
+ * Note: 48-hour UNFILLED_TIMEOUT records are intentionally preserved in history as 'Closed / Expired'
+ * by the Cleanup Service so traders can audit expired pending setups in the Closed filter.
+ */
+export function isUnfilledExpiredSignal(
+  record: Pick<
+    SignalHistoryRecord,
+    'status' | 'zoneFillVerified' | 'filledOnFirstSight' | 'filledAtMs' | 'expiredReason'
+  >
+): boolean {
+  if (normalizeSignalStatus(record.status) !== 'EXPIRED') return false;
+  if (record.expiredReason === 'UNFILLED_TIMEOUT') {
+    return false;
+  }
+  if (
+    record.expiredReason === 'INVALIDATED_SL' ||
+    record.expiredReason === 'MISSED_TP1'
+  ) {
+    return true;
+  }
+  return !(record.zoneFillVerified || record.filledOnFirstSight || Boolean(record.filledAtMs));
 }
 
 export function deriveSignalStrategyKey(sourceEngine: SignalSourceEngine): SignalStrategyKey {
@@ -47,19 +142,17 @@ export function deriveSignalIndexedOutcome(
   if (userOutcome === 'WIN') return 'WIN';
   if (userOutcome === 'LOSS') return 'LOSS';
   if (userOutcome === 'BE') return 'BE';
-  switch (status) {
-    case 'TP1_HIT':
-    case 'TP2_HIT':
-      return 'WIN';
-    case 'SL_HIT':
+  const norm = normalizeSignalStatus(status);
+  switch (norm) {
+    case 'TP':
+      return status === 'BE_CLOSED' ? 'BE' : 'WIN';
+    case 'SL':
       return 'LOSS';
-    case 'BE_CLOSED':
-      return 'BE';
     case 'EXPIRED':
       return 'EXPIRED';
-    case 'RUNNING':
-      return 'RUNNING';
-    case 'PENDING_LIMIT':
+    case 'FILLED':
+      return status === 'TP1_HIT' ? 'WIN' : 'RUNNING';
+    case 'PENDING':
     default:
       return 'PENDING';
   }
@@ -74,15 +167,16 @@ export function deriveSignalVerificationStatus(
   if (record.verificationStatus === 'Verified' || record.verificationStatus === 'Expired') {
     return record.verificationStatus;
   }
+  const norm = normalizeSignalStatus(record.status);
   if (
     record.zoneFillVerified ||
     record.filledOnFirstSight ||
     Boolean(record.filledAtMs) ||
-    (record.status !== 'PENDING_LIMIT' && record.status !== 'EXPIRED')
+    (norm !== 'PENDING' && norm !== 'EXPIRED')
   ) {
     return 'Verified';
   }
-  if (record.status === 'EXPIRED') {
+  if (norm === 'EXPIRED') {
     return 'Expired';
   }
   return 'Pending';
@@ -90,9 +184,9 @@ export function deriveSignalVerificationStatus(
 
 const REENTRY_COOLDOWN_MS_STOCK = 4 * 60 * 60 * 1000; // 4h cooldown after a stock signal closes before logging a fresh one
 const REENTRY_COOLDOWN_MS_INTRADAY = 15 * 60 * 1000; // 15m cooldown after an intraday BTC/XAU signal closes
-const TTL_MS_STOCK_PENDING = 7 * 24 * 60 * 60 * 1000; // 7 days for unfilled stock limit setups
+const TTL_MS_STOCK_PENDING = 48 * 60 * 60 * 1000; // 48h automatic cleanup window for untriggered pending signals
 const TTL_MS_STOCK_RUNNING = 21 * 24 * 60 * 60 * 1000; // 21 days max swing window for running stocks
-const TTL_MS_INTRADAY_PENDING = 18 * 60 * 60 * 1000; // 18h for unfilled intraday limits
+const TTL_MS_INTRADAY_PENDING = 48 * 60 * 60 * 1000; // 48h automatic cleanup window for untriggered pending signals
 const TTL_MS_INTRADAY_RUNNING = 72 * 60 * 60 * 1000; // 72h for running intraday BTC/XAU setups
 
 function clamp(val: number, min: number, max: number): number {
@@ -146,7 +240,8 @@ function computePnlAndR(
   evalPrice: number,
   status: SignalHistoryStatus
 ): { pnlPct: number; rMultiple: number } {
-  if (status === 'PENDING_LIMIT' || status === 'EXPIRED') {
+  const norm = normalizeSignalStatus(status);
+  if (norm === 'PENDING' || norm === 'EXPIRED') {
     return { pnlPct: 0, rMultiple: 0 };
   }
   const diff = direction === 'BUY' ? evalPrice - entryPrice : entryPrice - evalPrice;
@@ -240,7 +335,7 @@ export function buildStockSignalCandidate(
       : spot >= entryLow && spot < stopLoss;
 
   const filledOnFirstSight = Boolean(immediateMarketAction || inZone || nearEntry || crossedThrough);
-  const status: SignalHistoryStatus = filledOnFirstSight ? 'RUNNING' : 'PENDING_LIMIT';
+  const status: SignalHistoryStatus = filledOnFirstSight ? 'FILLED' : 'PENDING';
 
   const sourceEngine: SignalSourceEngine = isId ? 'idx_scanner' : 'us_scanner';
   const assetClass: SignalAssetClass = isId ? 'stock_id' : 'stock_us';
@@ -358,6 +453,7 @@ export function buildIctSignalCandidate(
   ownerId = 'local'
 ): SignalHistoryRecord | null {
   if (sig.direction !== 'BUY' && sig.direction !== 'SELL') return null;
+  if (sig.timeframe === '1m') return null;
   if (sig.survivalBlocked || sig.newsBlackoutActive) return null;
   if (
     sig.executionPosture !== 'enter_now' &&
@@ -388,7 +484,7 @@ export function buildIctSignalCandidate(
   const tol = Math.max(spot * 0.0003, 1e-6);
   const spotInsideZone = spot >= zoneLo - tol && spot <= zoneHi + tol;
   const filledOnFirstSight = sig.executionPosture === 'enter_now' || spotInsideZone;
-  const status: SignalHistoryStatus = filledOnFirstSight ? 'RUNNING' : 'PENDING_LIMIT';
+  const status: SignalHistoryStatus = filledOnFirstSight ? 'FILLED' : 'PENDING';
   const assetClass: SignalAssetClass = sig.assetId === 'BTCUSD' ? 'crypto' : 'commodity';
   const cleanSym = sanitizeSymbol(sig.symbol);
   const cleanAssetId = sanitizeAssetId(sig.assetId);
@@ -461,6 +557,7 @@ export function buildIctSignalCandidate(
     ...(typeof sig.netRr === 'number' && Number.isFinite(sig.netRr) && sig.netRr >= 0
       ? { netRr: clamp(Number(sig.netRr.toFixed(2)), 0, 100) }
       : {}),
+    orderType: (sig.recommendedOrderType || (filledOnFirstSight ? `${sig.direction} NOW` : `${sig.direction} LIMIT`)).slice(0, 24),
   };
 }
 
@@ -470,6 +567,7 @@ export function buildSdcvSignalCandidate(
   ownerId = 'local'
 ): SignalHistoryRecord | null {
   if (sig.direction !== 'BUY' && sig.direction !== 'SELL') return null;
+  if (sig.timeframe === '1m') return null;
   if (sig.survivalBlocked || sig.newsBlackoutActive) return null;
   if (
     sig.executionPosture !== 'enter_now' &&
@@ -500,7 +598,7 @@ export function buildSdcvSignalCandidate(
   const tol = Math.max(spot * 0.0003, 1e-6);
   const spotInsideZone = spot >= zoneLo - tol && spot <= zoneHi + tol;
   const filledOnFirstSight = sig.executionPosture === 'enter_now' || spotInsideZone;
-  const status: SignalHistoryStatus = filledOnFirstSight ? 'RUNNING' : 'PENDING_LIMIT';
+  const status: SignalHistoryStatus = filledOnFirstSight ? 'FILLED' : 'PENDING';
   const assetClass: SignalAssetClass = sig.assetId === 'BTCUSD' ? 'crypto' : 'commodity';
   const cleanSym = sanitizeSymbol(sig.symbol);
   const cleanAssetId = sanitizeAssetId(sig.assetId);
@@ -561,6 +659,7 @@ export function buildSdcvSignalCandidate(
     htfAligned:
       (sig.direction === 'BUY' && sig.zoneBias === 'Demand' && (sig.htfCurvePct == null || sig.htfCurvePct <= 55)) ||
       (sig.direction === 'SELL' && sig.zoneBias === 'Supply' && (sig.htfCurvePct == null || sig.htfCurvePct >= 45)),
+    orderType: (sig.recommendedOrderType || (filledOnFirstSight ? `${sig.direction} NOW` : `${sig.direction} LIMIT`)).slice(0, 24),
   };
 }
 
@@ -587,9 +686,10 @@ export function evaluateSignalRecord(
       ? roundPrice(probe.price, record.decimals)
       : record.lastPrice;
 
-  let status: SignalHistoryStatus = record.status;
+  let status: SignalHistoryStatus = normalizeSignalStatus(record.status);
+  let expiredReason: SignalExpiredReason | undefined = record.expiredReason;
   let filledAtMs = record.filledAtMs;
-  let zoneFillVerified = Boolean(record.zoneFillVerified || record.filledOnFirstSight || record.filledAtMs);
+  let zoneFillVerified = Boolean(record.zoneFillVerified || record.filledOnFirstSight || record.filledAtMs || status === 'FILLED');
   let tp1HitAtMs = record.tp1HitAtMs;
   let closedAtMs = record.closedAtMs;
   let closedPrice = record.closedPrice;
@@ -627,41 +727,42 @@ export function evaluateSignalRecord(
   for (const pt of checkpoints) {
     if (isTerminalSignalStatus(status)) break;
 
-    if (status === 'PENDING_LIMIT') {
-      // Check if limit entry zone was touched
-      const touchedZone = pt.low <= record.entryHigh && pt.high >= record.entryLow;
+    if (status === 'PENDING') {
+      // Validate zone-fill by comparing immutable historical entry range [entryLow, entryHigh] against tick/bar
+      const tol = Math.max(pt.close * 0.0003, 1e-6);
+      const touchedZone = pt.low <= record.entryHigh + tol && pt.high >= record.entryLow - tol;
       const hitSlBeforeFill = isBuy ? pt.low <= record.stopLoss : pt.high >= record.stopLoss;
       const ranToTp1BeforeFill = isBuy ? pt.high >= record.tp1 : pt.low <= record.tp1;
 
       if (touchedZone) {
-        status = 'RUNNING';
+        status = 'FILLED';
         zoneFillVerified = true;
         filledAtMs = filledAtMs ?? Math.max(record.createdAtMs, pt.ts);
         maxFav = record.entryPrice;
         maxAdv = record.entryPrice;
-        // Same bar could continue straight into SL or TP1 after fill, evaluate conservatively: SL first
+        // Same bar could continue straight into SL or TP after fill; evaluate conservatively: SL first
         if (hitSlBeforeFill) {
-          status = 'SL_HIT';
+          status = 'SL';
           closedAtMs = Math.max(filledAtMs, pt.ts);
           closedPrice = record.stopLoss;
           maxAdv = isBuy ? Math.min(maxAdv, pt.low) : Math.max(maxAdv, pt.high);
           break;
         }
         if (ranToTp1BeforeFill) {
-          status = 'TP1_HIT';
           tp1HitAtMs = Math.max(filledAtMs, pt.ts);
           maxFav = isBuy ? Math.max(maxFav, pt.high) : Math.min(maxFav, pt.low);
           const hitTp2 = isBuy ? pt.high >= record.tp2 : pt.low <= record.tp2;
           if (hitTp2) {
-            status = 'TP2_HIT';
+            status = 'TP';
             closedAtMs = Math.max(tp1HitAtMs, pt.ts);
             closedPrice = record.tp2;
             break;
           }
         }
       } else if (hitSlBeforeFill || ranToTp1BeforeFill) {
-        // Missed limit setup: price hit SL or ran to TP1 without ever filling the limit
+        // Non-filled expiry (SL invalidated or TP1 missed without touching entry zone) -> auto-filtered from history
         status = 'EXPIRED';
+        expiredReason = hitSlBeforeFill ? 'INVALIDATED_SL' : 'MISSED_TP1';
         closedAtMs = Math.max(record.createdAtMs, pt.ts);
         closedPrice = roundPrice(pt.close, record.decimals);
         break;
@@ -669,47 +770,52 @@ export function evaluateSignalRecord(
       continue;
     }
 
-    // RUNNING or TP1_HIT
+    // status === 'FILLED' (either pre-TP1 or trailing to TP2 with SL moved to Break-Even after TP1)
     maxFav = isBuy ? Math.max(maxFav, pt.high) : Math.min(maxFav, pt.low);
     maxAdv = isBuy ? Math.min(maxAdv, pt.low) : Math.max(maxAdv, pt.high);
 
-    if (status === 'RUNNING') {
+    if (!tp1HitAtMs) {
       const hitSl = isBuy ? pt.low <= record.stopLoss : pt.high >= record.stopLoss;
       const hitTp1 = isBuy ? pt.high >= record.tp1 : pt.low <= record.tp1;
       const hitTp2 = isBuy ? pt.high >= record.tp2 : pt.low <= record.tp2;
 
-      // Conservative institutional grading: if both SL and TP occur in the same bar, grade SL first
       if (hitSl) {
-        status = 'SL_HIT';
+        status = 'SL';
         closedAtMs = Math.max(filledAtMs ?? record.createdAtMs, pt.ts);
         closedPrice = record.stopLoss;
         break;
       }
       if (hitTp1) {
-        status = 'TP1_HIT';
         tp1HitAtMs = Math.max(filledAtMs ?? record.createdAtMs, pt.ts);
         if (hitTp2) {
-          status = 'TP2_HIT';
+          status = 'TP';
           closedAtMs = tp1HitAtMs;
           closedPrice = record.tp2;
           break;
         }
       }
-    } else if (status === 'TP1_HIT') {
+    } else {
       const hitTp2 = isBuy ? pt.high >= record.tp2 : pt.low <= record.tp2;
-      // After TP1 is secured, stop moves to Break-Even (entryPrice)
-      const hitBe = isBuy ? pt.low <= record.entryPrice : pt.high >= record.entryPrice;
+      // After TP1 is secured (50% partial), SL locks at Break-Even and ratchets dynamically toward TP2
+      const dynamicTrailStop = computeActiveTrailingStop({
+        ...record,
+        tp1HitAtMs,
+        maxFavorablePrice: maxFav,
+      });
+      const activeTrail = dynamicTrailStop ?? record.entryPrice;
+      const hitTrail = isBuy ? pt.low <= activeTrail : pt.high >= activeTrail;
 
       if (hitTp2) {
-        status = 'TP2_HIT';
+        status = 'TP';
         closedAtMs = Math.max(tp1HitAtMs ?? record.createdAtMs, pt.ts);
         closedPrice = record.tp2;
         break;
       }
-      if (hitBe) {
-        status = 'BE_CLOSED';
+      if (hitTrail) {
+        // Closed in net profit (TP1 partial secured + runner exited at BE/Trailing Stop -> TP)
+        status = 'TP';
         closedAtMs = Math.max(tp1HitAtMs ?? record.createdAtMs, pt.ts);
-        closedPrice = record.entryPrice;
+        closedPrice = roundPrice((record.tp1 + activeTrail) / 2, record.decimals);
         break;
       }
     }
@@ -723,18 +829,23 @@ export function evaluateSignalRecord(
 
   if (!isTerminalSignalStatus(status)) {
     const ageMs = now - record.createdAtMs;
-    if (status === 'PENDING_LIMIT' && ageMs > pendingTtl) {
+    if (status === 'PENDING' && ageMs > pendingTtl) {
       status = 'EXPIRED';
+      expiredReason = 'UNFILLED_TIMEOUT';
       closedAtMs = now;
       closedPrice = livePrice;
       hitTimeBarrier = true;
-    } else if (
-      (status === 'RUNNING' || status === 'TP1_HIT') &&
-      (now >= timeBarrierAtMs || ageMs > runningTtl)
-    ) {
-      status = status === 'TP1_HIT' ? 'BE_CLOSED' : 'EXPIRED';
+    } else if (status === 'FILLED' && (now >= timeBarrierAtMs || ageMs > runningTtl)) {
+      if (tp1HitAtMs) {
+        status = 'TP';
+        closedPrice = roundPrice((record.tp1 + livePrice) / 2, record.decimals);
+      } else {
+        const diff = isBuy ? livePrice - record.entryPrice : record.entryPrice - livePrice;
+        status = diff >= 0 ? 'TP' : 'SL';
+        expiredReason = 'TIME_BARRIER';
+        closedPrice = livePrice;
+      }
       closedAtMs = now;
-      closedPrice = livePrice;
       hitTimeBarrier = true;
     }
   }
@@ -751,7 +862,7 @@ export function evaluateSignalRecord(
   const roundedMaxFav = roundPrice(maxFav > 0 ? maxFav : livePrice, record.decimals);
   const roundedMaxAdv = roundPrice(maxAdv > 0 ? maxAdv : livePrice, record.decimals);
   const { mfeR, maeR } =
-    status === 'PENDING_LIMIT' && !zoneFillVerified
+    status === 'PENDING' && !zoneFillVerified
       ? { mfeR: 0, maeR: 0 }
       : computeMfeMaeR(
           record.direction,
@@ -762,15 +873,13 @@ export function evaluateSignalRecord(
         );
 
   const barrierOutcome: SignalBarrierOutcome =
-    status === 'TP2_HIT'
+    status === 'TP'
       ? 'UPPER_TP'
-      : status === 'SL_HIT'
+      : status === 'SL'
         ? 'LOWER_SL'
-        : status === 'BE_CLOSED'
-          ? 'BREAK_EVEN'
-          : status === 'EXPIRED' || hitTimeBarrier
-            ? 'TIME_BARRIER'
-            : 'OPEN';
+        : status === 'EXPIRED' || hitTimeBarrier
+          ? 'TIME_BARRIER'
+          : 'OPEN';
 
   const nextVerificationStatus: SignalVerificationStatus = zoneFillVerified
     ? 'Verified'
@@ -807,6 +916,7 @@ export function evaluateSignalRecord(
     maeR,
     barrierOutcome,
     timeBarrierAtMs,
+    ...(expiredReason ? { expiredReason } : {}),
     lastCheckedAtMs: now,
   };
 }
@@ -815,6 +925,7 @@ export interface ReconcileSignalHistoryResult {
   nextRecords: SignalHistoryRecord[];
   createdRecords: SignalHistoryRecord[];
   updatedRecords: SignalHistoryRecord[];
+  removedRecordIds: string[];
   changed: boolean;
 }
 
@@ -822,6 +933,7 @@ export interface ReconcileSignalHistoryResult {
  * Reconciles active signal records with live price probes and incoming scanner candidates.
  * Guarantees continuity: if a lockKey already has an active signal (PENDING_LIMIT / RUNNING / TP1_HIT),
  * incoming candidates for the same lockKey are ignored so the original entry/SL/TP stays locked.
+ * Non-filled expired signals are automatically removed from history and returned in removedRecordIds.
  */
 export function reconcileSignalHistory(
   existingRecords: SignalHistoryRecord[],
@@ -831,12 +943,42 @@ export function reconcileSignalHistory(
   maxRecords = 150
 ): ReconcileSignalHistoryResult {
   const updatedRecords: SignalHistoryRecord[] = [];
+  const removedRecordIds: string[] = [];
+  const latestClosedByLock = new Map<string, number>();
   let changed = false;
 
-  const evaluated = existingRecords.map((rec) => {
-    if (isTerminalSignalStatus(rec.status)) return rec;
-    const probe = liveProbes.get(rec.assetId) ?? liveProbes.get(rec.symbol);
+  const evaluated: SignalHistoryRecord[] = [];
+
+  for (const rec of existingRecords) {
+    // Purge any pre-existing non-filled expired record from history
+    if (isUnfilledExpiredSignal(rec)) {
+      removedRecordIds.push(rec.id);
+      const closedTs = rec.closedAtMs ?? rec.lastCheckedAtMs ?? rec.createdAtMs;
+      const prev = latestClosedByLock.get(rec.lockKey) ?? 0;
+      if (closedTs > prev) latestClosedByLock.set(rec.lockKey, closedTs);
+      changed = true;
+      continue;
+    }
+
+    if (isTerminalSignalStatus(rec.status)) {
+      evaluated.push(rec);
+      continue;
+    }
+
+    const probe =
+      liveProbes.get(rec.assetId) ??
+      liveProbes.get(rec.symbol) ??
+      (rec.assetClass === 'stock_id' ? liveProbes.get(`${rec.symbol}.JK`) : undefined);
     const next = evaluateSignalRecord(rec, probe, now);
+
+    // If a pending signal expired without ever being filled, remove it from history
+    if (isUnfilledExpiredSignal(next)) {
+      removedRecordIds.push(rec.id);
+      const prev = latestClosedByLock.get(rec.lockKey) ?? 0;
+      if (now > prev) latestClosedByLock.set(rec.lockKey, now);
+      changed = true;
+      continue;
+    }
 
     const statusChanged = next.status !== rec.status;
     const priceDeltaPct =
@@ -846,18 +988,28 @@ export function reconcileSignalHistory(
     if (statusChanged || priceDeltaPct >= 0.0025 || heartbeatDue) {
       updatedRecords.push(next);
       changed = true;
-      return next;
+      evaluated.push(next);
+    } else {
+      evaluated.push(rec);
     }
-    return rec;
-  });
+  }
 
-  // Track active locks & recent closed cooldowns by lockKey
+  // Track active locks, strict non-overlay instrument slots, and recent closed cooldowns
+  // Non-overlay guarantee: once a signal triggers on an instrument (stock symbol, or radar symbol+timeframe),
+  // no new signal may overlay or replace it until it hits TP, SL, Trailing Stop, or Strategy Exit criteria.
   const activeLockKeys = new Set<string>();
-  const latestClosedByLock = new Map<string, number>();
+  const activeInstrumentSlots = new Set<string>();
+
+  const getInstrumentSlotKey = (rec: SignalHistoryRecord): string => {
+    const isStock = rec.assetClass === 'stock_id' || rec.assetClass === 'stock_us';
+    if (isStock) return `stock:${rec.assetClass}:${rec.symbol.toUpperCase()}`;
+    return `radar:${rec.assetId.toUpperCase()}:${rec.timeframe.toLowerCase()}`;
+  };
 
   for (const rec of evaluated) {
     if (!isTerminalSignalStatus(rec.status)) {
       activeLockKeys.add(rec.lockKey);
+      activeInstrumentSlots.add(getInstrumentSlotKey(rec));
     } else {
       const closedTs = rec.closedAtMs ?? rec.lastCheckedAtMs ?? rec.createdAtMs;
       const prev = latestClosedByLock.get(rec.lockKey) ?? 0;
@@ -867,7 +1019,9 @@ export function reconcileSignalHistory(
 
   const createdRecords: SignalHistoryRecord[] = [];
   for (const cand of incomingCandidates) {
-    if (activeLockKeys.has(cand.lockKey)) continue;
+    if (isUnfilledExpiredSignal(cand)) continue;
+    const slotKey = getInstrumentSlotKey(cand);
+    if (activeLockKeys.has(cand.lockKey) || activeInstrumentSlots.has(slotKey)) continue;
 
     const lastClosed = latestClosedByLock.get(cand.lockKey);
     const isStock = cand.assetClass === 'stock_id' || cand.assetClass === 'stock_us';
@@ -875,6 +1029,7 @@ export function reconcileSignalHistory(
     if (lastClosed && now - lastClosed < cooldownMs) continue;
 
     activeLockKeys.add(cand.lockKey);
+    activeInstrumentSlots.add(slotKey);
     createdRecords.push(cand);
     changed = true;
   }
@@ -887,8 +1042,30 @@ export function reconcileSignalHistory(
     nextRecords: combined,
     createdRecords,
     updatedRecords,
+    removedRecordIds,
     changed,
   };
+}
+
+/**
+ * Computes the active dynamic trailing stop price once TP1 has been secured.
+ * Locks Break-Even (entryPrice) at TP1 and ratchets 55% of favorable progress above TP1 toward TP2.
+ */
+export function computeActiveTrailingStop(record: SignalHistoryRecord): number | null {
+  if (!record.tp1HitAtMs && record.status !== 'TP1_HIT') return null;
+  const isBuy = record.direction === 'BUY';
+  const entry = record.entryPrice;
+  const maxFav = record.maxFavorablePrice || record.lastPrice || entry;
+  const tp1 = record.tp1;
+
+  if (isBuy) {
+    const excessAboveTp1 = Math.max(0, maxFav - tp1);
+    const trailed = entry + excessAboveTp1 * 0.55;
+    return roundPrice(Math.max(entry, trailed), record.decimals);
+  }
+  const excessBelowTp1 = Math.max(0, tp1 - maxFav);
+  const trailed = entry - excessBelowTp1 * 0.55;
+  return roundPrice(Math.min(entry, trailed), record.decimals);
 }
 
 export interface SignalHistoryStats {
@@ -910,6 +1087,13 @@ export interface SignalHistoryStats {
   verifiedLosses: number;
   verifiedBe: number;
   netR: number;
+  profitFactor: number | null;
+  expectancyR: number;
+  avgWinR: number;
+  avgLossR: number;
+  maxDrawdownR: number;
+  trailingCount: number;
+  avgPnlPct: number;
   journalWins: number;
   journalLosses: number;
   journalBe: number;
@@ -932,33 +1116,66 @@ export function computeSignalHistoryStats(records: SignalHistoryRecord[]): Signa
   let verifiedLosses = 0;
   let verifiedBe = 0;
   let netR = 0;
+  let grossWinR = 0;
+  let grossLossR = 0;
+  let winRCount = 0;
+  let lossRCount = 0;
+  let pnlSum = 0;
+  let pnlCount = 0;
   let journalWins = 0;
   let journalLosses = 0;
   let journalBe = 0;
   let journalSkipped = 0;
 
-  for (const r of records) {
+  // Sort ascending chronologically for accurate drawdown calculation
+  const chronological = [...records].sort((a, b) => a.createdAtMs - b.createdAtMs);
+  let equityR = 0;
+  let peakR = 0;
+  let maxDrawdownR = 0;
+
+  for (const r of chronological) {
     const vStatus = deriveSignalVerificationStatus(r);
     if (vStatus === 'Verified') verifiedCount++;
     else if (vStatus === 'Expired') verifiedExpiredCount++;
     else verifiedPendingCount++;
 
-    if (r.status === 'RUNNING') runningCount++;
-    else if (r.status === 'PENDING_LIMIT') pendingCount++;
-    else if (r.status === 'TP1_HIT') tp1Count++;
-    else if (r.status === 'TP2_HIT') tp2Count++;
-    else if (r.status === 'SL_HIT') slCount++;
-    else if (r.status === 'BE_CLOSED') beCount++;
-    else if (r.status === 'EXPIRED') expiredCount++;
+    const normStatus = normalizeSignalStatus(r.status);
+    if (normStatus === 'FILLED') {
+      if (r.tp1HitAtMs || r.status === 'TP1_HIT') tp1Count++;
+      else runningCount++;
+    } else if (normStatus === 'PENDING') pendingCount++;
+    else if (normStatus === 'TP') {
+      if (r.status === 'BE_CLOSED') beCount++;
+      else tp2Count++;
+    } else if (normStatus === 'SL') slCount++;
+    else if (normStatus === 'EXPIRED') expiredCount++;
 
     if (vStatus === 'Verified') {
-      if (r.status === 'TP1_HIT' || r.status === 'TP2_HIT') verifiedWins++;
-      else if (r.status === 'SL_HIT') verifiedLosses++;
+      if (normStatus === 'TP' && r.status !== 'BE_CLOSED') verifiedWins++;
+      else if (normStatus === 'FILLED' && (r.tp1HitAtMs || r.status === 'TP1_HIT')) verifiedWins++;
+      else if (normStatus === 'SL') verifiedLosses++;
       else if (r.status === 'BE_CLOSED') verifiedBe++;
     }
 
-    if (r.status !== 'PENDING_LIMIT' && r.status !== 'EXPIRED') {
-      netR += r.rMultiple;
+    if (normStatus !== 'PENDING' && normStatus !== 'EXPIRED') {
+      const rVal = Number.isFinite(r.rMultiple) ? r.rMultiple : 0;
+      netR += rVal;
+      pnlSum += Number.isFinite(r.pnlPct) ? r.pnlPct : 0;
+      pnlCount++;
+
+      if (normStatus === 'TP' || normStatus === 'SL') {
+        if (rVal > 0) {
+          grossWinR += rVal;
+          winRCount++;
+        } else if (rVal < 0) {
+          grossLossR += Math.abs(rVal);
+          lossRCount++;
+        }
+        equityR += rVal;
+        if (equityR > peakR) peakR = equityR;
+        const dd = peakR - equityR;
+        if (dd > maxDrawdownR) maxDrawdownR = dd;
+      }
     }
 
     if (r.userOutcome === 'WIN') journalWins++;
@@ -980,6 +1197,19 @@ export function computeSignalHistoryStats(records: SignalHistoryRecord[]): Signa
   const journalWinRatePct =
     journalDecided > 0 ? Math.round((journalWins / journalDecided) * 100) : null;
 
+  const profitFactor =
+    grossLossR > 0
+      ? Number((grossWinR / grossLossR).toFixed(2))
+      : grossWinR > 0
+        ? 9.99
+        : null;
+  const closedTradeCount = winRCount + lossRCount;
+  const expectancyR =
+    closedTradeCount > 0 ? Number(((grossWinR - grossLossR) / closedTradeCount).toFixed(2)) : 0;
+  const avgWinR = winRCount > 0 ? Number((grossWinR / winRCount).toFixed(2)) : 0;
+  const avgLossR = lossRCount > 0 ? Number((grossLossR / lossRCount).toFixed(2)) : 0;
+  const avgPnlPct = pnlCount > 0 ? Number((pnlSum / pnlCount).toFixed(2)) : 0;
+
   return {
     total: records.length,
     runningCount,
@@ -999,6 +1229,13 @@ export function computeSignalHistoryStats(records: SignalHistoryRecord[]): Signa
     verifiedLosses,
     verifiedBe,
     netR: Number(netR.toFixed(2)),
+    profitFactor,
+    expectancyR,
+    avgWinR,
+    avgLossR,
+    maxDrawdownR: Number(maxDrawdownR.toFixed(2)),
+    trailingCount: tp1Count,
+    avgPnlPct,
     journalWins,
     journalLosses,
     journalBe,
@@ -1120,17 +1357,18 @@ export function computeExecutionTypePerformance(
     const fp = `${r.assetId}:${r.direction}:${Math.floor(r.createdAtMs / 600_000)}`;
     seenFingerprints.add(fp);
 
+    const st = normalizeSignalStatus(r.status);
     bucket.total += 1;
     const isZoneFilled = Boolean(
       r.zoneFillVerified ||
         r.filledOnFirstSight ||
         r.filledAtMs ||
-        (r.status !== 'PENDING_LIMIT' && r.status !== 'EXPIRED')
+        (st !== 'PENDING' && st !== 'EXPIRED')
     );
 
-    if (r.status === 'PENDING_LIMIT') {
+    if (st === 'PENDING') {
       bucket.awaitingCount += 1;
-    } else if (r.status === 'EXPIRED') {
+    } else if (st === 'EXPIRED') {
       if (isZoneFilled) {
         bucket.filledCount += 1;
       } else {
@@ -1138,13 +1376,13 @@ export function computeExecutionTypePerformance(
       }
     } else {
       bucket.filledCount += 1;
-      if (r.status === 'TP1_HIT' || r.status === 'TP2_HIT') {
+      if (st === 'TP') {
         bucket.wins += 1;
         bucket.netR += r.rMultiple > 0 ? r.rMultiple : r.status === 'TP2_HIT' ? 2.0 : 1.0;
-      } else if (r.status === 'BE_CLOSED') {
+      } else if (r.status === 'BE_CLOSED' || r.barrierOutcome === 'BREAK_EVEN') {
         bucket.bes += 1;
         bucket.netR += Number.isFinite(r.rMultiple) ? r.rMultiple : 0;
-      } else if (r.status === 'SL_HIT') {
+      } else if (st === 'SL') {
         bucket.losses += 1;
         bucket.netR += r.rMultiple < 0 ? r.rMultiple : -1.0;
       }
@@ -1275,19 +1513,20 @@ function getEffectiveRForExpectancy(r: SignalHistoryRecord): {
   }
   if (r.userOutcome === 'BE') return { outcomeType: 'be', realizedR: 0 };
 
-  if (r.status === 'TP1_HIT' || r.status === 'TP2_HIT') {
+  const st = normalizeSignalStatus(r.status);
+  if (st === 'TP') {
     return {
       outcomeType: 'win',
       realizedR: r.rMultiple > 0 ? r.rMultiple : r.status === 'TP2_HIT' ? 2.2 : 1.1,
     };
   }
-  if (r.status === 'SL_HIT') {
+  if (st === 'SL') {
     return { outcomeType: 'loss', realizedR: r.rMultiple < 0 ? r.rMultiple : -1.0 };
   }
-  if (r.status === 'BE_CLOSED') {
+  if (r.status === 'BE_CLOSED' || r.barrierOutcome === 'BREAK_EVEN') {
     return { outcomeType: 'be', realizedR: Number.isFinite(r.rMultiple) ? r.rMultiple : 0 };
   }
-  if (r.status === 'EXPIRED' && r.zoneFillVerified && r.barrierOutcome === 'TIME_BARRIER') {
+  if (st === 'EXPIRED' && r.zoneFillVerified && r.barrierOutcome === 'TIME_BARRIER') {
     if (r.rMultiple > 0.15) return { outcomeType: 'win', realizedR: r.rMultiple };
     if (r.rMultiple < -0.15) return { outcomeType: 'loss', realizedR: r.rMultiple };
     return { outcomeType: 'be', realizedR: r.rMultiple };
@@ -1413,15 +1652,16 @@ export function computeConfluenceExpectancyMatrix(
   };
 
   for (const r of radarRecords) {
+    const st = normalizeSignalStatus(r.status);
     const bo =
       r.barrierOutcome ??
-      (r.status === 'TP2_HIT'
+      (st === 'TP'
         ? 'UPPER_TP'
-        : r.status === 'SL_HIT'
+        : st === 'SL'
           ? 'LOWER_SL'
           : r.status === 'BE_CLOSED'
             ? 'BREAK_EVEN'
-            : r.status === 'EXPIRED'
+            : st === 'EXPIRED'
               ? 'TIME_BARRIER'
               : 'OPEN');
     if (bo === 'UPPER_TP') barrierBreakdown.upperTp++;
@@ -1572,15 +1812,16 @@ export function computeStockConfluenceExpectancyMatrix(
   };
 
   for (const r of stockRecords) {
+    const st = normalizeSignalStatus(r.status);
     const bo =
       r.barrierOutcome ??
-      (r.status === 'TP2_HIT'
+      (st === 'TP'
         ? 'UPPER_TP'
-        : r.status === 'SL_HIT'
+        : st === 'SL'
           ? 'LOWER_SL'
           : r.status === 'BE_CLOSED'
             ? 'BREAK_EVEN'
-            : r.status === 'EXPIRED'
+            : st === 'EXPIRED'
               ? 'TIME_BARRIER'
               : 'OPEN');
     if (bo === 'UPPER_TP') barrierBreakdown.upperTp++;

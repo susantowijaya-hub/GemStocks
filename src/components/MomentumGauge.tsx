@@ -122,16 +122,15 @@ export const MomentumGauge: React.FC<MomentumGaugeProps> = ({
     };
   }, [asset.category, asset.changePercent, tickStats, volInfo]);
 
-  const isDark = themeMode === 'obsidian' || themeMode === 'velvet';
-  const trackStroke =
-    themeMode === 'velvet'
-      ? 'rgba(246, 244, 250, 0.11)'
-      : isDark
-        ? 'rgba(255,255,255,0.1)'
-        : 'rgba(15,23,42,0.1)';
-  const needleColor = isDark ? '#F6F4FA' : '#091E36';
-  const pivotBg =
-    themeMode === 'velvet' ? '#1B1828' : isDark ? '#171C28' : '#FFFFFF';
+  const isMonochrome = themeMode === 'monochrome';
+  const isDark = themeMode === 'obsidian' || isMonochrome;
+  const trackStroke = isMonochrome
+    ? 'rgba(255, 255, 255, 0.12)'
+    : isDark
+      ? 'rgba(255,255,255,0.1)'
+      : 'rgba(15,23,42,0.1)';
+  const needleColor = isMonochrome ? '#FFFFFF' : isDark ? '#F6F4FA' : '#091E36';
+  const pivotBg = isMonochrome ? '#0A0A0B' : isDark ? '#171C28' : '#FFFFFF';
 
   return (
     <section
@@ -170,7 +169,13 @@ export const MomentumGauge: React.FC<MomentumGaugeProps> = ({
           <path
             d="M 22 98 A 78 78 0 0 1 73 25"
             fill="none"
-            stroke={isDark ? 'rgba(248, 113, 113, 0.65)' : 'rgba(220, 38, 38, 0.58)'}
+            stroke={
+              isMonochrome
+                ? 'rgba(113, 113, 122, 0.68)'
+                : isDark
+                  ? 'rgba(248, 113, 113, 0.65)'
+                  : 'rgba(220, 38, 38, 0.58)'
+            }
             strokeWidth="12"
             strokeLinecap="round"
           />
@@ -178,7 +183,13 @@ export const MomentumGauge: React.FC<MomentumGaugeProps> = ({
           <path
             d="M 80 23 A 78 78 0 0 1 120 23"
             fill="none"
-            stroke={isDark ? 'rgba(148, 163, 184, 0.45)' : 'rgba(100, 116, 139, 0.35)'}
+            stroke={
+              isMonochrome
+                ? 'rgba(161, 161, 170, 0.44)'
+                : isDark
+                  ? 'rgba(148, 163, 184, 0.45)'
+                  : 'rgba(100, 116, 139, 0.35)'
+            }
             strokeWidth="12"
             strokeLinecap="butt"
           />
@@ -186,7 +197,13 @@ export const MomentumGauge: React.FC<MomentumGaugeProps> = ({
           <path
             d="M 127 25 A 78 78 0 0 1 178 98"
             fill="none"
-            stroke={isDark ? 'rgba(52, 211, 153, 0.68)' : 'rgba(22, 163, 74, 0.62)'}
+            stroke={
+              isMonochrome
+                ? 'rgba(255, 255, 255, 0.94)'
+                : isDark
+                  ? 'rgba(52, 211, 153, 0.68)'
+                  : 'rgba(22, 163, 74, 0.62)'
+            }
             strokeWidth="12"
             strokeLinecap="round"
           />

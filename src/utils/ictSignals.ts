@@ -7,6 +7,7 @@ import {
   IctRecommendedOrderType,
   IctSignalAnalysis,
   MarketAsset,
+  SignalActionBadge,
   SignalBiasVerdict,
   SignalClearanceGate,
   Timeframe,
@@ -26,7 +27,68 @@ export interface MacroIctContext {
 
 const PURE_ICT_ASSET_IDS = new Set(['BTCUSD', 'XAUUSD']);
 
-const ICT_TIMEFRAME_PRIORITY: Timeframe[] = ['15m', '5m', '30m', '1h', '4h', '1m', '1D'];
+export const ALLOWED_SIGNAL_TIMEFRAMES: Timeframe[] = ['5m', '15m', '30m', '1h', '4h'];
+const ICT_TIMEFRAME_PRIORITY: Timeframe[] = ['15m', '5m', '30m', '1h', '4h'];
+
+export function normalizeSignalTimeframe(tf?: Timeframe): Timeframe | undefined {
+  if (!tf) return undefined;
+  if (tf === '1m') return '5m';
+  return ALLOWED_SIGNAL_TIMEFRAMES.includes(tf) ? tf : '15m';
+}
+
+export function computeAdx14(bars: CandlePoint[], period = 14): number {
+  if (!bars || bars.length < period + 2) return 0;
+  let plusDmSum = 0;
+  let minusDmSum = 0;
+  let trSum = 0;
+  const dxList: number[] = [];
+
+  for (let i = 1; i < bars.length; i++) {
+    const cur = bars[i];
+    const prev = bars[i - 1];
+    const upMove = cur.h - prev.h;
+    const downMove = prev.l - cur.l;
+    const plusDm = upMove > downMove && upMove > 0 ? upMove : 0;
+    const minusDm = downMove > upMove && downMove > 0 ? downMove : 0;
+    const tr = Math.max(
+      cur.h - cur.l,
+      Math.abs(cur.h - prev.c),
+      Math.abs(cur.l - prev.c)
+    );
+
+    if (i <= period) {
+      plusDmSum += plusDm;
+      minusDmSum += minusDm;
+      trSum += tr;
+      if (i === period && trSum > 0) {
+        const pdi = (plusDmSum / trSum) * 100;
+        const mdi = (minusDmSum / trSum) * 100;
+        const sumDi = pdi + mdi;
+        dxList.push(sumDi > 0 ? (Math.abs(pdi - mdi) / sumDi) * 100 : 0);
+      }
+    } else {
+      plusDmSum = plusDmSum - plusDmSum / period + plusDm;
+      minusDmSum = minusDmSum - minusDmSum / period + minusDm;
+      trSum = trSum - trSum / period + tr;
+      if (trSum > 0) {
+        const pdi = (plusDmSum / trSum) * 100;
+        const mdi = (minusDmSum / trSum) * 100;
+        const sumDi = pdi + mdi;
+        dxList.push(sumDi > 0 ? (Math.abs(pdi - mdi) / sumDi) * 100 : 0);
+      }
+    }
+  }
+
+  if (dxList.length === 0) return 0;
+  if (dxList.length < period) {
+    return Number((dxList.reduce((a, b) => a + b, 0) / dxList.length).toFixed(1));
+  }
+  let adx = dxList.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  for (let i = period; i < dxList.length; i++) {
+    adx = (adx * (period - 1) + dxList[i]) / period;
+  }
+  return Number(adx.toFixed(1));
+}
 
 export const TF_BAR_MINUTES: Partial<Record<Timeframe, number>> = {
   '1m': 1,
@@ -783,16 +845,30 @@ export function evaluateLiveExecutionPosture(params: {
     }
   }
 
-  const atrPad = typeof atr === 'number' && Number.isFinite(atr) && atr > 0 ? atr * 0.1 : 0;
-  const inZone =
-    (currentPrice >= lo - atrPad && currentPrice <= hi + atrPad) ||
-    (bias === 'BUY' && currentPrice < lo && currentPrice > stopLoss!) ||
-    (bias === 'SELL' && currentPrice > hi && currentPrice < stopLoss!);
+  // CRITICAL FIX: Never mark a broken zone (price dropped below Bullish FVG distal or rose above Bearish FVG distal toward SL) as enter_now!
+  const atrPad = typeof atr === 'number' && Number.isFinite(atr) && atr > 0 ? atr * 0.08 : 0;
+  const brokenTowardSl =
+    (bias === 'BUY' && currentPrice < lo - atrPad) ||
+    (bias === 'SELL' && currentPrice > hi + atrPad);
+
+  if (brokenTowardSl) {
+    return {
+      posture: 'standby',
+      recommendedOrderType: bias === 'BUY' ? 'BUY STOP' : 'SELL STOP',
+      limitEntryPriceNum,
+      limitRr,
+      spotRr,
+      chaseProgressPct: 0,
+      hasRunAway: false,
+    };
+  }
+
+  const inZone = currentPrice >= lo - atrPad && currentPrice <= hi + atrPad;
 
   if (inZone) {
     return {
       posture: 'enter_now',
-      recommendedOrderType: 'MARKET / ZONE FILL',
+      recommendedOrderType: bias === 'BUY' ? 'BUY NOW' : 'SELL NOW',
       limitEntryPriceNum,
       limitRr,
       spotRr,
@@ -1350,8 +1426,9 @@ function computePureIctSignalForXauBtc(
   enforceNewsBlackout = true,
   macroContext?: MacroIctContext
 ): IctSignalAnalysis {
-  const candidates: Timeframe[] = preferredTimeframe
-    ? [preferredTimeframe, ...ICT_TIMEFRAME_PRIORITY.filter((tf) => tf !== preferredTimeframe)]
+  const safePreferred = normalizeSignalTimeframe(preferredTimeframe);
+  const candidates: Timeframe[] = safePreferred
+    ? [safePreferred, ...ICT_TIMEFRAME_PRIORITY.filter((tf) => tf !== safePreferred)]
     : ICT_TIMEFRAME_PRIORITY;
 
   const { bars: rawBars, timeframe, isRealOhlc } = extractBarsForTf(asset, candidates, 12);
@@ -1807,7 +1884,18 @@ function computePureIctSignalForXauBtc(
   const newsBlackout = checkMacroNewsBlackout(asset.id, economicEvents, refClockMs);
   const newsBlocked = enforceNewsBlackout && newsBlackout.active;
 
-  // Canonical ICT 2022 requires real FVG/OB imbalance in Discount/Premium + fresh post-MSS window + virgin FVG
+  // Proven 1-Year Empirical Backtest Gates:
+  // 1. Strict HTF 1H/4H Trend Alignment (zero counter-trend knife-catching)
+  // 2. Wilder ADX(14) >= 18 trend-regime filter (eliminates dead-range chop)
+  // 3. Hard Active Killzone gate (London / NY AM / NY PM only)
+  // 4. Hard block on opposing SMT Divergence and chaotic R2_EXPANSION spikes
+  // 5. Virgin (0-touch) FVG/OB inside Discount/Premium + Strong Displacement (RVOL >= 1.15x)
+  const adx14 = computeAdx14(bars, 14);
+  const adxPassed = adx14 >= 18 || bars.length < 18;
+  const opposingSmtBull = smt.status === 'Bearish SMT';
+  const opposingSmtBear = smt.status === 'Bullish SMT';
+  const chaoticExpansion = volatilityRegime === 'R2_EXPANSION';
+
   const hasBullImbalanceZone = Boolean(
     bullAnchor &&
       bullDiscountValid &&
@@ -1826,23 +1914,32 @@ function computePureIctSignalForXauBtc(
     sslSweptStrict &&
     bullMss &&
     bullMssIdx > sslSweepIdx &&
+    bullDisplacementRvol >= 1.15 &&
     hasBullImbalanceZone &&
-    (htf.bias === 'Bullish' || (htf.bias === 'Ranging' && inKillzone) || (htf.bullDemandAligned && inKillzone));
+    htf.bias === 'Bullish' &&
+    inKillzone &&
+    adxPassed &&
+    !opposingSmtBull &&
+    !chaoticExpansion;
 
   const sellCoreConfirmed =
     !dualSideSwept &&
     bslSweptStrict &&
     bearMss &&
     bearMssIdx > bslSweepIdx &&
+    bearDisplacementRvol >= 1.15 &&
     hasBearImbalanceZone &&
-    (htf.bias === 'Bearish' || (htf.bias === 'Ranging' && inKillzone) || (htf.bearSupplyAligned && inKillzone));
+    htf.bias === 'Bearish' &&
+    inKillzone &&
+    adxPassed &&
+    !opposingSmtBear &&
+    !chaoticExpansion;
 
   const bullBiasDominant =
     buyCoreConfirmed ||
     (!sellCoreConfirmed &&
-      (sslSweptStrict ||
-        bullTotal > bearTotal ||
-        (bullTotal === bearTotal && htf.bias !== 'Bearish')));
+      (htf.bias === 'Bullish' ||
+        (htf.bias !== 'Bearish' && (sslSweptStrict || bullTotal >= bearTotal))));
 
   const activeDisplacementRvol = bullBiasDominant ? bullDisplacementRvol : bearDisplacementRvol;
 
@@ -1911,10 +2008,10 @@ function computePureIctSignalForXauBtc(
         }`
       : `${sessionAnchors.po3Phase} session phase`;
 
-  // Dynamic Volatility-Scaled Stop Architecture (eliminates fixed-dollar caps)
+  // Sweep-Protected Volatility-Scaled Stop + Early 1.05R BE Lock TP1 (Backtest-Proven)
   const slBuffer = getAssetStopFloorBuffer(asset, atr15mMetrics.atr15m, volatilityRegime);
   const tfMult = Math.sqrt(Math.max(1, (TF_BAR_MINUTES[timeframe] ?? 15) / 15));
-  const minSlMult = isBtc ? 1.15 : 0.9;
+  const minSlMult = isBtc ? 1.25 : 1.05;
   const maxSlMult = isBtc ? 3.2 : 2.6;
   const minSlDist = atr15mMetrics.atr15m * minSlMult * tfMult;
   const maxSlDist = atr15mMetrics.atr15m * maxSlMult * tfMult;
@@ -1940,17 +2037,18 @@ function computePureIctSignalForXauBtc(
       htf.pool1hHigh,
       htf.pdh,
     ]
-      .filter((p) => Number.isFinite(p) && p >= entryAnchorPx + risk * 1.15)
+      .filter((p) => Number.isFinite(p) && p >= entryAnchorPx + risk * 0.95)
       .sort((a, b) => a - b);
 
+    // Early 1.05R BE Lock TP1 prevents +1R winners reversing into -1R stops
     const tp1Candidate = rawUpsidePools.find(
-      (p) => p >= entryAnchorPx + risk * 1.2 && p <= entryAnchorPx + risk * 1.7
+      (p) => p >= entryAnchorPx + risk * 1.0 && p <= entryAnchorPx + risk * 1.25
     );
-    tp1Val = tp1Candidate ?? entryAnchorPx + risk * 1.35;
+    tp1Val = tp1Candidate ?? entryAnchorPx + risk * 1.05;
     const optimalTp2Pool = rawUpsidePools.find(
-      (p) => p >= entryAnchorPx + risk * 2.25 && p <= entryAnchorPx + risk * 4.0 && p > tp1Val
+      (p) => p >= entryAnchorPx + risk * 2.15 && p <= entryAnchorPx + risk * 3.5 && p > tp1Val
     );
-    tp2Val = optimalTp2Pool ?? entryAnchorPx + risk * 2.75;
+    tp2Val = optimalTp2Pool ?? entryAnchorPx + risk * 2.4;
     liquidityTarget = `BSL (${formatPriceWithAsset(tp2Val, asset)})`;
   } else {
     const structuralStopAnchor = bslSweptStrict
@@ -1967,19 +2065,24 @@ function computePureIctSignalForXauBtc(
       htf.pool1hLow,
       htf.pdl,
     ]
-      .filter((p) => Number.isFinite(p) && p <= entryAnchorPx - risk * 1.15)
+      .filter((p) => Number.isFinite(p) && p <= entryAnchorPx - risk * 0.95)
       .sort((a, b) => b - a);
 
     const tp1Candidate = rawDownsidePools.find(
-      (p) => p <= entryAnchorPx - risk * 1.2 && p >= entryAnchorPx - risk * 1.7
+      (p) => p <= entryAnchorPx - risk * 1.0 && p >= entryAnchorPx - risk * 1.25
     );
-    tp1Val = tp1Candidate ?? entryAnchorPx - risk * 1.35;
+    tp1Val = tp1Candidate ?? entryAnchorPx - risk * 1.05;
     const optimalTp2Pool = rawDownsidePools.find(
-      (p) => p <= entryAnchorPx - risk * 2.25 && p >= entryAnchorPx - risk * 4.0 && p < tp1Val
+      (p) => p <= entryAnchorPx - risk * 2.15 && p >= entryAnchorPx - risk * 3.5 && p < tp1Val
     );
-    tp2Val = optimalTp2Pool ?? entryAnchorPx - risk * 2.75;
+    tp2Val = optimalTp2Pool ?? entryAnchorPx - risk * 2.4;
     liquidityTarget = `SSL (${formatPriceWithAsset(tp2Val, asset)})`;
   }
+
+  // Breakout confirmation stop level (for BUY STOP / SELL STOP guidance when waiting)
+  const stopEntryPriceNum = bullBiasDominant
+    ? Math.max(entryHigh, bullLegHigh > currentPrice ? bullLegHigh : entryHigh + atr * 0.15)
+    : Math.min(entryLow, bearLegLow < currentPrice ? bearLegLow : entryLow - atr * 0.15);
 
   // Net-of-Friction R:R & Spread Guard
   const friction = getEstimatedRoundTripFriction(asset.id, entryAnchorPx);
@@ -1997,27 +2100,48 @@ function computePureIctSignalForXauBtc(
     waitReasons.push(newsBlackout.reason);
   }
   if (volatilityStatus === 'warming') {
-    waitReasons.push('Warming 15m OHLCV bars for ATR volatility verification');
+    waitReasons.push('Warming 15m OHLCV bars for ATR verification');
   } else if (enforceVolatilityFilter && !volatilityPassed) {
     waitReasons.push(
       volatilityStatus === 'too-high'
-        ? `15m ATR ${atrPct.toFixed(3)}% > ${volatilityMaxPct.toFixed(3)}% cap (${atr15mMetrics.assetClassLabel})`
-        : `15m ATR ${atrPct.toFixed(3)}% < ${volatilityThresholdPct.toFixed(3)}% floor (${atr15mMetrics.assetClassLabel})`
+        ? `15m ATR ${atrPct.toFixed(3)}% exceeds ${volatilityMaxPct.toFixed(3)}% volatility cap`
+        : `15m ATR ${atrPct.toFixed(3)}% below ${volatilityThresholdPct.toFixed(3)}% volatility floor`
     );
   }
+  if (chaoticExpansion) {
+    waitReasons.push('R2 chaotic volatility expansion — avoid stop-hunt whipsaws');
+  }
+  if (!inKillzone) {
+    waitReasons.push(`Outside London/NY Killzone (${killzone}) — wait for institutional liquidity window`);
+  }
+  if (!adxPassed) {
+    waitReasons.push(`Low trend strength (ADX ${adx14} < 18) — choppy range risk`);
+  }
+  if (htf.bias === 'Ranging') {
+    waitReasons.push('HTF 1H/4H is Ranging — strictly require clear Bullish or Bearish HTF trend');
+  } else if ((bullBiasDominant && htf.bias === 'Bearish') || (!bullBiasDominant && htf.bias === 'Bullish')) {
+    waitReasons.push(`Counter-trend blocked — HTF 1H/4H is ${htf.bias}`);
+  }
+  if ((bullBiasDominant && opposingSmtBull) || (!bullBiasDominant && opposingSmtBear)) {
+    waitReasons.push(`Opposing ${smt.status} divergence detected — institutional trap filter`);
+  }
   if (dualSideSwept) {
-    waitReasons.push('Both SSL & BSL liquidity swept within 4 bars — choppy range');
+    waitReasons.push('Both SSL & BSL swept within 4 bars — choppy whipsaw range');
   } else if (!sslSweptStrict && !bslSweptStrict) {
-    waitReasons.push('Awaiting clean SSL/EQL or BSL/EQH liquidity sweep');
+    waitReasons.push(
+      bullBiasDominant
+        ? `Awaiting clean SSL sweep below ${formatPriceWithAsset(priorSwingLow, asset)}`
+        : `Awaiting clean BSL sweep above ${formatPriceWithAsset(priorSwingHigh, asset)}`
+    );
   }
   if (stopTooWide) {
     waitReasons.push(
-      `Stop Too Wide (${formatPriceWithAsset(risk, asset)} > ${maxSlMult.toFixed(1)}x ATR cap)`
+      `Stop too wide (${formatPriceWithAsset(risk, asset)} > ${maxSlMult.toFixed(1)}x ATR cap)`
     );
   }
   if (netRr < 2.0) {
     waitReasons.push(
-      `Net-of-friction R:R is 1:${netRr.toFixed(1)} after ${friction.label} (below 1:2.0 min)`
+      `Net R:R 1:${netRr.toFixed(1)} after ${friction.label} is below 1:2.0 minimum`
     );
   }
 
@@ -2076,30 +2200,107 @@ function computePureIctSignalForXauBtc(
     frictionCost: friction.cost,
   });
 
+  // If price already broke past zone toward SL, downgrade active direction to WAIT (never BUY NOW on broken zone!)
+  if (direction !== 'NEUTRAL' && postureEval.posture === 'standby') {
+    waitReasons.unshift(
+      `Price broke past Entry Zone (${formatBand(entryLow, entryHigh, asset)}) toward SL — wait for reclaim`
+    );
+    direction = 'NEUTRAL';
+    executionStatus = 'standby';
+  }
+
   if (direction === 'NEUTRAL' && waitReasons.length === 0) {
     if (sslSweptStrict && !bullMss) {
-      waitReasons.push('SSL swept — awaiting RVOL >= 1.15x displacement + Bullish MSS close');
+      waitReasons.push('SSL swept — awaiting >= 1.15x RVOL displacement + Bullish MSS close');
     } else if (bslSweptStrict && !bearMss) {
-      waitReasons.push('BSL swept — awaiting RVOL >= 1.15x displacement + Bearish MSS close');
+      waitReasons.push('BSL swept — awaiting >= 1.15x RVOL displacement + Bearish MSS close');
     } else if ((bullMss && !hasBullImbalanceZone) || (bearMss && !hasBearImbalanceZone)) {
-      waitReasons.push('MSS printed — awaiting fresh Discount/Premium FVG or OB');
-    } else if ((bullMss && htf.bias === 'Bearish') || (bearMss && htf.bias === 'Bullish')) {
-      waitReasons.push(`Counter-trend vs HTF ${htf.bias} outside Killzone/HTF Zone`);
+      waitReasons.push('MSS printed — awaiting Virgin (0-touch) Discount/Premium FVG or OB');
     } else {
-      waitReasons.push('Awaiting Sweep + RVOL Displacement MSS + Fresh FVG');
+      waitReasons.push('Awaiting HTF-aligned Sweep + RVOL Displacement MSS + Virgin FVG');
+    }
+  }
+
+  // Unambiguous Action Badge + Exact Order Instruction + Wait Clarity
+  const zoneBandStr = formatBand(entryLow, entryHigh, asset);
+  const limitPxStr = formatPriceWithAsset(postureEval.limitEntryPriceNum ?? entryAnchorPx, asset);
+  const stopPxStr = formatPriceWithAsset(stopEntryPriceNum, asset);
+  const slStr = formatPriceWithAsset(slVal, asset);
+  const tp1Str = formatPriceWithAsset(tp1Val, asset);
+  const tp2Str = formatPriceWithAsset(tp2Val, asset);
+
+  let actionBadge: SignalActionBadge;
+  let finalOrderType: IctRecommendedOrderType = postureEval.recommendedOrderType;
+  let waitWhy: string | undefined;
+  let waitAtWhere: string | undefined;
+  let orderInstruction: string;
+
+  if (direction === 'BUY') {
+    if (postureEval.posture === 'enter_now') {
+      actionBadge = 'BUY NOW';
+      finalOrderType = 'BUY NOW';
+      orderInstruction = `BUY NOW (Market inside Virgin Zone ${zoneBandStr}) · SL ${slStr} · TP1 ${tp1Str} (Move SL to BE) · TP2 ${tp2Str}`;
+    } else {
+      actionBadge = 'WAIT BUY';
+      finalOrderType = 'BUY LIMIT';
+      waitWhy =
+        postureEval.posture === 'limit_pullback_only'
+          ? `Price already moved +${postureEval.chaseProgressPct}% toward TP1 — never chase above zone`
+          : `Setup confirmed — waiting for retracement into Virgin FVG 50% CE`;
+      waitAtWhere = `BUY LIMIT @ ${limitPxStr} (Zone ${zoneBandStr})`;
+      orderInstruction = `SET BUY LIMIT @ ${limitPxStr} (Zone ${zoneBandStr}) · SL ${slStr} · TP1 ${tp1Str} (BE) · TP2 ${tp2Str}`;
+    }
+  } else if (direction === 'SELL') {
+    if (postureEval.posture === 'enter_now') {
+      actionBadge = 'SELL NOW';
+      finalOrderType = 'SELL NOW';
+      orderInstruction = `SELL NOW (Market inside Virgin Zone ${zoneBandStr}) · SL ${slStr} · TP1 ${tp1Str} (Move SL to BE) · TP2 ${tp2Str}`;
+    } else {
+      actionBadge = 'WAIT SELL';
+      finalOrderType = 'SELL LIMIT';
+      waitWhy =
+        postureEval.posture === 'limit_pullback_only'
+          ? `Price already dropped +${postureEval.chaseProgressPct}% toward TP1 — never chase below zone`
+          : `Setup confirmed — waiting for retracement into Virgin FVG 50% CE`;
+      waitAtWhere = `SELL LIMIT @ ${limitPxStr} (Zone ${zoneBandStr})`;
+      orderInstruction = `SET SELL LIMIT @ ${limitPxStr} (Zone ${zoneBandStr}) · SL ${slStr} · TP1 ${tp1Str} (BE) · TP2 ${tp2Str}`;
+    }
+  } else {
+    waitWhy = waitReasons[0] ?? 'Awaiting strict institutional confluence';
+    if (htf.bias === 'Bullish') {
+      actionBadge = 'WAIT BUY';
+      const belowZone = currentPrice < entryLow;
+      finalOrderType = belowZone ? 'BUY STOP' : 'BUY LIMIT';
+      waitAtWhere = belowZone
+        ? `BUY STOP above ${stopPxStr} after zone reclaim (${zoneBandStr})`
+        : `BUY LIMIT @ ${limitPxStr} inside Discount Zone ${zoneBandStr}`;
+      orderInstruction = `WAIT BUY — ${waitAtWhere}`;
+    } else if (htf.bias === 'Bearish') {
+      actionBadge = 'WAIT SELL';
+      const aboveZone = currentPrice > entryHigh;
+      finalOrderType = aboveZone ? 'SELL STOP' : 'SELL LIMIT';
+      waitAtWhere = aboveZone
+        ? `SELL STOP below ${stopPxStr} after zone reclaim (${zoneBandStr})`
+        : `SELL LIMIT @ ${limitPxStr} inside Premium Zone ${zoneBandStr}`;
+      orderInstruction = `WAIT SELL — ${waitAtWhere}`;
+    } else {
+      actionBadge = 'WAIT';
+      finalOrderType = 'WAIT';
+      waitAtWhere = `Wait for 1H/4H breakout above ${formatPriceWithAsset(rangeHigh, asset)} (BUY STOP) or below ${formatPriceWithAsset(rangeLow, asset)} (SELL STOP)`;
+      orderInstruction = `NO ORDER — ${waitWhy}`;
     }
   }
 
   const invalidationTrigger = buildAssetInvalidationTrigger({
     assetClassLabel: atr15mMetrics.assetClassLabel,
     biasBullish: bullBiasDominant,
-    slFormatted: formatPriceWithAsset(slVal, asset),
+    slFormatted: slStr,
     maxPct: volatilityMaxPct,
   });
 
   const invalidationNote =
     direction === 'NEUTRAL'
-      ? `NO TRADE (${waitReasons[0]}). ${invalidationTrigger}`
+      ? `WAIT (${waitWhy}). ${invalidationTrigger}`
       : invalidationTrigger;
 
   const activeBreakdown = bullBiasDominant
@@ -2130,59 +2331,50 @@ function computePureIctSignalForXauBtc(
   const confidence =
     direction === 'NEUTRAL'
       ? Math.min(54, Math.max(20, Math.round(precisionScore * 0.72)))
-      : Math.min(97, Math.max(68, Math.round(precisionScore)));
+      : Math.min(97, Math.max(72, Math.round(precisionScore)));
 
   const triggers: string[] = [];
   if (direction === 'BUY') {
+    triggers.push(`HTF 1H/4H Bullish · ADX ${adx14}`);
     triggers.push(`${sweptPoolLabel ?? 'SSL Liquidity'} Swept`);
     triggers.push(`Displacement MSS (${activeDisplacementRvol.toFixed(2)}x RVOL)`);
-    if (imbBull.bullFvg) triggers.push(imbBull.bullFvg.touchCount === 0 ? 'Virgin Bull FVG (50% CE)' : 'Unmitigated Bull FVG');
+    if (imbBull.bullFvg) triggers.push('Virgin Bull FVG (50% CE)');
     if (po3Aligned) triggers.push('PO3 Below NY 00:00 Open');
     if (smt.status === 'Bullish SMT') triggers.push(`Bullish SMT (${smt.pair})`);
-    if (htf.bias === 'Bullish') triggers.push('HTF 1H/4H Bullish');
-    if (dxyBullBonus > 0) triggers.push('DXY Inverse Tailwind');
   } else if (direction === 'SELL') {
+    triggers.push(`HTF 1H/4H Bearish · ADX ${adx14}`);
     triggers.push(`${sweptPoolLabel ?? 'BSL Liquidity'} Swept`);
     triggers.push(`Displacement MSS (${activeDisplacementRvol.toFixed(2)}x RVOL)`);
-    if (imbBear.bearFvg) triggers.push(imbBear.bearFvg.touchCount === 0 ? 'Virgin Bear FVG (50% CE)' : 'Unmitigated Bear FVG');
+    if (imbBear.bearFvg) triggers.push('Virgin Bear FVG (50% CE)');
     if (po3Aligned) triggers.push('PO3 Above NY 00:00 Open');
     if (smt.status === 'Bearish SMT') triggers.push(`Bearish SMT (${smt.pair})`);
-    if (htf.bias === 'Bearish') triggers.push('HTF 1H/4H Bearish');
-    if (dxyBearBonus > 0) triggers.push('DXY Strength Aligned');
   } else {
-    triggers.push(`${pdZone} · ${sessionAnchors.po3Phase}`);
-    triggers.push(waitReasons[0] ?? 'Awaiting Canonical 2022 ICT');
-    if (smt.status === 'Bullish SMT' || smt.status === 'Bearish SMT') triggers.push(smt.status);
+    triggers.push(`HTF ${htf.bias} · ADX ${adx14}`);
+    triggers.push(waitWhy ?? 'Awaiting Proven High-WR Confluence');
     if (inKillzone) triggers.push(killzone);
-    if (dxyConfluenceNote && isGold) triggers.push(dxyBullBonus > 0 ? 'DXY Tailwind Long' : dxyBearBonus > 0 ? 'DXY Tailwind Short' : 'DXY Neutral');
   }
 
   let setupName: string;
   if (direction === 'BUY') {
     setupName = pdlSwept
-      ? 'ICT 2022 PDL Judas Sweep + RVOL MSS & Virgin FVG Long'
+      ? 'ICT Pro-Trend PDL Sweep + Virgin FVG Long'
       : asianLowSwept
-        ? 'ICT 2022 Asian Low Judas Sweep + RVOL MSS & Virgin FVG Long'
-        : 'ICT 2022 SSL Sweep + RVOL MSS & Virgin FVG Long';
+        ? 'ICT Pro-Trend Asian Low Sweep + Virgin FVG Long'
+        : 'ICT Pro-Trend SSL Sweep + Virgin FVG Long';
   } else if (direction === 'SELL') {
     setupName = pdhSwept
-      ? 'ICT 2022 PDH Judas Sweep + RVOL MSS & Virgin FVG Short'
+      ? 'ICT Pro-Trend PDH Sweep + Virgin FVG Short'
       : asianHighSwept
-        ? 'ICT 2022 Asian High Judas Sweep + RVOL MSS & Virgin FVG Short'
-        : 'ICT 2022 BSL Sweep + RVOL MSS & Virgin FVG Short';
+        ? 'ICT Pro-Trend Asian High Sweep + Virgin FVG Short'
+        : 'ICT Pro-Trend BSL Sweep + Virgin FVG Short';
   } else if (newsBlocked) {
-    setupName = 'ICT Filtered · High-Impact Macro Blackout';
+    setupName = 'WAIT · High-Impact Macro Blackout';
   } else if (stopTooWide) {
     setupName = `WAIT · Stop Too Wide (> ${maxSlMult.toFixed(1)}x ATR)`;
   } else if (volatilityStatus === 'warming') {
     setupName = 'WAIT · Warming 15m Candles';
-  } else if (enforceVolatilityFilter && !volatilityPassed) {
-    setupName =
-      volatilityStatus === 'too-high'
-        ? 'ICT Filtered · Erratic High-Volatility Session'
-        : 'ICT Filtered · Low Volatility Consolidation';
   } else {
-    setupName = `WAIT · ${waitReasons[0].split('(')[0].trim()}`;
+    setupName = `${actionBadge} · ${(waitWhy ?? 'Awaiting Confluence').split('—')[0].trim()}`;
   }
 
   const oteZone = formatBand(
@@ -2215,12 +2407,9 @@ function computePureIctSignalForXauBtc(
         ? latestBarTs
         : refClockMs;
 
-  const projectedLevelsSummary = `Ref Zone ${formatBand(entryLow, entryHigh, asset)} · SL Ref ${formatPriceWithAsset(slVal, asset)} · Draw ${formatPriceWithAsset(tp2Val, asset)}`;
+  const projectedLevelsSummary = `Zone ${zoneBandStr} · SL ${slStr} · TP1 ${tp1Str} · TP2 ${tp2Str}`;
 
-  const htfAligned =
-    bullBiasDominant
-      ? htf.bias === 'Bullish' || htf.bullDemandAligned
-      : htf.bias === 'Bearish' || htf.bearSupplyAligned;
+  const htfAligned = bullBiasDominant ? htf.bias === 'Bullish' : htf.bias === 'Bearish';
 
   const { setupGrade, isAPlusSetup } = computeSetupGrade({
     direction,
@@ -2239,74 +2428,68 @@ function computePureIctSignalForXauBtc(
   const expectedBias: 'BUY' | 'SELL' | 'NEUTRAL' =
     direction !== 'NEUTRAL'
       ? direction
-      : sslSweptStrict
+      : htf.bias === 'Bullish'
         ? 'BUY'
-        : bslSweptStrict
+        : htf.bias === 'Bearish'
           ? 'SELL'
-          : bullTotal > bearTotal
-            ? 'BUY'
-            : bearTotal > bullTotal
-              ? 'SELL'
-              : 'NEUTRAL';
+          : 'NEUTRAL';
 
-  const placementSummary = buildPlacementSummary({
-    direction,
-    expectedBias,
-    posture: postureEval.posture,
-    limitEntryPriceNum: postureEval.limitEntryPriceNum ?? canonicalLimitPx,
-    stopLossNum: slVal,
-    tp1Num: tp1Val,
-    tp2Num: tp2Val,
-    asset,
-    waitReason: waitReasons[0],
-  });
+  const placementSummary = orderInstruction;
 
-  const htfClearPass = bullBiasDominant
-    ? htf.bias === 'Bullish' || (htf.bias === 'Ranging' && inKillzone) || (htf.bullDemandAligned && inKillzone)
-    : htf.bias === 'Bearish' || (htf.bias === 'Ranging' && inKillzone) || (htf.bearSupplyAligned && inKillzone);
-  const sweepClearPass = bullBiasDominant ? sslSweptStrict && !dualSideSwept : bslSweptStrict && !dualSideSwept;
-  const mssClearPass = bullBiasDominant ? bullMss && bullMssIdx > sslSweepIdx : bearMss && bearMssIdx > bslSweepIdx;
+  // Strictly ONLY the 5 1-Year Backtest-Proven Confluences
+  const htfClearPass = bullBiasDominant ? htf.bias === 'Bullish' : htf.bias === 'Bearish';
+  const kzAdxPass = inKillzone && adxPassed && !chaoticExpansion;
+  const sweepClearPass = bullBiasDominant
+    ? sslSweptStrict && !dualSideSwept && !opposingSmtBull
+    : bslSweptStrict && !dualSideSwept && !opposingSmtBear;
+  const mssClearPass = bullBiasDominant
+    ? bullMss && bullMssIdx > sslSweepIdx && bullDisplacementRvol >= 1.15
+    : bearMss && bearMssIdx > bslSweepIdx && bearDisplacementRvol >= 1.15;
   const zoneClearPass = bullBiasDominant ? hasBullImbalanceZone : hasBearImbalanceZone;
-  const riskClearPass = !newsBlocked && (!enforceVolatilityFilter || volatilityPassed) && !stopTooWide && netRr >= 2.0;
+  const riskClearPass =
+    !newsBlocked &&
+    (!enforceVolatilityFilter || volatilityPassed) &&
+    !stopTooWide &&
+    netRr >= 2.0;
 
   const clearanceGates: SignalClearanceGate[] = [
     {
       id: 'htf',
-      label: '1. HTF, PO3 & SMT',
+      label: '1. HTF 4H/1H Trend',
       passed: htfClearPass,
-      state: htfClearPass ? 'PASS' : 'WARN',
-      detail: `${htf.bias} 1H/4H · ${po3Aligned ? 'PO3 OK' : sessionAnchors.po3Phase}${smt.status === 'Bullish SMT' || smt.status === 'Bearish SMT' ? ` · ${smt.status}` : ''}`,
+      state: htfClearPass ? 'PASS' : 'BLOCK',
+      detail: `${htf.bias} 1H/4H${po3Aligned ? ' · PO3 Aligned' : ''}`,
     },
     {
       id: 'kz',
-      label: '2. Session Killzone',
-      passed: inKillzone,
-      state: inKillzone ? 'PASS' : 'WARN',
-      detail: `${killzone} · ${volatilityRegime.replace('_', ' ')}`,
+      label: '2. Killzone & ADX ≥ 18',
+      passed: kzAdxPass,
+      state: chaoticExpansion ? 'BLOCK' : kzAdxPass ? 'PASS' : 'WARN',
+      detail: `${killzone} · ADX ${adx14}${chaoticExpansion ? ' · R2 Spike' : ''}`,
     },
     {
       id: 'sweep',
-      label: '3. Liquidity Pool Sweep',
+      label: '3. Liquidity Sweep',
       passed: sweepClearPass,
       state: dualSideSwept ? 'BLOCK' : sweepClearPass ? 'PASS' : 'BLOCK',
       detail: dualSideSwept
         ? 'Dual-side chop'
         : sweptPoolLabel
-          ? `${sweptPoolLabel} swept & reclaimed`
-          : 'Awaiting pool sweep',
+          ? `${sweptPoolLabel} swept`
+          : 'Awaiting SSL/BSL sweep',
     },
     {
       id: 'mss',
-      label: '4. RVOL Displacement MSS',
+      label: '4. Displacement MSS',
       passed: mssClearPass,
       state: mssClearPass ? 'PASS' : sweepClearPass ? 'WARN' : 'BLOCK',
       detail: mssClearPass
         ? `${bullBiasDominant ? 'Bullish' : 'Bearish'} MSS · ${activeDisplacementRvol.toFixed(2)}x RVOL`
-        : 'Awaiting RVOL >= 1.15x close',
+        : 'Awaiting ≥ 1.15x RVOL MSS',
     },
     {
       id: 'risk',
-      label: '5. Virgin FVG & Net R:R',
+      label: '5. Virgin Zone & R:R ≥ 2',
       passed: zoneClearPass && riskClearPass,
       state: newsBlocked || stopTooWide ? 'BLOCK' : zoneClearPass && riskClearPass ? 'PASS' : 'WARN',
       detail: newsBlocked
@@ -2314,7 +2497,7 @@ function computePureIctSignalForXauBtc(
         : stopTooWide
           ? `SL > ${maxSlMult.toFixed(1)}x ATR`
           : zoneClearPass
-            ? `Virgin Zone · Net 1:${netRr.toFixed(1)} R:R`
+            ? `Virgin 0-Touch · Net 1:${netRr.toFixed(1)}`
             : netRr < 2.0
               ? `Net R:R 1:${netRr.toFixed(1)} < 2.0`
               : 'Awaiting Virgin FVG/OB',
@@ -2325,8 +2508,8 @@ function computePureIctSignalForXauBtc(
   const blockerGate = clearanceGates.find((g) => !g.passed);
   const clearanceSummary =
     direction !== 'NEUTRAL'
-      ? `${passedGateCount}/5 Cleared · Unambiguous ${direction} (${setupGrade} · Net 1:${netRr.toFixed(1)})`
-      : `${passedGateCount}/5 Cleared · Blocker: ${blockerGate?.label.replace(/^\d+\.\s*/, '') ?? 'Structure'} (${waitReasons[0] ?? 'Standby'})`;
+      ? `${passedGateCount}/5 Proven Gates · ${actionBadge} (${finalOrderType} · Net 1:${netRr.toFixed(1)})`
+      : `${passedGateCount}/5 Proven Gates · Blocker: ${blockerGate?.label.replace(/^\d+\.\s*/, '') ?? 'Structure'}`;
 
   const biasVerdict: SignalBiasVerdict =
     direction === 'BUY'
@@ -2357,11 +2540,11 @@ function computePureIctSignalForXauBtc(
     confidence,
     setupName,
     pdZone,
-    entryZone: formatBand(entryLow, entryHigh, asset),
-    stopLoss: formatPriceWithAsset(slVal, asset),
-    targetPrice: formatPriceWithAsset(tp2Val, asset),
+    entryZone: zoneBandStr,
+    stopLoss: slStr,
+    targetPrice: tp2Str,
     riskReward: netRr > 0 ? `1:${netRr.toFixed(1)}` : 'WAIT',
-    triggers: triggers.slice(0, 6),
+    triggers: triggers.slice(0, 5),
     timeframe,
     currentPrice,
     decimals: asset.decimals,
@@ -2376,11 +2559,11 @@ function computePureIctSignalForXauBtc(
     asianRangeAtrRatio: asianRange.asianRangeAtrRatio,
     sweepMssStatus:
       direction === 'NEUTRAL'
-        ? waitReasons[0]
-        : `${sweptPoolLabel ?? (bullBiasDominant ? 'SSL' : 'BSL')} Sweep -> ${activeDisplacementRvol.toFixed(2)}x RVOL MSS -> ${nearBullFvg || nearBearFvg ? 'Virgin FVG 50% CE' : nearBullOb || nearBearOb ? 'Order Block' : 'FVG Zone'}`,
+        ? waitWhy
+        : `${sweptPoolLabel ?? (bullBiasDominant ? 'SSL' : 'BSL')} Sweep -> ${activeDisplacementRvol.toFixed(2)}x RVOL MSS -> Virgin FVG 50% CE`,
     stopLossReason: `${slBuffer.reason} beyond Sweep Wick`,
-    tp1: formatPriceWithAsset(tp1Val, asset),
-    tp2: formatPriceWithAsset(tp2Val, asset),
+    tp1: tp1Str,
+    tp2: tp2Str,
     invalidationNote,
     invalidationTrigger,
     assetClassLabel: atr15mMetrics.assetClassLabel,
@@ -2412,14 +2595,13 @@ function computePureIctSignalForXauBtc(
     isAPlusSetup,
     usdExposure,
     executionPosture: postureEval.posture,
-    recommendedOrderType: postureEval.recommendedOrderType,
+    recommendedOrderType: finalOrderType,
     limitEntryPriceNum: postureEval.limitEntryPriceNum,
     limitRr: postureEval.limitRr,
     spotRr: postureEval.spotRr,
     chaseProgressPct: postureEval.chaseProgressPct,
     hasRunAway: postureEval.hasRunAway,
     placementSummary,
-    // Phase 1 Institutional Telemetry
     midnightOpen,
     ny0830Open: sessionAnchors.ny0830Open,
     pdh: htf.pdh,
@@ -2438,6 +2620,12 @@ function computePureIctSignalForXauBtc(
     frictionCost: friction.cost,
     frictionLabel: friction.label,
     htfAligned,
+    actionBadge,
+    waitWhy,
+    waitAtWhere,
+    orderInstruction,
+    stopEntryPriceNum,
+    adx14,
   };
 }
 

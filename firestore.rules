@@ -174,6 +174,7 @@ service cloud.firestore {
           'mfeR', 'maeR', 'barrierOutcome', 'timeBarrierAtMs',
           'inKillzone', 'po3Aligned', 'smtConfirmed', 'volatilityRegime', 'htfAligned', 'netRr',
           'stage2Aligned', 'rsRank', 'vcpDetected', 'sectorLeader',
+          'orderType', 'expiredReason',
           'createdAt', 'updatedAt'
         ])
         && data.ownerId == request.auth.uid
@@ -201,7 +202,7 @@ service cloud.firestore {
         && data.tp1 is number && data.tp1 > 0
         && data.tp2 is number && data.tp2 > 0
         && data.riskReward is string && data.riskReward.size() <= 24
-        && data.status in ['PENDING_LIMIT', 'RUNNING', 'TP1_HIT', 'TP2_HIT', 'SL_HIT', 'BE_CLOSED', 'EXPIRED']
+        && data.status in ['PENDING', 'FILLED', 'EXPIRED', 'TP', 'SL', 'PENDING_LIMIT', 'RUNNING', 'TP1_HIT', 'TP2_HIT', 'SL_HIT', 'BE_CLOSED']
         && data.filledOnFirstSight is bool
         && data.createdAtMs is number
         && data.lastPrice is number && data.lastPrice > 0
@@ -242,7 +243,9 @@ service cloud.firestore {
         && (!('stage2Aligned' in data) || data.stage2Aligned is bool)
         && (!('rsRank' in data) || data.rsRank is number)
         && (!('vcpDetected' in data) || data.vcpDetected is bool)
-        && (!('sectorLeader' in data) || data.sectorLeader is bool);
+        && (!('sectorLeader' in data) || data.sectorLeader is bool)
+        && (!('orderType' in data) || (data.orderType is string && data.orderType.size() <= 24))
+        && (!('expiredReason' in data) || data.expiredReason in ['INVALIDATED_SL', 'MISSED_TP1', 'UNFILLED_TIMEOUT', 'TIME_BARRIER']);
     }
 
     function isValidSignalHistoryRecord(data, userId) {
@@ -252,7 +255,7 @@ service cloud.firestore {
     }
 
     function isTerminalSignalStatus(status) {
-      return status in ['TP2_HIT', 'SL_HIT', 'BE_CLOSED', 'EXPIRED'];
+      return status in ['TP', 'SL', 'EXPIRED', 'TP2_HIT', 'SL_HIT', 'BE_CLOSED'];
     }
 
     // =========================================================================
@@ -400,7 +403,7 @@ service cloud.firestore {
                 'filledAtMs', 'tp1HitAtMs', 'closedAtMs', 'closedPrice',
                 'lastPrice', 'maxFavorablePrice', 'maxAdversePrice',
                 'pnlPct', 'rMultiple', 'lastCheckedAtMs', 'zoneFillVerified',
-                'mfeR', 'maeR', 'barrierOutcome', 'timeBarrierAtMs', 'updatedAt'
+                'mfeR', 'maeR', 'barrierOutcome', 'timeBarrierAtMs', 'expiredReason', 'updatedAt'
               ])
             )
             ||

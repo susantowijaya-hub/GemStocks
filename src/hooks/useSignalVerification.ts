@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { doc, getDoc, serverTimestamp, updateDoc } from 'firebase/firestore';
 import { useAuth } from '../contexts/AuthContext';
 import { getFirebaseServices } from '../lib/firebase';
 import { OperationType, handleFirestoreError } from '../lib/firestoreErrors';
@@ -14,6 +15,7 @@ import {
   deriveSignalIndexedOutcome,
   deriveSignalVerificationStatus,
   isTerminalSignalStatus,
+  normalizeSignalStatus,
 } from '../utils/signalHistoryEngine';
 
 const TTL_MS_STOCK_PENDING = 7 * 24 * 60 * 60 * 1000;
@@ -61,6 +63,7 @@ interface UseSignalVerificationOptions {
     patch: Partial<SignalHistoryRecord>,
     syncedStatus?: SignalHistoryStatus
   ) => void;
+  onRemoveUnfilledSignal?: (signalId: string) => Promise<void> | void;
 }
 
 interface LiveFeedSnapshot {
@@ -142,6 +145,7 @@ export function useSignalVerification({
   tryAcquireSignalWriteLock,
   releaseSignalWriteLock,
   applyVerificationPatch,
+  onRemoveUnfilledSignal,
 }: UseSignalVerificationOptions): SignalVerificationMetrics {
   const { user, profileReady } = useAuth();
   const [recentVerifications, setRecentVerifications] = useState<SignalVerificationEvent[]>([]);
@@ -169,7 +173,7 @@ export function useSignalVerification({
     const now = Date.now();
     const pendingToInspect = records.filter(
       (rec) =>
-        rec.status === 'PENDING_LIMIT' &&
+        normalizeSignalStatus(rec.status) === 'PENDING' &&
         deriveSignalVerificationStatus(rec) === 'Pending' &&
         !isTerminalSignalStatus(rec.status)
     );
@@ -247,8 +251,8 @@ export function useSignalVerification({
         );
 
         const patch: Partial<SignalHistoryRecord> = {
-          status: 'RUNNING',
-          outcome: deriveSignalIndexedOutcome('RUNNING', rec.userOutcome),
+          status: 'FILLED',
+          outcome: deriveSignalIndexedOutcome('FILLED', rec.userOutcome),
           zoneFillVerified: true,
           verificationStatus: 'Verified',
           verifiedAtMs: now,
@@ -267,7 +271,7 @@ export function useSignalVerification({
         transitions.push({
           rec,
           result: 'Verified',
-          nextStatus: 'RUNNING',
+          nextStatus: 'FILLED',
           triggerPrice: livePrice,
           patch,
         });
@@ -317,10 +321,21 @@ export function useSignalVerification({
     if (transitions.length === 0) return;
 
     // Apply optimistic local state updates + recent verification feed immediately
+    // Non-filled expired signals are removed directly from history & Firestore
     const newEvents: SignalVerificationEvent[] = [];
+    const verifiedTransitions: typeof transitions = [];
     for (const t of transitions) {
       const safeId = sanitizeDocId(t.rec.id);
       processedResultRef.current.set(safeId, t.result);
+      if (t.result === 'Expired') {
+        if (onRemoveUnfilledSignal) {
+          void onRemoveUnfilledSignal(t.rec.id);
+        } else {
+          applyVerificationPatch(t.rec.id, t.patch);
+        }
+        continue;
+      }
+      verifiedTransitions.push(t);
       applyVerificationPatch(t.rec.id, t.patch);
       newEvents.push({
         signalId: t.rec.id,
@@ -338,17 +353,14 @@ export function useSignalVerification({
       setRecentVerifications((prev) => [...newEvents, ...prev].slice(0, MAX_RECENT_EVENTS));
     }
 
-    // Immediately persist 'Verified' / 'Expired' transitions to Firestore SignalHistory
-    if (!user || !profileReady || !cloudSynced) return;
+    // Immediately persist 'Verified' transitions to Firestore SignalHistory
+    if (!user || !profileReady || !cloudSynced || verifiedTransitions.length === 0) return;
 
     void (async () => {
       try {
-        const [{ db }, { doc, getDoc, serverTimestamp, updateDoc }] = await Promise.all([
-          getFirebaseServices(),
-          import('firebase/firestore'),
-        ]);
+        const { db } = await getFirebaseServices();
 
-        for (const t of transitions) {
+        for (const t of verifiedTransitions) {
           const safeId = sanitizeDocId(t.rec.id);
           if (!isRecordConfirmedOnServer(safeId)) continue;
           if (inFlightVerifyRef.current.has(safeId)) continue;
@@ -514,6 +526,7 @@ export function useSignalVerification({
     tryAcquireSignalWriteLock,
     releaseSignalWriteLock,
     applyVerificationPatch,
+    onRemoveUnfilledSignal,
   ]);
 
   // Compute true hit-rate metrics strictly from entry-zone verified signals
@@ -527,13 +540,14 @@ export function useSignalVerification({
 
     for (const r of records) {
       const vStatus = deriveSignalVerificationStatus(r);
+      const st = normalizeSignalStatus(r.status);
       if (vStatus === 'Verified') {
         verifiedCount += 1;
-        if (r.status === 'TP1_HIT' || r.status === 'TP2_HIT' || r.userOutcome === 'WIN') {
+        if (st === 'TP' || r.userOutcome === 'WIN') {
           verifiedWins += 1;
-        } else if (r.status === 'SL_HIT' || r.userOutcome === 'LOSS') {
+        } else if (st === 'SL' || r.userOutcome === 'LOSS') {
           verifiedLosses += 1;
-        } else if (r.status === 'BE_CLOSED' || r.userOutcome === 'BE') {
+        } else if (r.status === 'BE_CLOSED' || r.barrierOutcome === 'BREAK_EVEN' || r.userOutcome === 'BE') {
           verifiedBe += 1;
         }
       } else if (vStatus === 'Expired') {

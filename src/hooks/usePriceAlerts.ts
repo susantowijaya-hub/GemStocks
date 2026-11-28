@@ -61,12 +61,28 @@ function loadRadarSignalEngines(): Promise<RadarEngines> {
 const WINDOW_MS = 5 * 60 * 1000; // 5-minute rolling window
 const LIVE_CONFIRM_MIN_SPAN_MS = 4 * 60 * 1000; // Require >= 4 minutes of browser samples before switching from verified server 5m telemetry
 const ALERT_MIN_SPAN_MS = 30 * 1000; // Require >= 30s live tick span before emitting spike alert
-const THRESHOLD_PERCENT = 2.0; // Trigger when |confirmed move| >= 2.0% within 5 minutes
-const CONFIRM_SECOND_TICK_PCT = 1.85; // 2nd confirming sample must hold >= 1.85% in the same direction
+const DEFAULT_THRESHOLD_PERCENT = 2.0; // Default trigger when |confirmed move| >= 2.0% within 5 minutes
+const ALERT_THRESHOLD_STORAGE_KEY = 'stocks-alert-threshold-pct-v1';
 const COOLDOWN_MS = 5 * 60 * 1000; // Prevent duplicate spam within 5 minutes unless move escalates >= 1% or reverses
 const ICT_COOLDOWN_MS = 10 * 60 * 1000; // Avoid repeating identical ICT setups inside 10 minutes
 const TOAST_TTL_MS = 9500;
 const MAX_ALERTS = 80;
+
+function clampAlertThresholdPct(val: number): number {
+  if (!Number.isFinite(val)) return DEFAULT_THRESHOLD_PERCENT;
+  return Number(Math.max(0.5, Math.min(5.0, val)).toFixed(1));
+}
+
+function loadAlertThresholdPct(): number {
+  try {
+    if (typeof window === 'undefined') return DEFAULT_THRESHOLD_PERCENT;
+    const raw = window.localStorage.getItem(ALERT_THRESHOLD_STORAGE_KEY);
+    if (!raw) return DEFAULT_THRESHOLD_PERCENT;
+    return clampAlertThresholdPct(Number(raw));
+  } catch {
+    return DEFAULT_THRESHOLD_PERCENT;
+  }
+}
 
 interface PriceSample {
   t: number;
@@ -279,9 +295,14 @@ function loadSyncedRadarConfigFallback(): SyncedRadarConfig {
       const raw = window.localStorage.getItem(ICT_RADAR_PREFS_STORAGE_KEY);
       if (raw) {
         const parsed = JSON.parse(raw) as Partial<SyncedRadarConfig>;
+        const safeTf: Timeframe =
+          parsed.timeframe &&
+          ['5m', '15m', '30m', '1h', '4h'].includes(parsed.timeframe)
+            ? parsed.timeframe
+            : '15m';
         return {
           strategyMode: parsed.strategyMode === 'sdcv' ? 'sdcv' : 'ict',
-          timeframe: parsed.timeframe ?? '15m',
+          timeframe: safeTf,
           enforceVolatilityFilter:
             typeof parsed.enforceVolatilityFilter === 'boolean'
               ? parsed.enforceVolatilityFilter
@@ -331,13 +352,10 @@ function verifyImmediateZoneFill(
     const hi = Math.max(entryLowNum, entryHighNum);
     const tol = Math.max(currentPrice * 0.0003, 1e-6);
     const insideZone = currentPrice >= lo - tol && currentPrice <= hi + tol;
-    const slValid = typeof stopLossNum === 'number' && Number.isFinite(stopLossNum);
-    const filledBeyondProximal =
-      direction === 'BUY'
-        ? currentPrice < lo && (!slValid || currentPrice > stopLossNum!)
-        : currentPrice > hi && (!slValid || currentPrice < stopLossNum!);
 
-    if (insideZone || filledBeyondProximal) {
+    // Strict institutional discipline: ONLY mark filled when spot is inside the Entry Zone
+    // (never treat price blowing past the zone toward SL as an instant fill).
+    if (insideZone) {
       return { ictStage: 'triggered', fillStatus: 'filled' };
     }
   }
@@ -370,6 +388,7 @@ export function usePriceAlerts(
   const [alerts, setAlerts] = useState<PriceAlertItem[]>(loadPersistedAlerts);
   const [toasts, setToasts] = useState<PriceAlertItem[]>([]);
   const [ictPopupsEnabled, setIctPopupsEnabledState] = useState<boolean>(loadIctPopupPreference);
+  const [alertThresholdPct, setAlertThresholdPctState] = useState<number>(loadAlertThresholdPct);
   const [volatility5mMap, setVolatility5mMap] = useState<Record<string, Asset5mVolatility>>({});
   const [market5mStats, setMarket5mStats] = useState<{
     meanPct: number;
@@ -383,6 +402,8 @@ export function usePriceAlerts(
 
   const ictPopupsEnabledRef = useRef<boolean>(ictPopupsEnabled);
   ictPopupsEnabledRef.current = ictPopupsEnabled;
+  const alertThresholdPctRef = useRef<number>(alertThresholdPct);
+  alertThresholdPctRef.current = alertThresholdPct;
 
   const samplesRef = useRef<Record<string, PriceSample[]>>({});
   const cooldownRef = useRef<Record<string, AlertCooldownState>>({});
@@ -401,6 +422,17 @@ export function usePriceAlerts(
   const latestIdxSnapshotsRef = useRef<Record<string, BandarmologyQuoteSnapshot>>({});
   const pendingSpikeRef = useRef<Record<string, PendingSpikeState>>({});
   const toastTimersRef = useRef<Record<string, number>>({});
+
+  const setAlertThresholdPct = useCallback((nextVal: number) => {
+    const clamped = clampAlertThresholdPct(nextVal);
+    setAlertThresholdPctState(clamped);
+    alertThresholdPctRef.current = clamped;
+    try {
+      window.localStorage.setItem(ALERT_THRESHOLD_STORAGE_KEY, String(clamped));
+    } catch {
+      // ignore storage errors
+    }
+  }, []);
 
   const setIctPopupsEnabled = useCallback((next: boolean) => {
     setIctPopupsEnabledState(next);
@@ -515,6 +547,9 @@ export function usePriceAlerts(
         filledAt: stageMeta?.fillStatus === 'filled' ? now : undefined,
         recommendedOrderType: sig.recommendedOrderType,
         limitEntryPriceNum: sig.limitEntryPriceNum,
+        actionBadge: sig.actionBadge,
+        waitWhy: sig.waitWhy,
+        waitAtWhere: sig.waitAtWhere,
       };
     },
     []
@@ -573,6 +608,9 @@ export function usePriceAlerts(
         filledAt: stageMeta?.fillStatus === 'filled' ? now : undefined,
         recommendedOrderType: sdcv.recommendedOrderType,
         limitEntryPriceNum: sdcv.limitEntryPriceNum,
+        actionBadge: sdcv.actionBadge,
+        waitWhy: sdcv.waitWhy,
+        waitAtWhere: sdcv.waitAtWhere,
       };
     },
     []
@@ -634,8 +672,10 @@ export function usePriceAlerts(
       const surgePct = minSample.price > 0 ? ((asset.price - minSample.price) / minSample.price) * 100 : 0;
       const dropPct = maxSample.price > 0 ? ((asset.price - maxSample.price) / maxSample.price) * 100 : 0;
 
-      const isSurge = surgePct >= THRESHOLD_PERCENT && surgePct >= Math.abs(dropPct);
-      const isDrop = dropPct <= -THRESHOLD_PERCENT && Math.abs(dropPct) > surgePct;
+      const thresholdPct = alertThresholdPctRef.current;
+      const confirmPct = Math.max(0.4, Number((thresholdPct * 0.92).toFixed(2)));
+      const isSurge = surgePct >= thresholdPct && surgePct >= Math.abs(dropPct);
+      const isDrop = dropPct <= -thresholdPct && Math.abs(dropPct) > surgePct;
 
       if (!isSurge && !isDrop) {
         // Clear stale unconfirmed candidate if move reversed back inside band
@@ -650,7 +690,7 @@ export function usePriceAlerts(
       const movePercent = Number((isSurge ? surgePct : dropPct).toFixed(2));
       const anchor = isSurge ? minSample : maxSample;
 
-      // Two-tick confirmation: previous buffered sample OR server 5m delta must corroborate >= 1.85%
+      // Two-tick confirmation: previous buffered sample OR server 5m delta must corroborate >= confirmPct
       const prevSample = nextBuf[nextBuf.length - 2];
       const prevMoveFromAnchor =
         prevSample && anchor.price > 0
@@ -658,13 +698,13 @@ export function usePriceAlerts(
           : 0;
       const prevConfirms =
         direction === 'surge'
-          ? prevMoveFromAnchor >= CONFIRM_SECOND_TICK_PCT
-          : prevMoveFromAnchor <= -CONFIRM_SECOND_TICK_PCT;
+          ? prevMoveFromAnchor >= confirmPct
+          : prevMoveFromAnchor <= -confirmPct;
       const serverConfirms =
         typeof asset.move5mPct === 'number' &&
         (direction === 'surge'
-          ? asset.move5mPct >= CONFIRM_SECOND_TICK_PCT
-          : asset.move5mPct <= -CONFIRM_SECOND_TICK_PCT);
+          ? asset.move5mPct >= confirmPct
+          : asset.move5mPct <= -confirmPct);
 
       const pending = pendingSpikeRef.current[asset.id];
       const pendingConfirms =
@@ -798,7 +838,7 @@ export function usePriceAlerts(
       medianPct: Number(medianPct.toFixed(3)),
       stdPct: Number(stdPct.toFixed(3)),
     });
-  }, [assets, pushAlert]);
+  }, [assets, pushAlert, alertThresholdPct]);
 
   useEffect(() => {
     return () => {
@@ -1057,6 +1097,7 @@ export function usePriceAlerts(
 
         let nextFillStatus: NonNullable<PriceAlertItem['fillStatus']> = item.fillStatus ?? 'filled';
         let nextFilledAt = item.filledAt ?? (nextFillStatus === 'filled' ? item.triggeredAt : undefined);
+        let nextExpiredReason = item.expiredReason;
 
         if (nextFillStatus === 'awaiting_fill') {
           if (
@@ -1078,24 +1119,32 @@ export function usePriceAlerts(
 
             for (const bar of postTriggerBars) {
               const touchedZone = bar.l <= hi + tol && bar.h >= lo - tol;
-              const crossedThroughBuy =
-                item.ictAction === 'BUY' && bar.l <= lo && bar.h >= sl;
-              const crossedThroughSell =
-                item.ictAction === 'SELL' && bar.h >= hi && bar.l <= sl;
-              if (touchedZone || crossedThroughBuy || crossedThroughSell) {
+              if (touchedZone) {
                 nextFillStatus = 'filled';
                 nextFilledAt = Math.max(item.triggeredAt, bar.t);
                 break;
               }
               if (bar.t > item.triggeredAt) {
                 if (item.ictAction === 'BUY') {
-                  if (bar.h >= target || bar.l <= sl) {
+                  if (bar.l <= sl) {
                     nextFillStatus = 'expired_unfilled';
+                    nextExpiredReason = 'INVALIDATED_SL';
+                    break;
+                  }
+                  if (bar.h >= target) {
+                    nextFillStatus = 'expired_unfilled';
+                    nextExpiredReason = 'MISSED_TP1';
                     break;
                   }
                 } else {
-                  if (bar.l <= target || bar.h >= sl) {
+                  if (bar.h >= sl) {
                     nextFillStatus = 'expired_unfilled';
+                    nextExpiredReason = 'INVALIDATED_SL';
+                    break;
+                  }
+                  if (bar.l <= target) {
+                    nextFillStatus = 'expired_unfilled';
+                    nextExpiredReason = 'MISSED_TP1';
                     break;
                   }
                 }
@@ -1103,18 +1152,22 @@ export function usePriceAlerts(
             }
 
             if (nextFillStatus === 'awaiting_fill') {
-              const inZoneLive =
-                (asset.price >= lo - tol && asset.price <= hi + tol) ||
-                (item.ictAction === 'BUY' && asset.price < lo && asset.price > sl) ||
-                (item.ictAction === 'SELL' && asset.price > hi && asset.price < sl);
+              const inZoneLive = asset.price >= lo - tol && asset.price <= hi + tol;
               if (inZoneLive) {
                 nextFillStatus = 'filled';
                 nextFilledAt = now;
               } else if (
-                (item.ictAction === 'BUY' && (asset.price >= target || asset.price <= sl)) ||
-                (item.ictAction === 'SELL' && (asset.price <= target || asset.price >= sl))
+                (item.ictAction === 'BUY' && asset.price <= sl) ||
+                (item.ictAction === 'SELL' && asset.price >= sl)
               ) {
                 nextFillStatus = 'expired_unfilled';
+                nextExpiredReason = 'INVALIDATED_SL';
+              } else if (
+                (item.ictAction === 'BUY' && asset.price >= target) ||
+                (item.ictAction === 'SELL' && asset.price <= target)
+              ) {
+                nextFillStatus = 'expired_unfilled';
+                nextExpiredReason = 'MISSED_TP1';
               }
             }
           }
@@ -1125,6 +1178,7 @@ export function usePriceAlerts(
           return {
             ...item,
             fillStatus: 'expired_unfilled',
+            expiredReason: nextExpiredReason ?? 'MISSED_TP1',
             autoGraded: true,
             outcomeGradedAt: now,
           };
@@ -1478,6 +1532,8 @@ export function usePriceAlerts(
     ictPopupsEnabled,
     setIctPopupsEnabled,
     toggleIctPopups,
+    alertThresholdPct,
+    setAlertThresholdPct,
     volatility5mMap,
     market5mStats,
     dismissToast,

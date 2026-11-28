@@ -1,14 +1,15 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   BarChart3,
+  BookOpen,
   Bookmark,
   Briefcase,
   CalendarDays,
   Check,
   ChevronRight,
+  Contrast,
   Crosshair,
   Gem,
-  Layers,
   LayoutDashboard,
   LayoutGrid,
   Menu,
@@ -43,6 +44,7 @@ const DOCK_ITEMS: {
   { id: 'stocks', label: 'Top 10 Stocks (US & ID)', shortLabel: 'Stocks', icon: BarChart3 },
   { id: 'heatmap', label: 'Market Cap Heatmap', shortLabel: 'Heatmap', icon: LayoutGrid },
   { id: 'ict', label: 'ICT Liquidity & OTE Radar', shortLabel: 'ICT Radar', icon: Crosshair },
+  { id: 'journal', label: 'Trade Signal Journal', shortLabel: 'Journal', icon: BookOpen },
   { id: 'news', label: 'Breaking News', shortLabel: 'News', icon: Newspaper },
   { id: 'calendar', label: 'Macro Calendar', shortLabel: 'Calendar', icon: CalendarDays },
 ];
@@ -56,7 +58,7 @@ const MOBILE_PRIMARY_TABS: {
   { id: 'dashboard', label: 'Market Dashboard', shortLabel: 'Markets', icon: LayoutDashboard },
   { id: 'stocks', label: 'Top 10 Stocks (US & ID)', shortLabel: 'Stocks', icon: BarChart3 },
   { id: 'ict', label: 'ICT Liquidity & OTE Radar', shortLabel: 'ICT Radar', icon: Crosshair },
-  { id: 'portfolio', label: 'Portfolios & Lists', shortLabel: 'Portfolio', icon: Briefcase },
+  { id: 'journal', label: 'Trade Signal Journal', shortLabel: 'Journal', icon: BookOpen },
 ];
 
 const MOBILE_MORE_ITEMS: {
@@ -66,6 +68,7 @@ const MOBILE_MORE_ITEMS: {
   desc: string;
   icon: React.ComponentType<{ className?: string }>;
 }[] = [
+  { id: 'portfolio', label: 'Portfolios & Lists', shortLabel: 'Portfolio', desc: 'Holdings & P&L', icon: Briefcase },
   { id: 'watchlist', label: 'Market Watchlist', shortLabel: 'Watchlist', desc: 'Pinned global tickers', icon: Bookmark },
   { id: 'heatmap', label: 'Market Cap Heatmap', shortLabel: 'Heatmap', desc: 'Sector & cap map', icon: LayoutGrid },
   { id: 'news', label: 'Breaking News', shortLabel: 'News', desc: 'Global & IDX wires', icon: Newspaper },
@@ -200,14 +203,14 @@ export const BottomDock: React.FC<BottomDockProps> = ({
                 }}
                 className={`relative flex flex-col items-center justify-center gap-0.5 min-h-[44px] rounded-xl transition-colors focus:outline-none active:scale-95 ${
                   isActive
-                    ? 'text-[#1D4ED8] dark:text-[#60A5FA] velvet:text-[#FF786E] parchment:text-[#B4410E]'
-                    : 'text-[#425466] dark:text-[#94A3B8] velvet:text-[#9790AB]'
+                    ? 'text-[#1D4ED8] dark:text-[#60A5FA] monochrome:text-white parchment:text-[#B4410E]'
+                    : 'text-[#425466] dark:text-[#94A3B8] monochrome:text-[#8E8E96]'
                 }`}
               >
                 {isActive && (
                   <span
                     aria-hidden="true"
-                    className="absolute top-0.5 w-8 h-[3px] rounded-full bg-[#1D4ED8] dark:bg-[#2962FF] velvet:bg-[#F9574B] parchment:bg-[#B4410E]"
+                    className="absolute top-0.5 w-8 h-[3px] rounded-full bg-[#1D4ED8] dark:bg-[#2962FF] monochrome:bg-white parchment:bg-[#B4410E]"
                   />
                 )}
                 <Icon className={`w-5 h-5 shrink-0 ${isActive ? 'stroke-[2.3]' : 'stroke-[1.9]'}`} />
@@ -227,14 +230,14 @@ export const BottomDock: React.FC<BottomDockProps> = ({
             onClick={() => setMobileMoreOpen((prev) => !prev)}
             className={`relative flex flex-col items-center justify-center gap-0.5 min-h-[44px] rounded-xl transition-colors focus:outline-none active:scale-95 ${
               mobileMoreOpen || isMoreRouteActive
-                ? 'text-[#1D4ED8] dark:text-[#60A5FA] velvet:text-[#FF786E] parchment:text-[#B4410E]'
-                : 'text-[#425466] dark:text-[#94A3B8] velvet:text-[#9790AB]'
+                ? 'text-[#1D4ED8] dark:text-[#60A5FA] monochrome:text-white parchment:text-[#B4410E]'
+                : 'text-[#425466] dark:text-[#94A3B8] monochrome:text-[#8E8E96]'
             }`}
           >
             {(mobileMoreOpen || isMoreRouteActive) && (
               <span
                 aria-hidden="true"
-                className="absolute top-0.5 w-8 h-[3px] rounded-full bg-[#1D4ED8] dark:bg-[#2962FF] velvet:bg-[#F9574B] parchment:bg-[#B4410E]"
+                className="absolute top-0.5 w-8 h-[3px] rounded-full bg-[#1D4ED8] dark:bg-[#2962FF] monochrome:bg-white parchment:bg-[#B4410E]"
               />
             )}
             {mobileMoreOpen ? (
@@ -310,15 +313,15 @@ export const BottomDock: React.FC<BottomDockProps> = ({
                     }}
                     className={`flex items-center gap-3 min-h-[54px] px-3 py-2.5 rounded-2xl border text-left transition-all active:scale-[0.98] ${
                       isActive
-                        ? 'bg-[#1D4ED8]/12 dark:bg-[#2962FF]/18 velvet:bg-[#F9574B]/16 border-[#1D4ED8]/45 dark:border-[#2962FF]/55 velvet:border-[#F9574B]/55 text-[#0A2540] dark:text-white'
+                        ? 'bg-[#1D4ED8]/12 dark:bg-[#2962FF]/18 monochrome:bg-white/14 border-[#1D4ED8]/45 dark:border-[#2962FF]/55 monochrome:border-white/70 text-[#0A2540] dark:text-white'
                         : 'liquid-glass-inset text-[#0A2540] dark:text-[#F0F3FA]'
                     }`}
                   >
                     <span
                       className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
                         isActive
-                          ? 'bg-[#1D4ED8] dark:bg-[#2962FF] velvet:bg-[#F9574B] text-white'
-                          : 'bg-black/[0.06] dark:bg-white/[0.08] text-[#1D4ED8] dark:text-[#60A5FA] velvet:text-[#FF786E]'
+                          ? 'bg-[#1D4ED8] dark:bg-[#2962FF] monochrome:bg-white text-white monochrome:text-black'
+                          : 'bg-black/[0.06] dark:bg-white/[0.08] text-[#1D4ED8] dark:text-[#60A5FA] monochrome:text-white'
                       }`}
                     >
                       <Icon className="w-4 h-4" />
@@ -347,7 +350,7 @@ export const BottomDock: React.FC<BottomDockProps> = ({
                       setMobileMoreOpen(false);
                       onOpenSettings();
                     }}
-                    className="inline-flex items-center gap-1 text-[11px] font-bold text-[#1D4ED8] dark:text-[#60A5FA] velvet:text-[#FF786E] parchment:text-[#B4410E]"
+                    className="inline-flex items-center gap-1 text-[11px] font-bold text-[#1D4ED8] dark:text-[#60A5FA] monochrome:text-white parchment:text-[#B4410E]"
                   >
                     <Settings className="w-3.5 h-3.5" />
                     <span>All Settings</span>
@@ -360,8 +363,8 @@ export const BottomDock: React.FC<BottomDockProps> = ({
                   const Icon =
                     opt.id === 'obsidian'
                       ? Moon
-                      : opt.id === 'velvet'
-                        ? Layers
+                      : opt.id === 'monochrome'
+                        ? Contrast
                         : opt.id === 'parchment'
                           ? Gem
                           : Sun;
@@ -378,7 +381,7 @@ export const BottomDock: React.FC<BottomDockProps> = ({
                       }}
                       className={`min-h-[44px] px-2.5 py-2 rounded-xl border flex items-center justify-center gap-1.5 text-xs font-bold transition-all ${
                         selected
-                          ? 'bg-[#1D4ED8]/14 dark:bg-[#2962FF]/20 velvet:bg-[#F9574B]/18 parchment:bg-[#B4410E]/12 border-[#1D4ED8]/50 dark:border-[#2962FF]/55 velvet:border-[#F9574B]/55 parchment:border-[#B4410E]/50 text-[#0A2540] dark:text-white'
+                          ? 'bg-[#1D4ED8]/14 dark:bg-[#2962FF]/20 monochrome:bg-white monochrome:text-black parchment:bg-[#B4410E]/12 border-[#1D4ED8]/50 dark:border-[#2962FF]/55 monochrome:border-white parchment:border-[#B4410E]/50 text-[#0A2540] dark:text-white'
                           : 'liquid-glass-inset text-[#425466] dark:text-[#CBD5E1]'
                       }`}
                     >
@@ -443,12 +446,12 @@ export const BottomDock: React.FC<BottomDockProps> = ({
                   title={item.label}
                   className={`relative group shrink-0 flex items-center gap-2.5 px-3 py-2 rounded-xl transition-all active:scale-[0.96] hover:translate-x-0.5 focus:outline-none ${
                     isActive
-                      ? 'text-white'
+                      ? 'text-white monochrome:text-black'
                       : 'text-[#1E293B] dark:text-[#F1F5F9] hover:text-[#1D4ED8] dark:hover:text-white'
                   }`}
                 >
                   {isActive && (
-                    <span className="absolute inset-0 rounded-xl bg-[#1D4ED8] dark:bg-[#2962FF] velvet:bg-[#F9574B] parchment:bg-[#B4410E] transition-all duration-200" />
+                    <span className="absolute inset-0 rounded-xl bg-[#1D4ED8] dark:bg-[#2962FF] monochrome:bg-white parchment:bg-[#B4410E] transition-all duration-200" />
                   )}
                   <span className="relative z-10 inline-flex items-center justify-center shrink-0">
                     <Icon className="w-4 h-4" />
@@ -478,7 +481,7 @@ export const BottomDock: React.FC<BottomDockProps> = ({
               title={`Settings · Theme: ${activeThemeMeta.label}`}
               className="relative group shrink-0 flex items-center gap-2.5 px-3 py-2 rounded-xl text-[#1E293B] dark:text-[#F1F5F9] hover:bg-black/5 dark:hover:bg-white/10 active:scale-[0.96] transition-all"
             >
-              <Settings className="w-4 h-4 shrink-0 text-[#1D4ED8] dark:text-[#60A5FA] velvet:text-[#FF786E] parchment:text-[#B4410E]" />
+              <Settings className="w-4 h-4 shrink-0 text-[#1D4ED8] dark:text-[#60A5FA] monochrome:text-white parchment:text-[#B4410E]" />
               <span className="text-xs font-bold truncate">
                 Settings ({activeThemeMeta.label})
               </span>

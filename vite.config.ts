@@ -268,6 +268,9 @@ export default defineConfig(() => {
         '@': path.resolve(import.meta.dirname, '.'),
       },
     },
+    optimizeDeps: {
+      include: ['firebase/app', 'firebase/auth', 'firebase/firestore'],
+    },
     build: {
       chunkSizeWarningLimit: 600,
       rolldownOptions: {

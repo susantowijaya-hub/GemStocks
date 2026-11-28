@@ -1,7 +1,7 @@
 @import "tailwindcss";
-@custom-variant dark (&:where(.obsidian, .obsidian *, .velvet, .velvet *, .dark, .dark *));
+@custom-variant dark (&:where(.obsidian, .obsidian *, .monochrome, .monochrome *, .dark, .dark *));
 @custom-variant obsidian (&:where(.obsidian, .obsidian *));
-@custom-variant velvet (&:where(.velvet, .velvet *));
+@custom-variant monochrome (&:where(.monochrome, .monochrome *));
 @custom-variant arctic (&:where(.arctic, .arctic *));
 @custom-variant parchment (&:where(.parchment, .parchment *));
 
@@ -24,7 +24,7 @@
      ========================================================================== */
   :root,
   html.arctic,
-  html:not(.obsidian):not(.parchment):not(.velvet) {
+  html:not(.obsidian):not(.parchment):not(.monochrome) {
     color-scheme: light;
     --bg-canvas: #F4F6F9;
     --bg-surface: #FFFFFF;
@@ -100,29 +100,30 @@
   }
 
   /* ==========================================================================
-     Theme 4: Velvet Calm Coral (Nodeka-Inspired Midnight Plum + Vermilion Coral)
-     Calm nocturnal luxury: smoked indigo-plum cards, warm alabaster ink, coral focus
+     Theme 4: Monochrome (Black & White Editorial Terminal + High-Contrast Semantic Numbers)
+     Zero-saturation carbon surfaces & chrome, pure white primary values,
+     ultra-high-contrast luminous emerald (#00F57A) and crimson (#FF4D4D) on gain/loss numbers
      ========================================================================== */
-  html.velvet {
+  html.monochrome {
     color-scheme: dark;
-    --bg-canvas: #0D0B14;
-    --bg-surface: #161320;
-    --bg-strong: #1B1828;
-    --bg-inset: #211D30;
-    --border-subtle: #2D2842;
-    --border-divider: #231F35;
-    --text-primary: #F6F4FA;
-    --text-secondary: #C6C0D6;
-    --text-muted: #9790AB;
-    --accent-primary: #F9574B;
-    --accent-hover: #FF6B5F;
-    --accent-soft: rgba(249, 87, 75, 0.16);
-    --gain-text: #34D399;
-    --gain-bg: rgba(52, 211, 153, 0.14);
-    --loss-text: #FB6B62;
-    --loss-bg: rgba(251, 107, 98, 0.15);
-    --warn-text: #FBBF24;
-    --warn-bg: rgba(251, 191, 36, 0.15);
+    --bg-canvas: #000000;
+    --bg-surface: #0A0A0B;
+    --bg-strong: #121214;
+    --bg-inset: #19191C;
+    --border-subtle: #2D2D32;
+    --border-divider: #1F1F24;
+    --text-primary: #FFFFFF;
+    --text-secondary: #C8C8D0;
+    --text-muted: #8E8E98;
+    --accent-primary: #FFFFFF;
+    --accent-hover: #E4E4E7;
+    --accent-soft: rgba(255, 255, 255, 0.13);
+    --gain-text: #00F57A;
+    --gain-bg: rgba(0, 245, 122, 0.15);
+    --loss-text: #FF4D4D;
+    --loss-bg: rgba(255, 77, 77, 0.16);
+    --warn-text: #FFD60A;
+    --warn-bg: rgba(255, 214, 10, 0.14);
   }
 
   html {
@@ -152,7 +153,7 @@
   body,
   html.arctic body,
   html.obsidian body,
-  html.velvet body,
+  html.monochrome body,
   html.dark body,
   html.parchment body {
     overscroll-behavior-y: contain;
@@ -170,7 +171,7 @@
 }
 
 /* ============================================================================
-   Flat Matte Terminal Backdrop + Nodeka Calm Studio Horizon (Velvet Theme)
+   Flat Matte Terminal Backdrop + Pure Monochrome Studio Sheen
    ============================================================================ */
 .ambient-theme-canvas {
   position: fixed;
@@ -181,11 +182,10 @@
   background-color: var(--bg-canvas);
 }
 
-html.velvet .ambient-theme-canvas {
+html.monochrome .ambient-theme-canvas {
   background:
-    radial-gradient(ellipse 85% 42% at 50% -8%, rgba(249, 87, 75, 0.14), rgba(88, 36, 68, 0.1) 42%, transparent 74%),
-    radial-gradient(ellipse 50% 35% at 88% 100%, rgba(124, 58, 130, 0.08), transparent 68%),
-    #0D0B14;
+    radial-gradient(ellipse 80% 38% at 50% -10%, rgba(255, 255, 255, 0.07), transparent 72%),
+    #000000;
 }
 
 /* ============================================================================
@@ -218,18 +218,18 @@ html.velvet .ambient-theme-canvas {
 
 html.obsidian .liquid-glass,
 html.obsidian .liquid-glass-card,
-html.velvet .liquid-glass,
-html.velvet .liquid-glass-card,
+html.monochrome .liquid-glass,
+html.monochrome .liquid-glass-card,
 html.dark .liquid-glass,
 html.dark .liquid-glass-card {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.28);
 }
 
-html.velvet .liquid-glass,
-html.velvet .liquid-glass-card {
+html.monochrome .liquid-glass,
+html.monochrome .liquid-glass-card {
   box-shadow:
-    0 2px 10px rgba(4, 2, 10, 0.34),
-    inset 0 1px 0 rgba(255, 255, 255, 0.03);
+    0 2px 10px rgba(0, 0, 0, 0.52),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
 html.obsidian .liquid-glass-strong,
@@ -237,10 +237,10 @@ html.dark .liquid-glass-strong {
   box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
 }
 
-html.velvet .liquid-glass-strong {
+html.monochrome .liquid-glass-strong {
   box-shadow:
-    0 14px 34px rgba(4, 2, 12, 0.58),
-    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    0 14px 36px rgba(0, 0, 0, 0.72),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
 }
 
 /* Crisp Electric Cobalt for interactive UI controls (Obsidian) */
@@ -252,18 +252,19 @@ html.dark .bg-\[\#0071E3\] {
   box-shadow: 0 1px 6px rgba(41, 98, 255, 0.28);
 }
 
-/* Vermilion Coral primary controls (Velvet / Nodeka-inspired) */
-html.velvet .bg-\[\#0066CC\],
-html.velvet .bg-\[\#0071E3\] {
-  background-color: #F9574B;
-  box-shadow: 0 2px 12px rgba(249, 87, 75, 0.28);
+/* Pure Inverted Monochrome primary controls (pure white fill + jet-black ink) */
+html.monochrome .bg-\[\#0066CC\],
+html.monochrome .bg-\[\#0071E3\] {
+  background-color: #FFFFFF;
+  color: #000000;
+  box-shadow: 0 2px 12px rgba(255, 255, 255, 0.14);
 }
 
-html.velvet .text-\[\#38BDF8\],
-html.velvet .text-\[\#60A5FA\],
-html.velvet .text-\[\#0071E3\],
-html.velvet .text-\[\#005BB8\] {
-  color: #FF786E;
+html.monochrome .text-\[\#38BDF8\],
+html.monochrome .text-\[\#60A5FA\],
+html.monochrome .text-\[\#0071E3\],
+html.monochrome .text-\[\#005BB8\] {
+  color: #FFFFFF;
 }
 
 html.parchment .bg-\[\#0066CC\],
@@ -273,7 +274,7 @@ html.parchment .bg-\[\#0071E3\] {
 }
 
 /* ============================================================================
-   Calibrated Financial Numeric Scale (Daylight + Night Legibility)
+   Calibrated Financial Numeric Scale (High-Contrast & Enlarged Readability)
    IBM Plex Mono with strict tabular-nums, lining-nums, and slashed zero
    ============================================================================ */
 .font-mono,
@@ -287,34 +288,102 @@ html.parchment .bg-\[\#0071E3\] {
 }
 
 .num-hero {
-  font-size: clamp(1.75rem, 2.6vw, 2.35rem);
-  font-weight: 700;
-  line-height: 1.08;
+  font-size: clamp(1.9rem, 2.85vw, 2.55rem);
+  font-weight: 800;
+  line-height: 1.06;
   letter-spacing: -0.025em;
 }
 
 .num-card {
-  font-size: clamp(1.125rem, 1.5vw, 1.375rem);
-  font-weight: 700;
-  line-height: 1.15;
+  font-size: clamp(1.25rem, 1.65vw, 1.5rem);
+  font-weight: 800;
+  line-height: 1.12;
   letter-spacing: -0.02em;
 }
 
 .num-table {
-  font-size: 0.9375rem;
-  font-weight: 600;
-  line-height: 1.25;
-  letter-spacing: -0.01em;
+  font-size: 1rem;
+  font-weight: 700;
+  line-height: 1.22;
+  letter-spacing: -0.015em;
 }
 
 .num-delta {
-  font-size: 0.8125rem;
-  font-weight: 600;
+  font-size: 0.875rem;
+  font-weight: 700;
   line-height: 1.2;
 }
 
+/* High-Contrast Enlarged Numeric Highlighting in Monochrome Mode */
+html.monochrome .num-hero {
+  font-size: clamp(2.1rem, 3.1vw, 2.8rem);
+  font-weight: 800;
+  color: #FFFFFF;
+  text-shadow: 0 0 22px rgba(255, 255, 255, 0.16);
+}
+
+html.monochrome .num-card {
+  font-size: clamp(1.325rem, 1.78vw, 1.625rem);
+  font-weight: 800;
+  color: #FFFFFF;
+}
+
+html.monochrome .num-table {
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: #FFFFFF;
+}
+
+html.monochrome .num-delta {
+  font-size: 0.9125rem;
+  font-weight: 800;
+}
+
+/* Elevate numeric clarity across cards, tables, and KPI blocks in Monochrome
+   while preserving high-contrast semantic green (#00F57A) & red (#FF4D4D) numbers */
+html.monochrome .tabular-nums {
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+html.monochrome .tabular-nums.text-xs,
+html.monochrome .font-mono.tabular-nums.text-xs {
+  font-size: 0.84rem;
+}
+
+html.monochrome .tabular-nums.text-sm,
+html.monochrome .font-mono.tabular-nums.text-sm {
+  font-size: 0.96rem;
+}
+
+html.monochrome .tabular-nums.text-base,
+html.monochrome .font-mono.tabular-nums.text-base {
+  font-size: 1.08rem;
+}
+
+html.monochrome .tabular-nums.text-lg,
+html.monochrome .font-mono.tabular-nums.text-lg {
+  font-size: 1.24rem;
+}
+
+html.monochrome .tabular-nums.text-xl,
+html.monochrome .font-mono.tabular-nums.text-xl {
+  font-size: 1.38rem;
+}
+
+html.monochrome .tabular-nums.text-2xl,
+html.monochrome .font-mono.tabular-nums.text-2xl {
+  font-size: 1.65rem;
+}
+
+/* Keep explicitly inverted black-on-white controls readable */
+html.monochrome .monochrome\:text-black,
+html.monochrome .monochrome\:text-black .tabular-nums {
+  color: #000000;
+}
+
 html.obsidian body,
-html.velvet body,
+html.monochrome body,
 html.dark body {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
@@ -324,14 +393,14 @@ html.dark body {
    WCAG High-Contrast Legibility Calibration Across All 4 Themes
    ============================================================================ */
 html.arctic .text-\[\#1C1C1E\],
-html:not(.obsidian):not(.parchment):not(.velvet) .text-\[\#1C1C1E\] {
+html:not(.obsidian):not(.parchment):not(.monochrome) .text-\[\#1C1C1E\] {
   color: #091E36;
 }
 
 html.arctic .text-\[\#6C6C70\],
 html.arctic .text-\[\#4A4D57\],
-html:not(.obsidian):not(.parchment):not(.velvet) .text-\[\#6C6C70\],
-html:not(.obsidian):not(.parchment):not(.velvet) .text-\[\#4A4D57\] {
+html:not(.obsidian):not(.parchment):not(.monochrome) .text-\[\#6C6C70\],
+html:not(.obsidian):not(.parchment):not(.monochrome) .text-\[\#4A4D57\] {
   color: #334155;
 }
 
@@ -368,19 +437,19 @@ html.dark .text-\[\#AEAEB2\] {
   color: #CBD5E1;
 }
 
-html.velvet .text-\[\#8E8E93\] {
-  color: #A29BB6;
+html.monochrome .text-\[\#8E8E93\] {
+  color: #9A9AA4;
 }
 
-html.velvet .text-\[\#9EB5C8\] {
-  color: #C2BCD4;
+html.monochrome .text-\[\#9EB5C8\] {
+  color: #B8B8C2;
 }
 
-html.velvet .text-\[\#AEAEB2\] {
-  color: #D5D0E4;
+html.monochrome .text-\[\#AEAEB2\] {
+  color: #CFCFD8;
 }
 
-html:not(.obsidian):not(.velvet) .text-\[\#16803C\] {
+html:not(.obsidian):not(.monochrome) .text-\[\#16803C\] {
   color: #047857;
 }
 
@@ -389,12 +458,20 @@ html.parchment .text-\[\#16803C\] {
 }
 
 html.obsidian .text-\[\#30D158\],
-html.velvet .text-\[\#30D158\],
 html.dark .text-\[\#30D158\] {
   color: #34D399;
 }
 
-html:not(.obsidian):not(.velvet) .text-\[\#D7261C\] {
+html.monochrome .text-\[\#30D158\],
+html.monochrome .text-\[\#4ADE80\],
+html.monochrome .text-\[\#22C55E\],
+html.monochrome .text-\[\#0F7033\],
+html.monochrome .text-\[\#16803C\],
+html.monochrome .text-\[var\(--gain-text\)\] {
+  color: #00F57A;
+}
+
+html:not(.obsidian):not(.monochrome) .text-\[\#D7261C\] {
   color: #B91C1C;
 }
 
@@ -407,8 +484,13 @@ html.dark .text-\[\#FF453A\] {
   color: #F87171;
 }
 
-html.velvet .text-\[\#FF453A\] {
-  color: #FB6B62;
+html.monochrome .text-\[\#FF453A\],
+html.monochrome .text-\[\#FF6B63\],
+html.monochrome .text-\[\#EF4444\],
+html.monochrome .text-\[\#C41C16\],
+html.monochrome .text-\[\#D7261C\],
+html.monochrome .text-\[var\(--loss-text\)\] {
+  color: #FF4D4D;
 }
 
 /* Thin clean scrollbar on desktop, hidden on mobile horizontal carousels */
@@ -527,12 +609,11 @@ html.dark .skeleton-shimmer::after {
   );
 }
 
-html.velvet .skeleton-shimmer::after {
+html.monochrome .skeleton-shimmer::after {
   background: linear-gradient(
     90deg,
     transparent 0%,
-    rgba(249, 87, 75, 0.12) 45%,
-    rgba(255, 255, 255, 0.06) 55%,
+    rgba(255, 255, 255, 0.09) 50%,
     transparent 100%
   );
 }
@@ -580,13 +661,13 @@ html.dark .spot-plaque-surface {
     inset 0 -2px 0 rgba(0, 0, 0, 0.45);
 }
 
-html.velvet .spot-plaque-surface {
-  background: #1B1828;
-  border: 1px solid #322C4A;
+html.monochrome .spot-plaque-surface {
+  background: #121214;
+  border: 1px solid #35353C;
   box-shadow:
-    0 4px 14px rgba(5, 3, 12, 0.48),
-    inset 0 1px 0 rgba(255, 255, 255, 0.04),
-    inset 0 -2px 0 rgba(5, 3, 12, 0.50);
+    0 4px 14px rgba(0, 0, 0, 0.65),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    inset 0 -2px 0 rgba(0, 0, 0, 0.65);
 }
 
 .spot-plaque-surface.spot-plaque-active-buy {
@@ -597,13 +678,20 @@ html.velvet .spot-plaque-surface {
 }
 
 html.obsidian .spot-plaque-surface.spot-plaque-active-buy,
-html.velvet .spot-plaque-surface.spot-plaque-active-buy,
 html.dark .spot-plaque-surface.spot-plaque-active-buy {
   border-color: rgba(38, 166, 154, 0.62);
   box-shadow:
     0 4px 14px rgba(0, 0, 0, 0.45),
     0 0 0 1px rgba(38, 166, 154, 0.16),
     inset 0 -2px 0 rgba(38, 166, 154, 0.24);
+}
+
+html.monochrome .spot-plaque-surface.spot-plaque-active-buy {
+  border-color: rgba(255, 255, 255, 0.78);
+  box-shadow:
+    0 4px 14px rgba(0, 0, 0, 0.60),
+    0 0 0 1px rgba(255, 255, 255, 0.22),
+    inset 0 -2px 0 rgba(255, 255, 255, 0.26);
 }
 
 .spot-plaque-surface.spot-plaque-active-sell {
@@ -614,13 +702,20 @@ html.dark .spot-plaque-surface.spot-plaque-active-buy {
 }
 
 html.obsidian .spot-plaque-surface.spot-plaque-active-sell,
-html.velvet .spot-plaque-surface.spot-plaque-active-sell,
 html.dark .spot-plaque-surface.spot-plaque-active-sell {
-  border-color: rgba(249, 87, 75, 0.65);
+  border-color: rgba(239, 83, 80, 0.62);
   box-shadow:
     0 4px 14px rgba(0, 0, 0, 0.45),
-    0 0 0 1px rgba(249, 87, 75, 0.18),
-    inset 0 -2px 0 rgba(249, 87, 75, 0.24);
+    0 0 0 1px rgba(239, 83, 80, 0.16),
+    inset 0 -2px 0 rgba(239, 83, 80, 0.24);
+}
+
+html.monochrome .spot-plaque-surface.spot-plaque-active-sell {
+  border-color: rgba(180, 180, 188, 0.72);
+  box-shadow:
+    0 4px 14px rgba(0, 0, 0, 0.60),
+    0 0 0 1px rgba(180, 180, 188, 0.20),
+    inset 0 -2px 0 rgba(180, 180, 188, 0.24);
 }
 
 /* Optimal Entry Zone subtle pulse ring around spot plaques */
@@ -640,9 +735,12 @@ html.dark .spot-plaque-surface.spot-plaque-active-sell {
 }
 
 html.obsidian .spot-plaque-entry-pulse-buy::after,
-html.velvet .spot-plaque-entry-pulse-buy::after,
 html.dark .spot-plaque-entry-pulse-buy::after {
   border-color: rgba(52, 211, 153, 0.78);
+}
+
+html.monochrome .spot-plaque-entry-pulse-buy::after {
+  border-color: rgba(255, 255, 255, 0.88);
 }
 
 .spot-plaque-entry-pulse-sell::after {
@@ -650,9 +748,12 @@ html.dark .spot-plaque-entry-pulse-buy::after {
 }
 
 html.obsidian .spot-plaque-entry-pulse-sell::after,
-html.velvet .spot-plaque-entry-pulse-sell::after,
 html.dark .spot-plaque-entry-pulse-sell::after {
-  border-color: rgba(249, 87, 75, 0.8);
+  border-color: rgba(248, 113, 113, 0.78);
+}
+
+html.monochrome .spot-plaque-entry-pulse-sell::after {
+  border-color: rgba(180, 180, 188, 0.8);
 }
 
 @keyframes spot-entry-zone-pulse {
@@ -677,10 +778,15 @@ html.parchment .spot-price-3d-hero {
 }
 
 html.obsidian .spot-price-3d-hero,
-html.velvet .spot-price-3d-hero,
 html.dark .spot-price-3d-hero {
   color: #F6F4FA;
   text-shadow: 0 2px 6px rgba(0, 0, 0, 0.65);
+}
+
+html.monochrome .spot-price-3d-hero {
+  color: #FFFFFF;
+  font-weight: 800;
+  text-shadow: 0 0 20px rgba(255, 255, 255, 0.18);
 }
 
 /* Subtle tick momentum flash on spot price display */
@@ -693,13 +799,13 @@ html.dark .spot-price-3d-hero {
 }
 
 html.obsidian .spot-price-flash-up,
-html.velvet .spot-price-flash-up,
+html.monochrome .spot-price-flash-up,
 html.dark .spot-price-flash-up {
   animation: spot-tick-flash-up-dark 650ms cubic-bezier(0.22, 1, 0.36, 1) 1;
 }
 
 html.obsidian .spot-price-flash-down,
-html.velvet .spot-price-flash-down,
+html.monochrome .spot-price-flash-down,
 html.dark .spot-price-flash-down {
   animation: spot-tick-flash-down-dark 650ms cubic-bezier(0.22, 1, 0.36, 1) 1;
 }
@@ -736,10 +842,10 @@ html.dark .spot-price-flash-down {
   .spot-price-flash-up,
   .spot-price-flash-down,
   html.obsidian .spot-price-flash-up,
-  html.velvet .spot-price-flash-up,
+  html.monochrome .spot-price-flash-up,
   html.dark .spot-price-flash-up,
   html.obsidian .spot-price-flash-down,
-  html.velvet .spot-price-flash-down,
+  html.monochrome .spot-price-flash-down,
   html.dark .spot-price-flash-down {
     animation: none;
   }
@@ -754,9 +860,13 @@ html.parchment .spot-price-3d-card {
 }
 
 html.obsidian .spot-price-3d-card,
-html.velvet .spot-price-3d-card,
 html.dark .spot-price-3d-card {
   color: #F6F4FA;
+}
+
+html.monochrome .spot-price-3d-card {
+  color: #FFFFFF;
+  font-weight: 800;
 }
 
 @keyframes stocks-route-enter-next {
@@ -816,10 +926,14 @@ html.dark .spot-price-3d-card {
 }
 
 html.obsidian .card-tick-breathe-gain::after,
-html.velvet .card-tick-breathe-gain::after,
 html.dark .card-tick-breathe-gain::after {
   box-shadow: inset 0 0 0 1.5px rgba(52, 211, 153, 0.55), 0 0 16px rgba(52, 211, 153, 0.18);
   background: radial-gradient(circle at 80% 25%, rgba(52, 211, 153, 0.16), transparent 70%);
+}
+
+html.monochrome .card-tick-breathe-gain::after {
+  box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, 0.68), 0 0 16px rgba(255, 255, 255, 0.18);
+  background: radial-gradient(circle at 80% 25%, rgba(255, 255, 255, 0.16), transparent 70%);
 }
 
 .card-tick-breathe-loss {
@@ -833,10 +947,14 @@ html.dark .card-tick-breathe-gain::after {
 }
 
 html.obsidian .card-tick-breathe-loss::after,
-html.velvet .card-tick-breathe-loss::after,
 html.dark .card-tick-breathe-loss::after {
-  box-shadow: inset 0 0 0 1.5px rgba(249, 87, 75, 0.55), 0 0 16px rgba(249, 87, 75, 0.18);
-  background: radial-gradient(circle at 80% 25%, rgba(249, 87, 75, 0.16), transparent 70%);
+  box-shadow: inset 0 0 0 1.5px rgba(248, 113, 113, 0.55), 0 0 16px rgba(248, 113, 113, 0.18);
+  background: radial-gradient(circle at 80% 25%, rgba(248, 113, 113, 0.16), transparent 70%);
+}
+
+html.monochrome .card-tick-breathe-loss::after {
+  box-shadow: inset 0 0 0 1.5px rgba(180, 180, 188, 0.62), 0 0 14px rgba(180, 180, 188, 0.16);
+  background: radial-gradient(circle at 80% 25%, rgba(180, 180, 188, 0.14), transparent 70%);
 }
 
 .card-tick-breathe-neutral {
@@ -849,9 +967,9 @@ html.dark .card-tick-breathe-loss::after {
   animation: card-breathe-halo 650ms cubic-bezier(0.22, 1, 0.36, 1) 1;
 }
 
-html.velvet .card-tick-breathe-neutral::after {
-  box-shadow: inset 0 0 0 1px rgba(249, 87, 75, 0.42);
-  background: radial-gradient(circle at 80% 25%, rgba(249, 87, 75, 0.12), transparent 70%);
+html.monochrome .card-tick-breathe-neutral::after {
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.4);
+  background: radial-gradient(circle at 80% 25%, rgba(255, 255, 255, 0.1), transparent 70%);
 }
 
 @keyframes card-breathe-scale {

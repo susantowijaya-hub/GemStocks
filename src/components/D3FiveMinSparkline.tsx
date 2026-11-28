@@ -6,6 +6,8 @@ interface D3FiveMinSparklineProps {
   width?: number;
   height?: number;
   className?: string;
+  monochrome?: boolean;
+  testId?: string;
 }
 
 function buildMonotoneSplinePaths(
@@ -67,7 +69,15 @@ function buildMonotoneSplinePaths(
 }
 
 export const D3FiveMinSparkline: React.FC<D3FiveMinSparklineProps> = React.memo(
-  ({ points, deltaPct, width = 88, height = 22, className = '' }) => {
+  ({
+    points,
+    deltaPct,
+    width = 88,
+    height = 22,
+    className = '',
+    monochrome = false,
+    testId = 'd3-24h-sparkline',
+  }) => {
     const uid = useId().replace(/:/g, '');
     const gradId = `d35m-${uid}`;
 
@@ -115,8 +125,13 @@ export const D3FiveMinSparkline: React.FC<D3FiveMinSparklineProps> = React.memo(
       return { lineD, areaD, baselineY, endX, endY, trend };
     }, [points, deltaPct, width, height]);
 
-    const strokeColor =
-      geometry.trend === 'up'
+    const strokeColor = monochrome
+      ? geometry.trend === 'up'
+        ? '#F4F4F5'
+        : geometry.trend === 'down'
+          ? '#A1A1AA'
+          : '#71717A'
+      : geometry.trend === 'up'
         ? '#16A34A'
         : geometry.trend === 'down'
           ? '#DC2626'
@@ -124,7 +139,7 @@ export const D3FiveMinSparkline: React.FC<D3FiveMinSparklineProps> = React.memo(
 
     return (
       <svg
-        data-testid="d3-5m-sparkline"
+        data-testid={testId}
         viewBox={`0 0 ${width} ${height}`}
         className={className || 'w-full h-[22px] overflow-visible'}
         preserveAspectRatio="none"
@@ -132,8 +147,8 @@ export const D3FiveMinSparkline: React.FC<D3FiveMinSparklineProps> = React.memo(
       >
         <defs>
           <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor={strokeColor} stopOpacity="0.28" />
-            <stop offset="100%" stopColor={strokeColor} stopOpacity="0.02" />
+            <stop offset="0%" stopColor={strokeColor} stopOpacity={monochrome ? '0.20' : '0.28'} />
+            <stop offset="100%" stopColor={strokeColor} stopOpacity="0.01" />
           </linearGradient>
         </defs>
 

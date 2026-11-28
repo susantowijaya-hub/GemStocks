@@ -108,19 +108,19 @@ function detectChartPalette() {
     };
   }
   const cls = document.documentElement.classList;
-  const isVelvet = cls.contains('velvet');
+  const isMonochrome = cls.contains('monochrome');
   const isObsidian = cls.contains('obsidian') || cls.contains('dark');
   const isParchment = cls.contains('parchment');
-  if (isVelvet) {
+  if (isMonochrome) {
     return {
       isDark: true,
-      textColor: '#9790AB',
-      gridColor: 'rgba(246, 244, 250, 0.045)',
-      borderColor: '#2D2842',
-      crosshairColor: 'rgba(249, 87, 75, 0.65)',
-      lineColor: '#F9574B',
-      upColor: '#34D399',
-      downColor: '#FB6B62',
+      textColor: '#D4D4D8',
+      gridColor: 'rgba(255, 255, 255, 0.06)',
+      borderColor: '#2D2D32',
+      crosshairColor: 'rgba(255, 255, 255, 0.78)',
+      lineColor: '#FFFFFF',
+      upColor: '#FFFFFF',
+      downColor: '#52525B',
     };
   }
   if (isObsidian) {

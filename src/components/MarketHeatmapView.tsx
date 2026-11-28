@@ -29,15 +29,37 @@ function getTileColors(
   changePercent: number,
   themeMode: ThemeMode
 ): { bg: string; text: string; subtext: string; border: string } {
-  const isDarkSurface = themeMode === 'obsidian' || themeMode === 'velvet';
+  const isDarkSurface = themeMode === 'obsidian' || themeMode === 'monochrome';
   const border =
-    themeMode === 'velvet'
-      ? 'rgba(13, 11, 20, 0.94)'
+    themeMode === 'monochrome'
+      ? 'rgba(0, 0, 0, 0.96)'
       : isDarkSurface
         ? 'rgba(8, 12, 20, 0.92)'
         : themeMode === 'parchment'
           ? 'rgba(244, 240, 230, 0.94)'
           : 'rgba(255, 255, 255, 0.94)';
+
+  if (themeMode === 'monochrome') {
+    if (changePercent >= 3.0) {
+      return { bg: '#FFFFFF', text: '#000000', subtext: 'rgba(0,0,0,0.82)', border };
+    }
+    if (changePercent >= 1.5) {
+      return { bg: '#D4D4D8', text: '#000000', subtext: 'rgba(0,0,0,0.80)', border };
+    }
+    if (changePercent >= 0.3) {
+      return { bg: '#71717A', text: '#FFFFFF', subtext: 'rgba(255,255,255,0.92)', border };
+    }
+    if (changePercent > -0.3) {
+      return { bg: '#3F3F46', text: '#FFFFFF', subtext: 'rgba(255,255,255,0.88)', border };
+    }
+    if (changePercent > -1.5) {
+      return { bg: '#27272A', text: '#FFFFFF', subtext: 'rgba(244,244,245,0.84)', border };
+    }
+    if (changePercent > -3.0) {
+      return { bg: '#18181B', text: '#F4F4F5', subtext: 'rgba(228,228,231,0.80)', border };
+    }
+    return { bg: '#09090B', text: '#E4E4E7', subtext: 'rgba(212,212,216,0.82)', border };
+  }
 
   if (changePercent >= 3.0) {
     return { bg: '#096B31', text: '#FFFFFF', subtext: 'rgba(255,255,255,0.92)', border };

@@ -1,6 +1,6 @@
-export type AppRoute = 'dashboard' | 'watchlist' | 'portfolio' | 'stocks' | 'heatmap' | 'news' | 'calendar' | 'ict';
+export type AppRoute = 'dashboard' | 'watchlist' | 'portfolio' | 'stocks' | 'heatmap' | 'news' | 'calendar' | 'ict' | 'journal';
 
-export type ThemeMode = 'obsidian' | 'arctic' | 'parchment' | 'velvet';
+export type ThemeMode = 'obsidian' | 'arctic' | 'parchment' | 'monochrome';
 
 export interface CandlePoint {
   t: number;
@@ -52,10 +52,24 @@ export type IctExecutionPosture =
   | 'invalidated'
   | 'missed';
 
+export type AssetSortOption = 'default' | 'change_pct' | 'volume' | 'price';
+
+export type SignalActionBadge = 'BUY NOW' | 'SELL NOW' | 'WAIT BUY' | 'WAIT SELL' | 'WAIT';
+
+export type SignalExpiredReason =
+  | 'INVALIDATED_SL'
+  | 'MISSED_TP1'
+  | 'UNFILLED_TIMEOUT'
+  | 'TIME_BARRIER';
+
 export type IctRecommendedOrderType =
+  | 'BUY NOW'
+  | 'SELL NOW'
   | 'MARKET / ZONE FILL'
   | 'BUY LIMIT'
   | 'SELL LIMIT'
+  | 'BUY STOP'
+  | 'SELL STOP'
   | 'WAIT';
 
 export interface SyncedRadarConfig {
@@ -215,6 +229,14 @@ export interface IctSignalAnalysis {
   frictionCost?: number;
   frictionLabel?: string;
   htfAligned?: boolean;
+  // Proven High-WR Clarity & Order Execution Directives
+  actionBadge?: SignalActionBadge;
+  waitWhy?: string;
+  waitAtWhere?: string;
+  orderInstruction?: string;
+  stopEntryPriceNum?: number;
+  adx14?: number;
+  firstTriggeredAtMs?: number;
 }
 
 export interface SdCandleVolumeSignal {
@@ -307,6 +329,14 @@ export interface SdCandleVolumeSignal {
   frictionCost?: number;
   frictionLabel?: string;
   htfAligned?: boolean;
+  // Proven High-WR Clarity & Order Execution Directives
+  actionBadge?: SignalActionBadge;
+  waitWhy?: string;
+  waitAtWhere?: string;
+  orderInstruction?: string;
+  stopEntryPriceNum?: number;
+  adx14?: number;
+  firstTriggeredAtMs?: number;
 }
 
 export type WatchlistCategory =
@@ -858,6 +888,10 @@ export interface PriceAlertItem {
   filledAt?: number;
   recommendedOrderType?: IctRecommendedOrderType;
   limitEntryPriceNum?: number;
+  actionBadge?: SignalActionBadge;
+  waitWhy?: string;
+  waitAtWhere?: string;
+  expiredReason?: SignalExpiredReason;
   bandarFromPhase?: BandarmologyPhase;
   bandarToPhase?: BandarmologyPhase;
   bandarScore?: number;
@@ -1189,14 +1223,16 @@ export interface UnifiedMarketPulse {
   activeFearGreed: FearGreedInfo;
 }
 
+export type CanonicalSignalStatus = 'PENDING' | 'FILLED' | 'EXPIRED' | 'TP' | 'SL';
+
 export type SignalHistoryStatus =
+  | CanonicalSignalStatus
   | 'PENDING_LIMIT'
   | 'RUNNING'
   | 'TP1_HIT'
   | 'TP2_HIT'
   | 'SL_HIT'
-  | 'BE_CLOSED'
-  | 'EXPIRED';
+  | 'BE_CLOSED';
 
 export type SignalSourceEngine =
   | 'idx_scanner'
@@ -1285,4 +1321,7 @@ export interface SignalHistoryRecord {
   rsRank?: number;
   vcpDetected?: boolean;
   sectorLeader?: boolean;
+  // Explicit Order Type & Expired Reason Audit Fields
+  orderType?: string;
+  expiredReason?: SignalExpiredReason;
 }

@@ -19,6 +19,7 @@ import { useRenderPerformance } from '../hooks/useRenderPerformance';
 import {
   AppRoute,
   Asset5mVolatility,
+  AssetSortOption,
   MarketAsset,
   NewsStory,
   PriceAlertItem,
@@ -89,11 +90,16 @@ const DashboardTickerCard: React.FC<DashboardTickerCardProps> = React.memo(
   }) => {
     const tileSignal = getAssetSignal(tile);
     const tileFearGreed = getAssetFearGreed(tile);
-    const fiveMin = useMemo(
-      () => extractFiveMinuteTrajectory(tile, volInfo),
-      [tile, volInfo]
-    );
-    const isDarkSurface = themeMode === 'obsidian' || themeMode === 'velvet';
+    const sparkline24h = useMemo(() => {
+      const series1d = tile.chartSeries?.['1D'];
+      if (Array.isArray(series1d) && series1d.length >= 2) return series1d;
+      if (Array.isArray(tile.sparklinePoints) && tile.sparklinePoints.length >= 2) {
+        return tile.sparklinePoints;
+      }
+      return extractFiveMinuteTrajectory(tile, volInfo).points;
+    }, [tile, volInfo]);
+    const isMonochrome = themeMode === 'monochrome';
+    const isDarkSurface = themeMode === 'obsidian' || themeMode === 'monochrome';
 
     const signalTextClass =
       tileSignal.direction === 'bull'
@@ -243,34 +249,35 @@ const DashboardTickerCard: React.FC<DashboardTickerCardProps> = React.memo(
           <GoogleFinanceDeltaPill changePercent={tile.changePercent} compact />
         </div>
 
-        {/* Compact 5-Minute D3 Price Trajectory Sparkline */}
-        {!isCompactCards && (
-          <div
-            data-testid="ticker-5m-sparkline-row"
-            className="mt-1 pt-1 border-t border-black/8 dark:border-white/8 w-full flex items-center justify-between gap-1.5"
-            title={`5-minute price trajectory: ${fiveMin.deltaPct >= 0 ? '+' : ''}${fiveMin.deltaPct.toFixed(2)}%`}
-          >
-            <span
-              className={`text-[9px] font-mono font-bold tabular-nums whitespace-nowrap shrink-0 ${
-                fiveMin.deltaPct > 0.005
+        {/* 24-Hour Price Trend Sparkline (clean grayscale line in Monochrome theme) */}
+        <div
+          data-testid="ticker-24h-sparkline-row"
+          className="mt-1 pt-1 border-t border-black/8 dark:border-white/8 w-full flex items-center justify-between gap-1.5"
+          title={`24-hour price trend: ${tile.changePercent >= 0 ? '+' : ''}${tile.changePercent.toFixed(2)}%`}
+        >
+          <span
+            className={`text-[9px] font-mono font-bold tabular-nums whitespace-nowrap shrink-0 ${
+              isMonochrome
+                ? 'text-[#A1A1AA]'
+                : tile.changePercent > 0.005
                   ? 'text-[#0F7638] dark:text-[#34D399]'
-                  : fiveMin.deltaPct < -0.005
+                  : tile.changePercent < -0.005
                     ? 'text-[#B91C1C] dark:text-[#F87171]'
                     : 'text-[#425466] dark:text-[#9CA3AF]'
-              }`}
-            >
-              5m {fiveMin.deltaPct >= 0 ? '+' : ''}
-              {fiveMin.deltaPct.toFixed(2)}%
-            </span>
-            <D3FiveMinSparkline
-              points={fiveMin.points}
-              deltaPct={fiveMin.deltaPct}
-              width={56}
-              height={14}
-              className="w-[56px] h-[14px] shrink-0"
-            />
-          </div>
-        )}
+            }`}
+          >
+            24h
+          </span>
+          <D3FiveMinSparkline
+            points={sparkline24h}
+            deltaPct={tile.changePercent}
+            width={68}
+            height={16}
+            monochrome={isMonochrome}
+            testId="d3-24h-sparkline"
+            className="w-[68px] h-[16px] shrink-0"
+          />
+        </div>
 
         {showVolHeatmap && volInfo && (
           <div
@@ -330,6 +337,25 @@ interface MarketDashboardViewProps {
   onScanIct?: (assetId?: string) => void;
   onScanBandar?: () => void;
   onInspectSymbol?: (yahooSymbol: string) => void;
+  assetSort?: AssetSortOption;
+  assetSortDir?: 'desc' | 'asc';
+  alertThresholdPct?: number;
+  onChangeAlertThresholdPct?: (val: number) => void;
+}
+
+function parseCompactVolume(raw?: string): number {
+  if (!raw) return 0;
+  const cleaned = raw.replace(/[$,\s]/g, '').toUpperCase();
+  const match = cleaned.match(/^(-?\d+(?:\.\d+)?)([KMBT])?/);
+  if (!match) return 0;
+  const base = parseFloat(match[1]);
+  if (!Number.isFinite(base)) return 0;
+  const suffix = match[2];
+  if (suffix === 'T') return base * 1e12;
+  if (suffix === 'B') return base * 1e9;
+  if (suffix === 'M') return base * 1e6;
+  if (suffix === 'K') return base * 1e3;
+  return base;
 }
 
 const REGION_TABS: { id: DashboardRegionTab; label: string }[] = [
@@ -372,6 +398,10 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
   onScanIct,
   onScanBandar,
   onInspectSymbol,
+  assetSort = 'default',
+  assetSortDir = 'desc',
+  alertThresholdPct = 2.0,
+  onChangeAlertThresholdPct,
 }) => {
   useRenderPerformance('MarketDashboardView');
   const [timeframe, setTimeframe] = useState<Timeframe>('1D');
@@ -428,8 +458,21 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
       return liveStatus.isLiveRunning || liveStatus.tone === 'open';
     };
 
-    const sortByPriority = (list: MarketAsset[]) =>
-      [...list].sort((a, b) => {
+    const sortList = (list: MarketAsset[]) => {
+      const dirMul = assetSortDir === 'asc' ? 1 : -1;
+      return [...list].sort((a, b) => {
+        if (assetSort === 'change_pct') {
+          const diff = (a.changePercent - b.changePercent) * dirMul;
+          if (Math.abs(diff) > 1e-6) return diff;
+        } else if (assetSort === 'volume') {
+          const va = parseCompactVolume(a.volume);
+          const vb = parseCompactVolume(b.volume);
+          const diff = (va - vb) * dirMul;
+          if (Math.abs(diff) > 1e-6) return diff;
+        } else if (assetSort === 'price') {
+          const diff = (a.price - b.price) * dirMul;
+          if (Math.abs(diff) > 1e-6) return diff;
+        }
         const ia = PRIORITY_OPEN_ORDER.indexOf(a.id);
         const ib = PRIORITY_OPEN_ORDER.indexOf(b.id);
         const ra = ia === -1 ? 999 : ia;
@@ -437,6 +480,7 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
         if (ra !== rb) return ra - rb;
         return 0;
       });
+    };
 
     const regionPool =
       regionTab === 'all'
@@ -449,7 +493,7 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
               ? assets.filter((a) => a.category === 'commodities-crypto')
               : assets.filter((a) => a.category === 'forex-yields');
 
-    const openPool = sortByPriority(regionPool.filter(isAssetOpen));
+    const openPool = sortList(regionPool.filter(isAssetOpen));
     const openSessionCount = openPool.length;
 
     const q = searchQuery.toLowerCase().trim();
@@ -462,7 +506,7 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
           a.id.toLowerCase().includes(q)
       );
       if (matchingAll.length > 0) {
-        return { snapshotAssets: sortByPriority(matchingAll).slice(0, 9), openSessionCount };
+        return { snapshotAssets: sortList(matchingAll).slice(0, 9), openSessionCount };
       }
     }
 
@@ -471,21 +515,21 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
         return { snapshotAssets: openPool.slice(0, 9), openSessionCount };
       }
       // Graceful fallback if every market in the selected region tab is closed (e.g. weekend US tab)
-      const fallback = sortByPriority(regionPool).slice(0, 6);
+      const fallback = sortList(regionPool).slice(0, 6);
       return { snapshotAssets: fallback, openSessionCount };
     }
 
     const allOrdered =
       regionTab === 'all'
-        ? sortByPriority(
+        ? sortList(
             assets.filter((a) => PRIORITY_OPEN_ORDER.includes(a.id) || a.isSnapshotTile)
           )
-        : sortByPriority(regionPool);
+        : sortList(regionPool);
     return {
-      snapshotAssets: allOrdered.length > 0 ? allOrdered.slice(0, 9) : assets.slice(0, 9),
+      snapshotAssets: allOrdered.length > 0 ? allOrdered.slice(0, 9) : sortList(assets).slice(0, 9),
       openSessionCount,
     };
-  }, [assets, regionTab, searchQuery, openSessionsOnly, now]);
+  }, [assets, regionTab, searchQuery, openSessionsOnly, now, assetSort, assetSortDir]);
 
   const regionBanner = useMemo(
     () => getRegionStatusSummary(regionTab, now),
@@ -731,6 +775,8 @@ export const MarketDashboardView: React.FC<MarketDashboardViewProps> = ({
               alerts={alerts}
               unreadCount={unreadAlertCount}
               activeAssetId={activeAsset?.id}
+              alertThresholdPct={alertThresholdPct}
+              onChangeAlertThresholdPct={onChangeAlertThresholdPct}
               onClose={() => setIsAlertDrawerOpen(false)}
               onSelectAlert={(alert) => {
                 onMarkAlertRead?.(alert.id);

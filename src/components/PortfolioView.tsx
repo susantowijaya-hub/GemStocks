@@ -30,6 +30,19 @@ import {
   TrendingUp,
   X,
 } from 'lucide-react';
+import {
+  collection,
+  deleteDoc,
+  doc,
+  getDoc,
+  getDocsFromServer,
+  onSnapshot,
+  query,
+  serverTimestamp,
+  setDoc,
+  updateDoc,
+  where,
+} from 'firebase/firestore';
 import { useAuth } from '../contexts/AuthContext';
 import { getFirebaseServices } from '../lib/firebase';
 import { OperationType, handleFirestoreError } from '../lib/firestoreErrors';
@@ -1007,10 +1020,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
       );
 
       try {
-        const [{ db }, { doc, getDoc, serverTimestamp, setDoc, updateDoc }] = await Promise.all([
-          getFirebaseServices(),
-          import('firebase/firestore'),
-        ]);
+        const { db } = await getFirebaseServices();
         const posRef = doc(db, 'users', user.uid, 'positions', safeId);
         const snap = await getDoc(posRef);
         const sharedFields = {
@@ -1034,10 +1044,22 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
             updatedAt: serverTimestamp(),
           });
         } else {
-          await updateDoc(posRef, {
-            ...sharedFields,
-            updatedAt: serverTimestamp(),
-          });
+          try {
+            await updateDoc(posRef, {
+              ...sharedFields,
+              updatedAt: serverTimestamp(),
+            });
+          } catch (updateErr) {
+            // Self-heal legacy position docs that lack createdAt or contain deprecated fields
+            await deleteDoc(posRef);
+            await setDoc(posRef, {
+              ownerId: user.uid,
+              ...sharedFields,
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            });
+            void updateErr;
+          }
         }
         syncedCloudIdsRef.current.add(safeId);
         setSyncError(null);
@@ -1062,10 +1084,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
       const posPath = `users/${user.uid}/positions/${safeId}`;
       syncedCloudIdsRef.current.delete(safeId);
       try {
-        const [{ db }, { deleteDoc, doc }] = await Promise.all([
-          getFirebaseServices(),
-          import('firebase/firestore'),
-        ]);
+        const { db } = await getFirebaseServices();
         await deleteDoc(doc(db, 'users', user.uid, 'positions', safeId));
         setLastSyncedAt(Date.now());
       } catch (err) {
@@ -1267,10 +1286,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
           return;
         }
       }
-      const [{ db }, { collection, getDocsFromServer, query, where }] = await Promise.all([
-        getFirebaseServices(),
-        import('firebase/firestore'),
-      ]);
+      const { db } = await getFirebaseServices();
       const positionsQuery = query(
         collection(db, 'users', user.uid, 'positions'),
         where('ownerId', '==', user.uid)
@@ -1313,10 +1329,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
       setSyncInProgress(true);
       setSyncError(null);
       try {
-        const [{ db }, { collection, onSnapshot, query, where }] = await Promise.all([
-          getFirebaseServices(),
-          import('firebase/firestore'),
-        ]);
+        const { db } = await getFirebaseServices();
         if (disposed) return;
 
         const path = `users/${user.uid}/positions`;

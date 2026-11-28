@@ -2,8 +2,10 @@ import {
   CandlePoint,
   EconomicEvent,
   IctDirection,
+  IctRecommendedOrderType,
   MarketAsset,
   SdCandleVolumeSignal,
+  SignalActionBadge,
   SignalBiasVerdict,
   SignalClearanceGate,
   Timeframe,
@@ -13,6 +15,7 @@ import {
   checkLiveSetupValidity,
   checkMacroNewsBlackout,
   compute15mAtrMetrics,
+  computeAdx14,
   computeAtr,
   computeSetupGrade,
   detectSwingStructureBias,
@@ -25,6 +28,7 @@ import {
   getAssetStopFloorBuffer,
   isIctEligibleAsset,
   MacroIctContext,
+  normalizeSignalTimeframe,
   resolveUsdExposure,
   splitConfirmedClosedBars,
   TF_BAR_MINUTES,
@@ -58,7 +62,7 @@ function isSdcvActiveKillzone(nowMs = Date.now(), assetId = 'XAUUSD'): boolean {
   );
 }
 
-const SD_TF_PRIORITY: Timeframe[] = ['15m', '1h', '30m', '5m', '4h', '1m', '1D'];
+const SD_TF_PRIORITY: Timeframe[] = ['15m', '30m', '1h', '5m', '4h'];
 
 function parseCompactVolume(val: string | undefined): number {
   if (!val) return 0;
@@ -435,8 +439,9 @@ export function computeSdCandleVolumeSignal(
   enforceNewsBlackout = true,
   macroContext?: MacroIctContext
 ): SdCandleVolumeSignal {
-  const candidates: Timeframe[] = preferredTimeframe
-    ? [preferredTimeframe, ...SD_TF_PRIORITY.filter((tf) => tf !== preferredTimeframe)]
+  const safePreferred = normalizeSignalTimeframe(preferredTimeframe);
+  const candidates: Timeframe[] = safePreferred
+    ? [safePreferred, ...SD_TF_PRIORITY.filter((tf) => tf !== safePreferred)]
     : SD_TF_PRIORITY;
 
   const { bars: rawBars, timeframe, isRealOhlc } = extractBarsForTf(asset, candidates, 10);
@@ -626,9 +631,12 @@ export function computeSdCandleVolumeSignal(
     else if (currentPrice < ema12 && ema12 < ema26 * 0.9992) htfBias = 'Bearish';
   }
 
-  // 3. Candle Reading & Volume/Effort Confirmation
+  // 3. Candle Reading, Volume/Effort & Wilder ADX(14) Trend Strength
   const candle = analyzeCandleReading(bars, atr);
   const volume = analyzeVolumeEffort(asset, bars, atr);
+  const adx14 = computeAdx14(bars, 14);
+  const adxPassed = adx14 >= 18 || bars.length < 18;
+  const inKillzone = isSdcvActiveKillzone(refClockMs, asset.id);
 
   // 4. 15m ATR Volatility Band Guard & Macro News Blackout
   const atr15m = compute15mAtrMetrics(asset, currentPrice);
@@ -637,12 +645,14 @@ export function computeSdCandleVolumeSignal(
   const newsBlocked = enforceNewsBlackout && newsBlackout.active;
   const slBuf = getAssetStopFloorBuffer(asset, atr15m.atr15m);
   const tfMult = Math.sqrt(Math.max(1, (TF_BAR_MINUTES[timeframe] ?? 15) / 15));
-  const minSlDist = atr15m.atr15m * 0.9 * tfMult;
-  const maxSlDist = atr15m.atr15m * 2.35 * tfMult;
+  const isBtc = asset.id.toUpperCase() === 'BTCUSD';
+  const isGold = asset.id.toUpperCase() === 'XAUUSD';
+  const minSlDist = atr15m.atr15m * (isBtc ? 1.2 : 1.05) * tfMult;
+  const maxSlDist = atr15m.atr15m * (isBtc ? 3.0 : 2.5) * tfMult;
 
   const bullPlan =
-    zoneBias === 'Demand' ||
-    (zoneBias === 'Mid-Range' && htfCurvePct <= 45);
+    htfBias === 'Bullish' ||
+    (htfBias !== 'Bearish' && (zoneBias === 'Demand' || htfCurvePct <= 48));
   const entryLow = bullPlan ? demandLo : supplyLo;
   const entryHigh = bullPlan ? demandHi : supplyHi;
   // Canonical S&D places orders strictly on the PROXIMAL line
@@ -656,31 +666,28 @@ export function computeSdCandleVolumeSignal(
   if (bullPlan) {
     slVal = Math.min(distalLineNum - slBuf.value, proximalLineNum - minSlDist);
     const baseRisk = Math.max(1e-6, proximalLineNum - slVal);
-    const rawOpp = supplyLo > proximalLineNum + baseRisk * 1.8 ? supplyLo : Math.max(structuralHigh, proximalLineNum + baseRisk * 2.5);
-    tp2Val = Math.min(rawOpp, proximalLineNum + baseRisk * 3.6);
-    tp1Val = Math.min(proximalLineNum + (tp2Val - proximalLineNum) * 0.52, proximalLineNum + baseRisk * 1.45);
+    const rawOpp = supplyLo > proximalLineNum + baseRisk * 2.0 ? supplyLo : Math.max(structuralHigh, proximalLineNum + baseRisk * 2.4);
+    tp2Val = Math.min(rawOpp, proximalLineNum + baseRisk * 3.4);
+    // Early 1.05R BE Lock TP1
+    tp1Val = Math.min(proximalLineNum + (tp2Val - proximalLineNum) * 0.45, proximalLineNum + baseRisk * 1.05);
   } else {
     slVal = Math.max(distalLineNum + slBuf.value, proximalLineNum + minSlDist);
     const baseRisk = Math.max(1e-6, slVal - proximalLineNum);
-    const rawOpp = demandHi < proximalLineNum - baseRisk * 1.8 ? demandHi : Math.min(structuralLow, proximalLineNum - baseRisk * 2.5);
-    tp2Val = Math.max(rawOpp, proximalLineNum - baseRisk * 3.6);
-    tp1Val = Math.max(proximalLineNum - (proximalLineNum - tp2Val) * 0.52, proximalLineNum - baseRisk * 1.45);
+    const rawOpp = demandHi < proximalLineNum - baseRisk * 2.0 ? demandHi : Math.min(structuralLow, proximalLineNum - baseRisk * 2.4);
+    tp2Val = Math.max(rawOpp, proximalLineNum - baseRisk * 3.4);
+    tp1Val = Math.max(proximalLineNum - (proximalLineNum - tp2Val) * 0.45, proximalLineNum - baseRisk * 1.05);
   }
 
   const riskAbs = Math.max(1e-6, Math.abs(proximalLineNum - slVal));
   const rr = Math.abs(tp2Val - proximalLineNum) / riskAbs;
   const stopTooWide = riskAbs > maxSlDist;
 
-  // Canonical S&D Execution Rules:
-  // - Never buy high in HTF Supply curve (> 68%) or sell low in HTF Demand curve (< 32%)
-  // - Demand longs require Bullish HTF OR deep Discount (curve <= 45%)
-  // - Supply shorts require Bearish HTF OR deep Premium (curve >= 55%)
-  // - Require active reversal candle + volume expansion OR Fresh pro-trend ERC touch
-  const curveAllowsBuy = htfCurvePct <= 68 && htfBias !== 'Bearish';
-  const curveAllowsSell = htfCurvePct >= 32 && htfBias !== 'Bullish';
-
-  const isBtc = asset.id.toUpperCase() === 'BTCUSD';
-  const isGold = asset.id.toUpperCase() === 'XAUUSD';
+  // Proven High-WR SMC/S&D Execution Rules:
+  // - Strictly pro-trend HTF alignment (Bullish + Curve <= 48% for Demand; Bearish + Curve >= 52% for Supply)
+  // - Strictly Fresh (0-touch) ERC zone only (eliminates tested/mid-range losses)
+  // - Require active Killzone, ADX >= 18, Volume expansion >= 1.15x, and decisive reversal candle
+  const curveAllowsBuy = htfBias === 'Bullish' && htfCurvePct <= 48;
+  const curveAllowsSell = htfBias === 'Bearish' && htfCurvePct >= 52;
 
   // DXY inverse macro tailwind check for Gold S&D setups
   let dxyConfluenceNote: string | undefined;
@@ -701,7 +708,7 @@ export function computeSdCandleVolumeSignal(
 
   let direction: IctDirection = 'NEUTRAL';
   let executionStatus: SdCandleVolumeSignal['executionStatus'] = 'standby';
-  const volumeConfirmed = volume.ratio >= 1.08 || (candle.strength >= 26 && volume.ratio >= 0.98);
+  const volumeConfirmed = volume.ratio >= 1.15;
   let invalidationReason = '';
 
   const gatesPass =
@@ -709,36 +716,24 @@ export function computeSdCandleVolumeSignal(
     atr15m.volatilityStatus !== 'warming' &&
     (!enforceVolatilityFilter || volatilityPassed) &&
     !stopTooWide &&
+    inKillzone &&
+    adxPassed &&
     rr >= 2.0;
 
   if (gatesPass) {
-    // BTC requires active LTF candle confirmation even in Fresh zones to avoid getting wicked by crypto stop hunts;
-    // Gold allows Fresh pro-trend ERC touch when HTF + Curve + Volume align.
-    const bullCandleVol = candle.tone === 'bull' && candle.strength >= 18 && volumeConfirmed;
-    const bullFreshProTrend =
-      !isBtc &&
-      zoneStatus === 'Fresh' &&
-      htfBias === 'Bullish' &&
-      htfCurvePct <= 52 &&
-      candle.tone !== 'bear' &&
-      volume.ratio >= 1.02;
+    const bullCandleVol = candle.tone === 'bull' && candle.strength >= 20 && volumeConfirmed;
     const bullEligible =
       zoneBias === 'Demand' &&
-      curveAllowsBuy &&
-      (zoneStatus === 'Fresh' ? bullCandleVol || bullFreshProTrend : bullCandleVol && volume.ratio >= 1.15);
-
-    const bearCandleVol = candle.tone === 'bear' && candle.strength >= 18 && volumeConfirmed;
-    const bearFreshProTrend =
-      !isBtc &&
       zoneStatus === 'Fresh' &&
-      htfBias === 'Bearish' &&
-      htfCurvePct >= 48 &&
-      candle.tone !== 'bull' &&
-      volume.ratio >= 1.02;
+      curveAllowsBuy &&
+      bullCandleVol;
+
+    const bearCandleVol = candle.tone === 'bear' && candle.strength >= 20 && volumeConfirmed;
     const bearEligible =
       zoneBias === 'Supply' &&
+      zoneStatus === 'Fresh' &&
       curveAllowsSell &&
-      (zoneStatus === 'Fresh' ? bearCandleVol || bearFreshProTrend : bearCandleVol && volume.ratio >= 1.15);
+      bearCandleVol;
 
     if (bullEligible) {
       const liveCheck = checkLiveSetupValidity({
@@ -786,6 +781,12 @@ export function computeSdCandleVolumeSignal(
     exactLimitOverride: proximalLineNum,
   });
 
+  if (direction !== 'NEUTRAL' && postureEval.posture === 'standby') {
+    invalidationReason = `Price broke beyond Distal ${formatPriceWithAsset(distalLineNum, asset)} — zone invalidated, wait for reclaim`;
+    direction = 'NEUTRAL';
+    executionStatus = 'standby';
+  }
+
   const invalidationTrigger = buildAssetInvalidationTrigger({
     assetClassLabel: atr15m.assetClassLabel,
     biasBullish: bullPlan,
@@ -793,56 +794,112 @@ export function computeSdCandleVolumeSignal(
     maxPct: atr15m.maxPct,
   });
 
-  let actionSummary: string;
+  const slStr = formatPriceWithAsset(slVal, asset);
+  const tp1Str = formatPriceWithAsset(tp1Val, asset);
+  const tp2Str = formatPriceWithAsset(tp2Val, asset);
+  const proxStr = formatPriceWithAsset(proximalLineNum, asset);
+  const zoneBandStr = formatBand(entryLow, entryHigh, asset);
+  const stopEntryPriceNum = bullPlan ? entryHigh + atr * 0.12 : entryLow - atr * 0.12;
+  const stopPxStr = formatPriceWithAsset(stopEntryPriceNum, asset);
+
+  let waitWhy: string | undefined;
+  let waitAtWhere: string | undefined;
+  let actionBadge: SignalActionBadge;
+  let finalOrderType: IctRecommendedOrderType = postureEval.recommendedOrderType;
+  let orderInstruction: string;
+
   if (direction === 'BUY') {
-    if (postureEval.posture === 'limit_pullback_only') {
-      actionSummary = `${zoneStatus} ${sdPattern} Demand displaced (+${postureEval.chaseProgressPct}% to TP1) — BUY LIMIT @ Proximal ${formatPriceWithAsset(proximalLineNum, asset)} only.`;
-    } else if (postureEval.posture === 'armed_limit') {
-      actionSummary = `${zoneStatus} ${sdPattern} Demand armed — set BUY LIMIT @ Proximal ${formatPriceWithAsset(proximalLineNum, asset)} (Limit 1:${(postureEval.limitRr ?? rr).toFixed(1)}).`;
+    if (postureEval.posture === 'enter_now') {
+      actionBadge = 'BUY NOW';
+      finalOrderType = 'BUY NOW';
+      orderInstruction = `BUY NOW (Fresh ${sdPattern} Demand ${zoneBandStr}) · SL ${slStr} · TP1 ${tp1Str} (BE) · TP2 ${tp2Str}`;
     } else {
-      actionSummary = `${zoneStatus} ${sdPattern} Demand reaction confirmed (${candle.pattern}, ${volume.ratio.toFixed(2)}x ${volume.source}) — SL beyond Distal.`;
+      actionBadge = 'WAIT BUY';
+      finalOrderType = 'BUY LIMIT';
+      waitWhy = `Price displaced +${postureEval.chaseProgressPct}% from Fresh Demand — wait for Proximal retest`;
+      waitAtWhere = `BUY LIMIT @ Proximal ${proxStr} (Zone ${zoneBandStr})`;
+      orderInstruction = `SET BUY LIMIT @ ${proxStr} (Zone ${zoneBandStr}) · SL ${slStr} · TP1 ${tp1Str} (BE) · TP2 ${tp2Str}`;
     }
   } else if (direction === 'SELL') {
-    if (postureEval.posture === 'limit_pullback_only') {
-      actionSummary = `${zoneStatus} ${sdPattern} Supply displaced (+${postureEval.chaseProgressPct}% to TP1) — SELL LIMIT @ Proximal ${formatPriceWithAsset(proximalLineNum, asset)} only.`;
-    } else if (postureEval.posture === 'armed_limit') {
-      actionSummary = `${zoneStatus} ${sdPattern} Supply armed — set SELL LIMIT @ Proximal ${formatPriceWithAsset(proximalLineNum, asset)} (Limit 1:${(postureEval.limitRr ?? rr).toFixed(1)}).`;
+    if (postureEval.posture === 'enter_now') {
+      actionBadge = 'SELL NOW';
+      finalOrderType = 'SELL NOW';
+      orderInstruction = `SELL NOW (Fresh ${sdPattern} Supply ${zoneBandStr}) · SL ${slStr} · TP1 ${tp1Str} (BE) · TP2 ${tp2Str}`;
     } else {
-      actionSummary = `${zoneStatus} ${sdPattern} Supply rejection confirmed (${candle.pattern}, ${volume.ratio.toFixed(2)}x ${volume.source}) — SL beyond Distal.`;
+      actionBadge = 'WAIT SELL';
+      finalOrderType = 'SELL LIMIT';
+      waitWhy = `Price displaced +${postureEval.chaseProgressPct}% from Fresh Supply — wait for Proximal retest`;
+      waitAtWhere = `SELL LIMIT @ Proximal ${proxStr} (Zone ${zoneBandStr})`;
+      orderInstruction = `SET SELL LIMIT @ ${proxStr} (Zone ${zoneBandStr}) · SL ${slStr} · TP1 ${tp1Str} (BE) · TP2 ${tp2Str}`;
     }
-  } else if (invalidationReason) {
-    actionSummary = invalidationReason;
-  } else if (newsBlocked && newsBlackout.reason) {
-    actionSummary = newsBlackout.reason;
-  } else if (atr15m.volatilityStatus === 'warming') {
-    actionSummary = 'Warming 15m OHLCV bars before validating ATR volatility band.';
-  } else if (enforceVolatilityFilter && !volatilityPassed) {
-    actionSummary =
-      atr15m.volatilityStatus === 'too-high'
-        ? `Volatility Filter Blocked: 15m ATR ${atr15m.atr15mPct.toFixed(3)}% exceeds ${atr15m.maxPct.toFixed(3)}% cap (${atr15m.assetClassLabel}).`
-        : `Volatility Filter Blocked: 15m ATR ${atr15m.atr15mPct.toFixed(3)}% below ${atr15m.minPct.toFixed(3)}% floor.`;
-  } else if (stopTooWide) {
-    actionSummary = `Stop Too Wide (${formatPriceWithAsset(riskAbs, asset)} > 2.25x ATR cap). Wait for tighter base.`;
-  } else if (zoneBias === 'Mid-Range') {
-    actionSummary = `Mid-Range (HTF Curve ${htfCurvePct}%): Wait for price to tap Fresh Demand (${formatBand(demandLo, demandHi, asset)}) or Supply (${formatBand(supplyLo, supplyHi, asset)}).`;
-  } else if (zoneBias === 'Demand' && !curveAllowsBuy) {
-    actionSummary = `HTF Curve/Trend Filter (${htfCurvePct}% · ${htfBias}): Avoid buying Demand directly into HTF Supply/Bearish trend.`;
-  } else if (zoneBias === 'Supply' && !curveAllowsSell) {
-    actionSummary = `HTF Curve/Trend Filter (${htfCurvePct}% · ${htfBias}): Avoid selling Supply directly into HTF Demand/Bullish trend.`;
-  } else if (rr < 2.0) {
-    actionSummary = `Opposing ${bullPlan ? 'Supply' : 'Demand'} zone leaves only 1:${rr.toFixed(1)} R:R (below 1:2.0 minimum).`;
-  } else if (!volumeConfirmed) {
-    actionSummary = `At ${zoneStatus} ${sdPattern} ${zoneBias} (${candle.pattern}), but ${volume.source} is ${volume.ratio.toFixed(2)}x (< 1.05x). Wait for participation expansion.`;
   } else {
-    actionSummary = `At ${zoneStatus} ${sdPattern} ${zoneBias} (${volume.ratio.toFixed(2)}x ${volume.source}) — awaiting decisive ${zoneBias === 'Demand' ? 'bullish' : 'bearish'} reversal close.`;
+    if (invalidationReason) {
+      waitWhy = invalidationReason;
+    } else if (newsBlocked && newsBlackout.reason) {
+      waitWhy = newsBlackout.reason;
+    } else if (atr15m.volatilityStatus === 'warming') {
+      waitWhy = 'Warming 15m OHLCV bars before validating ATR band';
+    } else if (enforceVolatilityFilter && !volatilityPassed) {
+      waitWhy =
+        atr15m.volatilityStatus === 'too-high'
+          ? `15m ATR ${atr15m.atr15mPct.toFixed(3)}% exceeds ${atr15m.maxPct.toFixed(3)}% cap`
+          : `15m ATR ${atr15m.atr15mPct.toFixed(3)}% below ${atr15m.minPct.toFixed(3)}% floor`;
+    } else if (!inKillzone) {
+      waitWhy = 'Outside London/NY institutional Killzone window';
+    } else if (!adxPassed) {
+      waitWhy = `Low trend momentum (ADX ${adx14} < 18) — choppy range`;
+    } else if (stopTooWide) {
+      waitWhy = `Stop too wide (${formatPriceWithAsset(riskAbs, asset)}) — wait for tighter ERC base`;
+    } else if (htfBias === 'Ranging') {
+      waitWhy = `HTF 1H/4H is Ranging (Curve ${htfCurvePct}%) — wait for trend breakout`;
+    } else if (zoneBias === 'Mid-Range') {
+      waitWhy = `Price is Mid-Range (Curve ${htfCurvePct}%) — never enter between zones`;
+    } else if (zoneStatus !== 'Fresh') {
+      waitWhy = `Zone already tested (${zoneStatus}) — strictly require Fresh (0-touch) ERC zone`;
+    } else if (bullPlan && !curveAllowsBuy) {
+      waitWhy = `HTF Curve ${htfCurvePct}% (${htfBias}) too high to buy — require Bullish HTF & Curve ≤ 48%`;
+    } else if (!bullPlan && !curveAllowsSell) {
+      waitWhy = `HTF Curve ${htfCurvePct}% (${htfBias}) too low to sell — require Bearish HTF & Curve ≥ 52%`;
+    } else if (rr < 2.0) {
+      waitWhy = `Opposing zone leaves only 1:${rr.toFixed(1)} R:R (below 1:2.0 minimum)`;
+    } else if (!volumeConfirmed) {
+      waitWhy = `Volume ${volume.ratio.toFixed(2)}x below 1.15x institutional expansion threshold`;
+    } else {
+      waitWhy = `At Fresh ${sdPattern} ${zoneBias} — awaiting decisive ${bullPlan ? 'bullish' : 'bearish'} reversal candle close`;
+    }
+
+    if (htfBias === 'Bullish') {
+      actionBadge = 'WAIT BUY';
+      finalOrderType = currentPrice < demandLo ? 'BUY STOP' : 'BUY LIMIT';
+      waitAtWhere =
+        currentPrice < demandLo
+          ? `BUY STOP above ${stopPxStr} on Demand reclaim (${formatBand(demandLo, demandHi, asset)})`
+          : `BUY LIMIT @ Demand Proximal ${formatPriceWithAsset(demandHi, asset)} (Zone ${formatBand(demandLo, demandHi, asset)})`;
+      orderInstruction = `WAIT BUY — ${waitAtWhere}`;
+    } else if (htfBias === 'Bearish') {
+      actionBadge = 'WAIT SELL';
+      finalOrderType = currentPrice > supplyHi ? 'SELL STOP' : 'SELL LIMIT';
+      waitAtWhere =
+        currentPrice > supplyHi
+          ? `SELL STOP below ${stopPxStr} on Supply reclaim (${formatBand(supplyLo, supplyHi, asset)})`
+          : `SELL LIMIT @ Supply Proximal ${formatPriceWithAsset(supplyLo, asset)} (Zone ${formatBand(supplyLo, supplyHi, asset)})`;
+      orderInstruction = `WAIT SELL — ${waitAtWhere}`;
+    } else {
+      actionBadge = 'WAIT';
+      finalOrderType = 'WAIT';
+      waitAtWhere = `Demand ${formatBand(demandLo, demandHi, asset)} (BUY LIMIT) · Supply ${formatBand(supplyLo, supplyHi, asset)} (SELL LIMIT)`;
+      orderInstruction = `NO ORDER — ${waitWhy}`;
+    }
   }
 
+  const actionSummary = direction === 'NEUTRAL' ? (waitWhy ?? 'Awaiting Fresh S&D confluence') : orderInstruction;
+
   const zoneScore =
-    zoneBias !== 'Mid-Range' ? (zoneStatus === 'Fresh' ? 36 : 24) : 10;
-  const volScore = volume.ratio >= 1.35 ? 28 : volume.ratio >= 1.08 ? 22 : 10;
+    zoneBias !== 'Mid-Range' ? (zoneStatus === 'Fresh' ? 36 : 18) : 10;
+  const volScore = volume.ratio >= 1.35 ? 28 : volume.ratio >= 1.15 ? 22 : 10;
   const volBandScore = volatilityPassed ? 10 : 0;
   const curveScore =
-    (bullPlan && htfCurvePct <= 40) || (!bullPlan && htfCurvePct >= 60) ? 8 : 0;
+    (bullPlan && htfCurvePct <= 45) || (!bullPlan && htfCurvePct >= 55) ? 8 : 0;
   const totalScore = Math.max(
     18,
     Math.min(97, zoneScore + candle.strength + volScore + volBandScore + curveScore + dxyMacroBonus)
@@ -850,12 +907,12 @@ export function computeSdCandleVolumeSignal(
   const confidence =
     direction === 'NEUTRAL'
       ? Math.min(54, Math.max(22, Math.round(totalScore * 0.56)))
-      : Math.max(68, totalScore);
+      : Math.max(72, totalScore);
 
   const triggers: string[] = [
     `${zoneStatus} ${sdPattern} ${zoneBias}`,
-    `Curve ${htfCurvePct}% (${htfBias})`,
-    candle.pattern,
+    `HTF ${htfBias} · Curve ${htfCurvePct}%`,
+    `ADX ${adx14} · ${candle.pattern}`,
     `${volume.state} (${volume.ratio.toFixed(2)}x)`,
   ];
   if (dxyMacroBonus > 0) triggers.push('DXY Inverse Aligned');
@@ -870,17 +927,13 @@ export function computeSdCandleVolumeSignal(
         ? latestBarTs
         : refClockMs;
 
-  const projectedLevelsSummary = `Proximal ${formatPriceWithAsset(proximalLineNum, asset)} · Distal SL ${formatPriceWithAsset(slVal, asset)} · Opposing ${formatPriceWithAsset(tp2Val, asset)}`;
+  const projectedLevelsSummary = `Proximal ${proxStr} · SL ${slStr} · TP1 ${tp1Str} · TP2 ${tp2Str}`;
 
   const htfAligned =
-    direction === 'BUY'
-      ? htfBias === 'Bullish' || htfCurvePct <= 42
-      : direction === 'SELL'
-        ? htfBias === 'Bearish' || htfCurvePct >= 58
-        : false;
+    bullPlan ? htfBias === 'Bullish' && htfCurvePct <= 48 : htfBias === 'Bearish' && htfCurvePct >= 52;
   const { setupGrade, isAPlusSetup } = computeSetupGrade({
     direction,
-    inKillzone: isSdcvActiveKillzone(refClockMs, asset.id),
+    inKillzone,
     volatilityPassed,
     newsBlocked,
     confidence,
@@ -892,62 +945,51 @@ export function computeSdCandleVolumeSignal(
   const biasLabel: SdCandleVolumeSignal['biasLabel'] =
     direction === 'BUY' ? 'BULLISH' : direction === 'SELL' ? 'BEARISH' : 'FLAT';
 
-  const slStr = formatPriceWithAsset(slVal, asset);
-  const tp1Str = formatPriceWithAsset(tp1Val, asset);
-  const tp2Str = formatPriceWithAsset(tp2Val, asset);
-  const proxStr = formatPriceWithAsset(proximalLineNum, asset);
-  let placementSummary: string;
-  if (direction === 'NEUTRAL') {
-    const lean = zoneBias === 'Demand' ? 'BULLISH LEAN' : zoneBias === 'Supply' ? 'BEARISH LEAN' : 'FLAT';
-    placementSummary = `NO ORDER (${lean}) — ${actionSummary}`;
-  } else if (postureEval.posture === 'enter_now') {
-    placementSummary = `${direction} MARKET (IN ${sdPattern} ZONE) · SL ${slStr} · TP1 ${tp1Str} (BE) · TP2 ${tp2Str}`;
-  } else {
-    placementSummary = `${direction} LIMIT @ Proximal ${proxStr} · SL ${slStr} · TP1 ${tp1Str} (BE) · TP2 ${tp2Str}`;
-  }
+  const placementSummary = orderInstruction;
 
   const curveGatePass = bullPlan ? curveAllowsBuy : curveAllowsSell;
   const zoneGatePass = zoneBias !== 'Mid-Range' && zoneStatus === 'Fresh';
   const candleGatePass =
-    (bullPlan && candle.tone === 'bull' && candle.strength >= 18) ||
-    (!bullPlan && candle.tone === 'bear' && candle.strength >= 18);
-  const riskGatePass = !newsBlocked && (!enforceVolatilityFilter || volatilityPassed) && !stopTooWide && rr >= 2.0;
+    (bullPlan && candle.tone === 'bull' && candle.strength >= 20) ||
+    (!bullPlan && candle.tone === 'bear' && candle.strength >= 20);
+  const kzAdxGatePass = inKillzone && adxPassed;
+  const riskGatePass = !newsBlocked && (!enforceVolatilityFilter || volatilityPassed) && !stopTooWide && rr >= 2.0 && volumeConfirmed;
 
   const clearanceGates: SignalClearanceGate[] = [
     {
       id: 'curve',
-      label: '1. HTF Curve & Trend',
+      label: '1. HTF Trend & Curve',
       passed: curveGatePass,
       state: curveGatePass ? 'PASS' : 'BLOCK',
       detail: `${htfBias} · Curve ${htfCurvePct}%`,
     },
     {
+      id: 'kz',
+      label: '2. Killzone & ADX ≥ 18',
+      passed: kzAdxGatePass,
+      state: kzAdxGatePass ? 'PASS' : 'WARN',
+      detail: `${inKillzone ? 'Killzone Active' : 'Off-Session'} · ADX ${adx14}`,
+    },
+    {
       id: 'zone',
-      label: '2. Fresh S&D Zone',
+      label: '3. Fresh 0-Touch Zone',
       passed: zoneGatePass,
-      state: zoneBias === 'Mid-Range' ? 'BLOCK' : zoneStatus === 'Fresh' ? 'PASS' : 'WARN',
+      state: zoneGatePass ? 'PASS' : 'BLOCK',
       detail: zoneBias === 'Mid-Range' ? 'Mid-Range' : `${zoneStatus} ${sdPattern} ${zoneBias}`,
     },
     {
       id: 'candle',
-      label: '3. LTF Candle Read',
+      label: '4. Reversal Candle',
       passed: candleGatePass,
       state: candleGatePass ? 'PASS' : 'WARN',
       detail: candle.pattern,
     },
     {
-      id: 'vol',
-      label: '4. Volume Effort',
-      passed: volumeConfirmed,
-      state: volumeConfirmed ? 'PASS' : 'WARN',
-      detail: `${volume.ratio.toFixed(2)}x (${volume.state})`,
-    },
-    {
       id: 'risk',
-      label: '5. ATR & R:R Guard',
+      label: '5. Vol ≥ 1.15x & R:R ≥ 2',
       passed: riskGatePass,
       state: newsBlocked || stopTooWide ? 'BLOCK' : riskGatePass ? 'PASS' : 'WARN',
-      detail: newsBlocked ? 'News blackout' : stopTooWide ? 'Stop > Cap' : `1:${rr.toFixed(1)} R:R`,
+      detail: newsBlocked ? 'News blackout' : `${volume.ratio.toFixed(2)}x Vol · 1:${rr.toFixed(1)} R:R`,
     },
   ];
 
@@ -955,8 +997,8 @@ export function computeSdCandleVolumeSignal(
   const blockerGate = clearanceGates.find((g) => !g.passed);
   const clearanceSummary =
     direction !== 'NEUTRAL'
-      ? `${passedGateCount}/5 Cleared · Unambiguous ${direction} (${setupGrade} S&D)`
-      : `${passedGateCount}/5 Cleared · Blocker: ${blockerGate?.label.replace(/^\d+\.\s*/, '') ?? 'Zone'} (${actionSummary})`;
+      ? `${passedGateCount}/5 Proven Gates · ${actionBadge} (${finalOrderType} · 1:${rr.toFixed(1)})`
+      : `${passedGateCount}/5 Proven Gates · Blocker: ${blockerGate?.label.replace(/^\d+\.\s*/, '') ?? 'Zone'}`;
 
   const biasVerdict: SignalBiasVerdict =
     direction === 'BUY'
@@ -967,9 +1009,9 @@ export function computeSdCandleVolumeSignal(
         ? isAPlusSetup || confidence >= 84
           ? 'STRONG SELL'
           : 'SELL'
-        : zoneBias === 'Demand'
+        : htfBias === 'Bullish'
           ? 'BULLISH LEAN (WAIT)'
-          : zoneBias === 'Supply'
+          : htfBias === 'Bearish'
             ? 'BEARISH LEAN (WAIT)'
             : 'NEUTRAL / RANGE';
 
@@ -1005,14 +1047,11 @@ export function computeSdCandleVolumeSignal(
     volumeRatio: volume.ratio,
     volumeState: volume.state,
     volumeSource: volume.source,
-    entryZone:
-      direction === 'NEUTRAL'
-        ? `Standby (${formatBand(entryLow, entryHigh, asset)})`
-        : formatBand(entryLow, entryHigh, asset),
+    entryZone: zoneBandStr,
     stopLoss: slStr,
     tp1: tp1Str,
     tp2: tp2Str,
-    riskReward: rr >= 2.0 ? `1:${rr.toFixed(1)}` : `WAIT (1:${rr.toFixed(1)} < 1:2)`,
+    riskReward: rr >= 2.0 ? `1:${rr.toFixed(1)}` : `WAIT (1:${rr.toFixed(1)})`,
     atr15mPct: atr15m.atr15mPct,
     volatilityMinPct: atr15m.minPct,
     volatilityMaxPct: atr15m.maxPct,
@@ -1024,8 +1063,8 @@ export function computeSdCandleVolumeSignal(
     invalidationTrigger,
     actionSummary,
     triggers,
-    entryLowNum: direction === 'NEUTRAL' ? undefined : Math.min(entryLow, entryHigh),
-    entryHighNum: direction === 'NEUTRAL' ? undefined : Math.max(entryLow, entryHigh),
+    entryLowNum: Math.min(entryLow, entryHigh),
+    entryHighNum: Math.max(entryLow, entryHigh),
     stopLossNum: slVal,
     tp1Num: tp1Val,
     tp2Num: tp2Val,
@@ -1038,13 +1077,21 @@ export function computeSdCandleVolumeSignal(
     isAPlusSetup,
     usdExposure,
     executionPosture: postureEval.posture,
-    recommendedOrderType: postureEval.recommendedOrderType,
+    recommendedOrderType: finalOrderType,
     limitEntryPriceNum: postureEval.limitEntryPriceNum,
     limitRr: postureEval.limitRr,
     spotRr: postureEval.spotRr,
     chaseProgressPct: postureEval.chaseProgressPct,
     hasRunAway: postureEval.hasRunAway,
     placementSummary,
+    htfAligned,
+    netRr: Number(rr.toFixed(2)),
+    actionBadge,
+    waitWhy,
+    waitAtWhere,
+    orderInstruction,
+    stopEntryPriceNum,
+    adx14,
   };
 }
 

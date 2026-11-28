@@ -72,6 +72,7 @@ const BOOTSTRAP_CACHE_KEY = 'stocks-bootstrap-cache-v1';
 const BOOTSTRAP_MAX_AGE_MS = 2 * 60 * 60 * 1000;
 const WS_CONNECT_TIMEOUT_MS = 10_000;
 const BOOTSTRAP_TIMEOUT_MS = 10_000;
+const STRICT_WS_IDS = new Set<string>(['XAUUSD', 'BTCUSD']);
 
 interface BootstrapCachePayload {
   savedAt: number;
@@ -430,13 +431,8 @@ export function useLiveMarket() {
             const patch = patchMap.get(asset.id as 'BTCUSD' | 'XAUUSD' | 'DXY');
             if (!patch || !Number.isFinite(patch.price) || patch.price <= 0) return asset;
 
-            // Preserve active /ws/priority-radar ticks if a socket tick arrived within 3s
-            if (
-              asset.id === 'BTCUSD' ||
-              asset.id === 'XAUUSD' ||
-              asset.id === 'DXY' ||
-              asset.id === 'ETHUSD'
-            ) {
+            // Preserve active /ws/priority-radar ticks strictly for XAU/USD and BTC/USD if fresh (<3s)
+            if (STRICT_WS_IDS.has(asset.id)) {
               const lastWs = lastWsTickAtRef.current[asset.id] ?? 0;
               if (Date.now() - lastWs < 3000) {
                 return asset;
@@ -561,12 +557,9 @@ export function useLiveMarket() {
           prev.map((asset) => {
             const patch = patchMap.get(asset.id);
             if (!patch) return asset;
-            // Preserve live /ws/priority-radar ticks for BTC/XAU/DXY/ETH so REST quotes never ping-pong
+            // Preserve live /ws/priority-radar ticks strictly for XAU/USD & BTC/USD so REST polling never ping-pongs
             const wsFresh =
-              (asset.id === 'BTCUSD' ||
-                asset.id === 'XAUUSD' ||
-                asset.id === 'DXY' ||
-                asset.id === 'ETHUSD') &&
+              STRICT_WS_IDS.has(asset.id) &&
               Date.now() - (lastWsTickAtRef.current[asset.id] ?? 0) < 5500;
 
             const sessionOpen = patch.marketSessionOpen !== false;
@@ -958,34 +951,38 @@ export function useLiveMarket() {
   }, [activateCachedLocalFallback]);
 
   // Priority-Based Data Stream Architecture:
-  // - Tier 1 (High-Frequency): XAU/USD & BTC/USD (+ DXY/ETH) via dedicated /ws/priority-radar WebSocket (with 2.5s HTTP failover)
-  // - Tier 2 (Throttled Background Sync): Broad market quotes (4s), stocks movers (12s), heatmap (30s), news/FX (60s), intel (75s), summary (90s)
+  // - Tier 1 (High-Frequency WebSocket): Strictly XAU/USD & BTC/USD via /ws/priority-radar (with 10s timeout + HTTP failover)
+  // - Tier 2 (Throttled Background Polling): Non-critical assets (indices, DXY, ETH, FX, stocks, heatmap, news, intel, summary)
   useEffect(() => {
     let isTabHidden =
       typeof document !== 'undefined' ? document.visibilityState === 'hidden' : false;
     let lastBackgroundPollAt = 0;
 
-    // T=0: Tier-1 Priority Radar + initial core quotes & FX snapshot
+    // T=0: Immediate Tier-1 Priority Radar snapshot (XAU/BTC) so hero widgets never block on broad polling
     void refreshPriorityRadar(true);
-    void refreshQuotes(true);
-    void refreshFxRates(true);
 
-    // T=450ms: Tier-2 Stocks movers & live news/calendar after initial interactive paint
+    // T=600ms: Throttled Background Sync boot for non-critical asset quotes & FX rates
+    const t0 = window.setTimeout(() => {
+      void refreshQuotes(true);
+      void refreshFxRates(true);
+    }, 600);
+
+    // T=1200ms: Tier-2 Stocks movers & live news/calendar after initial interactive paint
     const t1 = window.setTimeout(() => {
       void refreshStocks(true);
       void refreshSecondaryFeeds(true);
-    }, 450);
+    }, 1200);
 
-    // T=900ms: Dashboard market intelligence panel
+    // T=2000ms: Dashboard market intelligence panel
     const t2 = window.setTimeout(() => {
       void fetchMarketIntelligence(true);
-    }, 900);
+    }, 2000);
 
-    // T=1600ms: Heavy secondary analytics (heatmap, 24h summary) deferred past initial interactive budget
+    // T=2800ms: Heavy secondary analytics (heatmap, 24h summary) deferred well past initial interactive budget
     const t3 = window.setTimeout(() => {
       void refreshHeatmap(true);
       void fetchDailySummary(true);
-    }, 1600);
+    }, 2800);
 
     const handleVisibilityChange = () => {
       if (typeof document === 'undefined') return;
@@ -1016,14 +1013,14 @@ export function useLiveMarket() {
         return;
       }
       void refreshPriorityRadar(false);
-    }, 2_500);
+    }, 3_000);
 
-    // Tier-2 Throttled Background Sync for non-priority markets (4s open, 60s closed, 20s tab hidden)
+    // Tier-2 Throttled Background Polling for non-critical markets (10s open, 60s closed, 30s tab hidden)
     const quoteTimer = window.setInterval(() => {
       if (!isPulseRef.current) return;
       const now = Date.now();
       if (isTabHidden) {
-        if (now - lastBackgroundPollAt >= 20_000) {
+        if (now - lastBackgroundPollAt >= 30_000) {
           lastBackgroundPollAt = now;
           void refreshPriorityRadar(false);
           void refreshQuotes(false);
@@ -1038,19 +1035,19 @@ export function useLiveMarket() {
         lastClosedPollAtRef.current = now;
         void refreshQuotes(false);
       }
-    }, 4_000);
+    }, 10_000);
 
     const stocksTimer = window.setInterval(() => {
       if (isPulseRef.current && !isTabHidden) {
         void refreshStocks(false);
       }
-    }, 12_000);
+    }, 20_000);
 
     const heatmapTimer = window.setInterval(() => {
       if (isPulseRef.current && !isTabHidden) {
         void refreshHeatmap(false);
       }
-    }, 30_000);
+    }, 45_000);
 
     const secondaryTimer = window.setInterval(() => {
       if (isPulseRef.current && !isTabHidden) {
@@ -1063,18 +1060,19 @@ export function useLiveMarket() {
       if (isPulseRef.current && !isTabHidden) {
         void fetchMarketIntelligence(false);
       }
-    }, 75_000);
+    }, 90_000);
 
     const dailySummaryTimer = window.setInterval(() => {
       if (isPulseRef.current && !isTabHidden) {
         void fetchDailySummary(false);
       }
-    }, 90_000);
+    }, 120_000);
 
     return () => {
       if (typeof document !== 'undefined') {
         document.removeEventListener('visibilitychange', handleVisibilityChange);
       }
+      window.clearTimeout(t0);
       window.clearTimeout(t1);
       window.clearTimeout(t2);
       window.clearTimeout(t3);
@@ -1337,31 +1335,34 @@ export function useLiveMarket() {
         const socket = new WebSocket(wsUrl);
         ws = socket;
 
-        // 10-second WebSocket handshake timeout safeguard:
-        // If WS stalls in CONNECTING > 10s, immediately fall back to cached local data + HTTP priority failover
+        let receivedFirstPriorityTick = false;
+
+        // 10-second WebSocket handshake + first-tick liveness timeout safeguard:
+        // If WS stalls in CONNECTING OR opens without delivering a live XAU/BTC tick within 10s,
+        // force an immediate fallback to cached snapshots + HTTP priority failover to prevent initialization hangs.
         connectTimeoutTimer = window.setTimeout(() => {
           connectTimeoutTimer = null;
           if (isDisposed || socket !== ws) return;
-          if (socket.readyState === WebSocket.CONNECTING) {
+          if (socket.readyState === WebSocket.CONNECTING || !receivedFirstPriorityTick) {
             setWsTimedOut(true);
             setWsConnected(false);
             setPriorityStreamStatus('http-fallback');
             activateCachedLocalFallback();
             void refreshPriorityRadar(true);
-            try {
-              socket.close();
-            } catch {
-              // ignore close error on hung handshake
+            if (socket.readyState === WebSocket.CONNECTING) {
+              try {
+                socket.close();
+              } catch {
+                // ignore close error on hung handshake
+              }
             }
           }
         }, WS_CONNECT_TIMEOUT_MS);
 
         socket.onopen = () => {
-          clearConnectTimeout();
           if (isDisposed || socket !== ws) return;
           setWsConnected(true);
           setWsTimedOut(false);
-          setCachedFallbackActive(false);
           setPriorityStreamStatus('ws-live');
           attempts = 0;
         };
@@ -1377,25 +1378,31 @@ export function useLiveMarket() {
             const nowTick = Date.now();
             if (payload.type === 'snapshot' && Array.isArray(payload.quotes)) {
               for (const q of payload.quotes) {
-                if (q && q.id && Number.isFinite(q.price) && q.price > 0) {
+                if (q && STRICT_WS_IDS.has(q.id) && Number.isFinite(q.price) && q.price > 0) {
                   lastWsTickAtRef.current[q.id] = nowTick;
                   pendingTicks.set(q.id, q);
                 }
               }
               if (pendingTicks.size > 0) {
+                receivedFirstPriorityTick = true;
+                clearConnectTimeout();
                 setFeedsLive(true);
                 setCachedFallbackActive(false);
+                setWsTimedOut(false);
                 setLastWsTickState(nowTick);
                 scheduleFlush(true);
               }
               return;
             }
-            if (payload.type === 'tick' && payload.quote && payload.quote.id) {
+            if (payload.type === 'tick' && payload.quote && STRICT_WS_IDS.has(payload.quote.id)) {
               const q = payload.quote;
               if (!Number.isFinite(q.price) || q.price <= 0) return;
+              receivedFirstPriorityTick = true;
+              clearConnectTimeout();
               lastWsTickAtRef.current[q.id] = nowTick;
               setFeedsLive(true);
               setCachedFallbackActive(false);
+              setWsTimedOut(false);
               setLastWsTickState(nowTick);
               pendingTicks.set(q.id, q);
               scheduleFlush(false);

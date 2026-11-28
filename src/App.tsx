@@ -21,6 +21,7 @@ import { useSwipeNavigation } from './hooks/useSwipeNavigation';
 import { useTheme } from './hooks/useTheme';
 import {
   AppRoute,
+  AssetSortOption,
   CalendarCatalyst,
   ChartTradeOverlays,
   NewsStory,
@@ -45,6 +46,9 @@ const MarketHeatmapView = lazyWithRetry(() =>
 const IctRadarView = lazyWithRetry(() =>
   import('./components/IctRadarView').then((m) => ({ default: m.IctRadarView }))
 );
+const SignalJournalView = lazyWithRetry(() =>
+  import('./components/SignalJournalView').then((m) => ({ default: m.SignalJournalView }))
+);
 const NewsFeedView = lazyWithRetry(() =>
   import('./components/NewsFeedView').then((m) => ({ default: m.NewsFeedView }))
 );
@@ -67,7 +71,7 @@ const PriceAlertToastStack = lazyWithRetry(() =>
   import('./components/PriceAlertOverlay').then((m) => ({ default: m.PriceAlertToastStack }))
 );
 
-const VALID_ROUTES: AppRoute[] = ['dashboard', 'watchlist', 'portfolio', 'stocks', 'heatmap', 'ict', 'news', 'calendar'];
+const VALID_ROUTES: AppRoute[] = ['dashboard', 'watchlist', 'portfolio', 'stocks', 'heatmap', 'ict', 'journal', 'news', 'calendar'];
 
 const ROUTE_SHORT_LABELS: Record<AppRoute, string> = {
   dashboard: 'Markets',
@@ -76,6 +80,7 @@ const ROUTE_SHORT_LABELS: Record<AppRoute, string> = {
   stocks: 'Stocks',
   heatmap: 'Heatmap',
   ict: 'ICT Radar',
+  journal: 'Journal',
   news: 'News',
   calendar: 'Calendar',
 };
@@ -92,9 +97,14 @@ function getInitialSyncedRadarConfig(): SyncedRadarConfig {
       const raw = window.localStorage.getItem('stocks-ict-radar-prefs-v1');
       if (raw) {
         const parsed = JSON.parse(raw) as Partial<SyncedRadarConfig>;
+        const safeTf: Timeframe =
+          parsed.timeframe &&
+          ['5m', '15m', '30m', '1h', '4h'].includes(parsed.timeframe)
+            ? parsed.timeframe
+            : '15m';
         return {
           strategyMode: parsed.strategyMode === 'sdcv' ? 'sdcv' : 'ict',
-          timeframe: parsed.timeframe ?? '15m',
+          timeframe: safeTf,
           enforceVolatilityFilter:
             typeof parsed.enforceVolatilityFilter === 'boolean'
               ? parsed.enforceVolatilityFilter
@@ -172,11 +182,29 @@ function StocksTerminalShell() {
   const [inspectedOverlays, setInspectedOverlays] = useState<ChartTradeOverlays | null>(null);
   const [inspectedInitialTf, setInspectedInitialTf] = useState<Timeframe | undefined>(undefined);
   const [searchQuery, setSearchQuery] = useState<string>('');
+  const [assetSort, setAssetSort] = useState<AssetSortOption>('default');
+  const [assetSortDir, setAssetSortDir] = useState<'desc' | 'asc'>('desc');
   const [isPercentMode, setIsPercentMode] = useState<boolean>(true);
   const [activeStory, setActiveStory] = useState<NewsStory | null>(null);
   const [settingsOpen, setSettingsOpen] = useState<boolean>(false);
   const [countdownSeconds, setCountdownSeconds] = useState<number>(3 * 3600 + 42 * 60 + 15);
   const lastRollRefreshRef = useRef<number>(0);
+
+  const handleChangeAssetSort = useCallback((nextSort: AssetSortOption) => {
+    if (nextSort === 'default') {
+      setAssetSort('default');
+      setAssetSortDir('desc');
+      return;
+    }
+    setAssetSort((prev) => {
+      if (prev === nextSort) {
+        setAssetSortDir((d) => (d === 'desc' ? 'asc' : 'desc'));
+        return prev;
+      }
+      setAssetSortDir('desc');
+      return nextSort;
+    });
+  }, []);
 
   // Priority Loading: mark dashboard interactive after first browser paint before warming non-critical views
   useEffect(() => {
@@ -203,6 +231,8 @@ function StocksTerminalShell() {
     unreadCount,
     ictPopupsEnabled,
     toggleIctPopups,
+    alertThresholdPct,
+    setAlertThresholdPct,
     volatility5mMap,
     market5mStats,
     dismissToast,
@@ -221,6 +251,9 @@ function StocksTerminalShell() {
     activeBySymbol: activeSignalBySymbol,
     stats: signalHistoryStats,
     cloudSynced: signalCloudSynced,
+    cloudEngineStatus,
+    triggerCloudScan,
+    refreshSignalDatabase,
     annotateSignal,
     applyVerificationPatch,
     isRecordConfirmedOnServer,
@@ -248,6 +281,7 @@ function StocksTerminalShell() {
     tryAcquireSignalWriteLock,
     releaseSignalWriteLock,
     applyVerificationPatch,
+    onRemoveUnfilledSignal: deleteSignal,
   });
 
   // Sync browser hash navigation (Back/Forward on Desktop, Android, and iOS Safari)
@@ -396,6 +430,9 @@ function StocksTerminalShell() {
         onRefreshAll={refreshAll}
         onRefreshDiagnostics={refreshDiagnostics}
         onPrefetchRoute={prefetchRoute}
+        assetSort={assetSort}
+        assetSortDir={assetSortDir}
+        onChangeAssetSort={handleChangeAssetSort}
       />
 
       <main
@@ -463,6 +500,10 @@ function StocksTerminalShell() {
             onScanIct={scanIctAlerts}
             onScanBandar={scanBandarmologyAlerts}
             onInspectSymbol={(sym) => handleInspectSymbol(sym)}
+            assetSort={assetSort}
+            assetSortDir={assetSortDir}
+            alertThresholdPct={alertThresholdPct}
+            onChangeAlertThresholdPct={setAlertThresholdPct}
           />
         )}
 
@@ -477,6 +518,8 @@ function StocksTerminalShell() {
             isPercentMode={isPercentMode}
             onToggleBadgeMode={handleToggleBadgeMode}
             flashMap={flashMap}
+            assetSort={assetSort}
+            assetSortDir={assetSortDir}
           />
         )}
 
@@ -548,6 +591,8 @@ function StocksTerminalShell() {
             signalHistory={signalHistory}
             signalStats={signalHistoryStats}
             signalCloudSynced={signalCloudSynced}
+            cloudEngineStatus={cloudEngineStatus}
+            onTriggerCloudScan={triggerCloudScan}
             verificationMetrics={signalVerificationMetrics}
             onAnnotateSignal={annotateSignal}
             onDeleteSignal={deleteSignal}
@@ -559,6 +604,23 @@ function StocksTerminalShell() {
             flashMap={flashMap}
             volatility5mMap={volatility5mMap}
             searchQuery={searchQuery}
+          />
+        )}
+
+        {activeRoute === 'journal' && (
+          <SignalJournalView
+            records={signalHistory}
+            stats={signalHistoryStats}
+            cloudSynced={signalCloudSynced}
+            cloudEngineStatus={cloudEngineStatus}
+            verificationMetrics={signalVerificationMetrics}
+            onTriggerCloudScan={triggerCloudScan}
+            onRefreshDatabase={refreshSignalDatabase}
+            onAnnotateSignal={annotateSignal}
+            onDeleteSignal={deleteSignal}
+            onClearClosedSignals={clearClosedSignals}
+            onInspectSignal={handleInspectSymbol}
+            onNavigate={handleNavigate}
           />
         )}
 
@@ -613,6 +675,8 @@ function StocksTerminalShell() {
             onSelectTheme={setThemeMode}
             isPulseActive={isPulseActive}
             onTogglePulse={togglePulse}
+            alertThresholdPct={alertThresholdPct}
+            onChangeAlertThresholdPct={setAlertThresholdPct}
             onRefreshAll={refreshAll}
           />
         </Suspense>

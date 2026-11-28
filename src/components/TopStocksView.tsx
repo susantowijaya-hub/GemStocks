@@ -10,7 +10,9 @@ import {
   Building2,
   CheckCircle2,
   Clock,
+  Cloud,
   Compass,
+  ExternalLink,
   Flame,
   Globe2,
   Loader2,
@@ -51,6 +53,10 @@ import {
 } from '../utils/marketSignals';
 import {
   computeStockConfluenceExpectancyMatrix,
+  formatSignalPrice,
+  isTerminalSignalStatus,
+  isUnfilledExpiredSignal,
+  normalizeSignalStatus,
   SignalHistoryStats,
 } from '../utils/signalHistoryEngine';
 import { GoogleFinanceDeltaPill, GoogleFinanceMiniChart } from './GoogleFinanceMiniChart';
@@ -811,24 +817,25 @@ function MarketMoversSection({
                                 activeSignalBySymbol?.get(stock.symbol) ??
                                 activeSignalBySymbol?.get(`${stock.symbol}.JK`);
                               if (!tracked) return null;
-                              const isRunning =
-                                tracked.status === 'RUNNING' || tracked.status === 'TP1_HIT';
+                              const st = normalizeSignalStatus(tracked.status);
+                              const isTp = st === 'TP';
+                              const isFilled = st === 'FILLED';
                               return (
                                 <span
                                   className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-[10px] font-mono font-bold tabular-nums whitespace-nowrap ${
-                                    tracked.status === 'TP1_HIT'
+                                    isTp
                                       ? 'bg-emerald-500/15 text-emerald-800 dark:text-emerald-300 border-emerald-500/35'
-                                      : isRunning
+                                      : isFilled
                                         ? 'bg-sky-500/15 text-sky-800 dark:text-sky-300 border-sky-500/35'
                                         : 'bg-amber-500/15 text-amber-800 dark:text-amber-300 border-amber-500/35'
                                   }`}
-                                  title={`Locked signal continuity (${tracked.status})`}
+                                  title={`Locked signal continuity (${st})`}
                                 >
-                                  {tracked.status === 'TP1_HIT'
-                                    ? 'TP1 HIT'
-                                    : isRunning
-                                      ? `RUNNING ${tracked.pnlPct >= 0 ? '+' : ''}${tracked.pnlPct.toFixed(1)}%`
-                                      : 'LIMIT ARMED'}
+                                  {isTp
+                                    ? 'TP HIT'
+                                    : isFilled
+                                      ? `FILLED ${tracked.pnlPct >= 0 ? '+' : ''}${tracked.pnlPct.toFixed(1)}%`
+                                      : 'PENDING FILL'}
                                 </span>
                               );
                             })()}
@@ -1199,6 +1206,38 @@ export const TopStocksView: React.FC<TopStocksViewProps> = ({
     return filterSearchAndSetup(raw, idxCrossCtx);
   }, [idxBucket, directionFilter, searchQuery, bandarFilter, actionFilter, macroCtx, idxCrossCtx]);
 
+  const savedStockSignals = useMemo(() => {
+    const filtered = signalHistory.filter(
+      (r) =>
+        (r.assetClass === 'stock_id' || r.assetClass === 'stock_us') &&
+        !isUnfilledExpiredSignal(r) &&
+        (marketFilter === 'all' ||
+          (marketFilter === 'id' && r.assetClass === 'stock_id') ||
+          (marketFilter === 'us' && r.assetClass === 'stock_us'))
+    );
+    return filtered.sort((a, b) => {
+      const aActive = isTerminalSignalStatus(a.status) ? 0 : 1;
+      const bActive = isTerminalSignalStatus(b.status) ? 0 : 1;
+      if (aActive !== bActive) return bActive - aActive;
+      return b.createdAtMs - a.createdAtMs;
+    });
+  }, [signalHistory, marketFilter]);
+
+  const savedStockCounts = useMemo(() => {
+    let running = 0;
+    let pending = 0;
+    let tp = 0;
+    let sl = 0;
+    for (const r of savedStockSignals) {
+      const st = normalizeSignalStatus(r.status);
+      if (st === 'FILLED') running += 1;
+      else if (st === 'PENDING') pending += 1;
+      else if (st === 'TP' || r.status === 'BE_CLOSED') tp += 1;
+      else if (st === 'SL') sl += 1;
+    }
+    return { running, pending, tp, sl };
+  }, [savedStockSignals]);
+
   const combinedSignalTally = useMemo(() => {
     let bull = 0;
     let bear = 0;
@@ -1368,6 +1407,207 @@ export const TopStocksView: React.FC<TopStocksViewProps> = ({
           </div>
         )}
       </section>
+
+      {/* Cross-Device Saved Stock Signals Continuity Strip */}
+      {savedStockSignals.length > 0 && (
+        <section
+          data-testid="saved-stock-continuity-panel"
+          className="rounded-2xl liquid-glass-card p-4 flex flex-col gap-3"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <Cloud className="w-4 h-4 text-[#0071E3] dark:text-[#0A84FF] shrink-0" />
+              <h2 className="text-sm font-extrabold text-[#1C1C1E] dark:text-white">
+                Saved Stock Signals · Cross-Device Continuity
+              </h2>
+              <span className="text-[10.5px] font-mono font-bold uppercase tracking-wider px-2 py-0.5 rounded-md bg-[var(--bg-inset)] text-[var(--text-secondary)] border border-[var(--border-subtle)]">
+                {signalCloudSynced ? 'DB Synced · Live OHLCV Verified' : 'Local Continuity · Live Probed'}
+              </span>
+            </div>
+            <div className="flex flex-wrap items-center gap-1.5 text-[11px] font-mono font-bold tabular-nums">
+              {savedStockCounts.running > 0 && (
+                <span className="px-2 py-0.5 rounded-md bg-[#0071E3]/15 text-[#005BB8] dark:text-[#60A5FA]">
+                  {savedStockCounts.running} Running
+                </span>
+              )}
+              {savedStockCounts.pending > 0 && (
+                <span className="px-2 py-0.5 rounded-md bg-[#D97706]/15 text-[#B45309] dark:text-[#FBBF24]">
+                  {savedStockCounts.pending} Waiting
+                </span>
+              )}
+              {savedStockCounts.tp > 0 && (
+                <span className="px-2 py-0.5 rounded-md bg-[#16A34A]/15 text-[#0F7033] dark:text-[#4ADE80]">
+                  {savedStockCounts.tp} TP / BE
+                </span>
+              )}
+              {savedStockCounts.sl > 0 && (
+                <span className="px-2 py-0.5 rounded-md bg-[#DC2626]/15 text-[#C41C16] dark:text-[#FF6B63]">
+                  {savedStockCounts.sl} SL
+                </span>
+              )}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2.5">
+            {savedStockSignals.slice(0, 6).map((sig) => {
+              const isBuy = sig.direction === 'BUY';
+              const st = normalizeSignalStatus(sig.status);
+              const isWin = st === 'TP';
+              const isLoss = st === 'SL';
+              const isRunning = st === 'FILLED';
+              const isBe = sig.status === 'BE_CLOSED' || sig.barrierOutcome === 'BREAK_EVEN';
+              const statusLabel = isWin
+                ? 'TP WIN'
+                : isLoss
+                  ? 'SL HIT'
+                  : isBe
+                    ? 'BE CLOSED'
+                    : isRunning
+                      ? 'FILLED LIVE'
+                      : 'PENDING FILL';
+              const statusTone = isWin
+                ? 'bg-[#16A34A]/15 text-[#0F7033] dark:text-[#4ADE80] border-[#16A34A]/35'
+                : isLoss
+                  ? 'bg-[#DC2626]/15 text-[#C41C16] dark:text-[#FF6B63] border-[#DC2626]/35'
+                  : isRunning
+                    ? 'bg-[#0071E3]/15 text-[#005BB8] dark:text-[#60A5FA] border-[#0071E3]/35'
+                    : isBe
+                      ? 'bg-[#6366F1]/15 text-[#4338CA] dark:text-[#A5B4FC] border-[#6366F1]/35'
+                      : 'bg-[#D97706]/15 text-[#B45309] dark:text-[#FBBF24] border-[#D97706]/35';
+
+              const triggeredWib = new Intl.DateTimeFormat('en-GB', {
+                timeZone: 'Asia/Jakarta',
+                day: '2-digit',
+                month: 'short',
+                hour: '2-digit',
+                minute: '2-digit',
+                hour12: false,
+              }).format(new Date(sig.createdAtMs));
+
+              const currentVal = sig.closedPrice ?? sig.lastPrice;
+              const pnlTone =
+                sig.rMultiple > 0
+                  ? 'text-[#0F7033] dark:text-[#4ADE80]'
+                  : sig.rMultiple < 0
+                    ? 'text-[#C41C16] dark:text-[#FF6B63]'
+                    : 'text-[#6C6C70] dark:text-[#A1A1AA]';
+
+              const yahooSym =
+                sig.assetClass === 'stock_id' && !sig.symbol.endsWith('.JK')
+                  ? `${sig.symbol}.JK`
+                  : sig.symbol;
+
+              const openChart = () => {
+                const overlays: ChartTradeOverlays = {
+                  symbolLabel: `${sig.symbol} (${sig.timeframe})`,
+                  direction: sig.direction,
+                  entryLow: sig.entryLow,
+                  entryHigh: sig.entryHigh,
+                  stopLoss: sig.stopLoss,
+                  tp1: sig.tp1,
+                  tp2: sig.tp2,
+                };
+                if (onInspectSignal) {
+                  onInspectSignal(yahooSym, sig.assetId, overlays, sig.timeframe as Timeframe);
+                } else {
+                  onInspectSymbol?.(yahooSym);
+                }
+              };
+
+              return (
+                <div
+                  key={sig.id}
+                  onClick={openChart}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      openChart();
+                    }
+                  }}
+                  className="rounded-xl liquid-glass-inset p-3 flex flex-col gap-2 cursor-pointer hover:border-[var(--accent-primary)] transition-colors border border-transparent"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="text-sm font-black tracking-tight text-[#1C1C1E] dark:text-white">
+                          {sig.symbol}
+                        </span>
+                        <span className="text-[9.5px] font-mono font-bold uppercase px-1.5 py-0.5 rounded bg-black/5 dark:bg-white/10 text-[#4A4D57] dark:text-[#C7CBD6]">
+                          {sig.assetClass === 'stock_id' ? 'IDX' : 'US'}
+                        </span>
+                        <span
+                          className={`text-[9.5px] font-mono font-black uppercase px-1.5 py-0.5 rounded ${
+                            isBuy
+                              ? 'bg-[#16A34A]/15 text-[#0F7033] dark:text-[#4ADE80]'
+                              : 'bg-[#DC2626]/15 text-[#C41C16] dark:text-[#FF6B63]'
+                          }`}
+                        >
+                          {sig.direction}
+                        </span>
+                      </div>
+                      <div className="text-[10.5px] text-[#6C6C70] dark:text-[#9EB5C8] flex items-center gap-1 mt-0.5">
+                        <Clock className="w-3 h-3 shrink-0" />
+                        <span>Triggered {triggeredWib} WIB</span>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-col items-end gap-0.5 shrink-0">
+                      <span
+                        className={`text-[10px] font-mono font-black uppercase px-2 py-0.5 rounded-md border ${statusTone}`}
+                      >
+                        {statusLabel}
+                      </span>
+                      <span className={`text-xs font-mono font-black tabular-nums ${pnlTone}`}>
+                        {sig.rMultiple >= 0 ? '+' : ''}
+                        {sig.rMultiple.toFixed(2)}R ({sig.pnlPct >= 0 ? '+' : ''}
+                        {sig.pnlPct.toFixed(2)}%)
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-4 gap-1.5 text-[10.5px] font-mono tabular-nums pt-1 border-t border-[var(--border-divider)]">
+                    <div>
+                      <div className="text-[9px] uppercase text-[#6C6C70] dark:text-[#8E8E93]">Entry</div>
+                      <div className="font-bold text-[#1C1C1E] dark:text-white truncate">
+                        {formatSignalPrice(sig.entryPrice, sig.currency, sig.decimals)}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[9px] uppercase text-[#6C6C70] dark:text-[#8E8E93]">
+                        {isTerminalSignalStatus(sig.status) ? 'Close' : 'Live'}
+                      </div>
+                      <div className="font-bold text-[#0071E3] dark:text-[#60A5FA] truncate">
+                        {formatSignalPrice(currentVal, sig.currency, sig.decimals)}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[9px] uppercase text-[#6C6C70] dark:text-[#8E8E93]">SL</div>
+                      <div className="font-bold text-[#C41C16] dark:text-[#FF6B63] truncate">
+                        {formatSignalPrice(sig.stopLoss, sig.currency, sig.decimals)}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[9px] uppercase text-[#6C6C70] dark:text-[#8E8E93]">TP1 / TP2</div>
+                      <div className="font-bold text-[#0F7033] dark:text-[#4ADE80] truncate">
+                        {formatSignalPrice(sig.tp1, sig.currency, sig.decimals)}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between text-[10px] text-[#6C6C70] dark:text-[#9EB5C8]">
+                    <span className="truncate pr-2">{sig.strategyTag}</span>
+                    <span className="inline-flex items-center gap-0.5 font-semibold text-[#0071E3] dark:text-[#60A5FA] shrink-0">
+                      Chart <ExternalLink className="w-2.5 h-2.5" />
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      )}
 
       {/* Combined Strategy + Data Validity + Capital Survival Risk Desk */}
       <section

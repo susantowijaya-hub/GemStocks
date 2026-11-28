@@ -41,13 +41,15 @@
         try {
           var saved = localStorage.getItem('stocks-theme') || localStorage.getItem('stocks-theme-mode');
           var mode =
-            saved === 'arctic' || saved === 'parchment' || saved === 'obsidian' || saved === 'velvet'
-              ? saved
-              : 'obsidian';
+            saved === 'velvet' || saved === 'monochrome' || saved === 'mono'
+              ? 'monochrome'
+              : saved === 'arctic' || saved === 'parchment' || saved === 'obsidian'
+                ? saved
+                : 'obsidian';
           var root = document.documentElement;
-          root.classList.remove('obsidian', 'velvet', 'dark', 'arctic', 'parchment');
+          root.classList.remove('obsidian', 'velvet', 'monochrome', 'dark', 'arctic', 'parchment');
           root.classList.add(mode);
-          if (mode === 'obsidian' || mode === 'velvet') root.classList.add('dark');
+          if (mode === 'obsidian' || mode === 'monochrome') root.classList.add('dark');
         } catch (e) {}
       })();
     </script>
@@ -68,9 +70,9 @@
         background: #f4f0e6;
         color: #191815;
       }
-      html.velvet #boot-shell {
-        background: radial-gradient(ellipse 85% 42% at 50% -8%, rgba(249, 87, 75, 0.14), rgba(88, 36, 68, 0.1) 42%, transparent 74%), #0d0b14;
-        color: #f6f4fa;
+      html.monochrome #boot-shell {
+        background: #000000;
+        color: #ffffff;
       }
       .boot-bar {
         height: 56px;
@@ -89,12 +91,12 @@
         background: #fcf9f2;
         border-bottom-color: #d8cfbc;
       }
-      html.velvet .boot-bar {
-        background: #161320;
-        border-bottom-color: #2d2842;
+      html.monochrome .boot-bar {
+        background: #0a0a0b;
+        border-bottom-color: #2b2b30;
       }
-      html.velvet .boot-dot {
-        background: #f9574b;
+      html.monochrome .boot-dot {
+        background: #ffffff;
       }
       .boot-brand {
         display: flex;
@@ -170,18 +172,17 @@
         background: #fdfbf7;
         border-color: #d8cfbc;
       }
-      html.velvet .boot-card,
-      html.velvet .boot-main {
-        background: #161320;
-        border-color: #2d2842;
+      html.monochrome .boot-card,
+      html.monochrome .boot-main {
+        background: #0a0a0b;
+        border-color: #2b2b30;
       }
-      html.velvet .boot-card::after,
-      html.velvet .boot-main::after {
+      html.monochrome .boot-card::after,
+      html.monochrome .boot-main::after {
         background: linear-gradient(
           90deg,
           transparent 0%,
-          rgba(249, 87, 75, 0.12) 45%,
-          rgba(255, 255, 255, 0.06) 55%,
+          rgba(255, 255, 255, 0.09) 50%,
           transparent 100%
         );
       }

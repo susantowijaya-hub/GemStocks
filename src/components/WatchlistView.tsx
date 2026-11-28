@@ -12,6 +12,7 @@ import {
 import { CATEGORY_META } from '../data/marketData';
 import {
   AppRoute,
+  AssetSortOption,
   MarketAsset,
   WatchlistCategory,
 } from '../types/market';
@@ -37,6 +38,23 @@ interface WatchlistViewProps {
   isPercentMode: boolean;
   onToggleBadgeMode: () => void;
   flashMap: Record<string, 'gain' | 'loss'>;
+  assetSort?: AssetSortOption;
+  assetSortDir?: 'desc' | 'asc';
+}
+
+function parseWatchlistVolume(raw?: string): number {
+  if (!raw) return 0;
+  const cleaned = raw.replace(/[$,\s]/g, '').toUpperCase();
+  const match = cleaned.match(/^(-?\d+(?:\.\d+)?)([KMBT])?/);
+  if (!match) return 0;
+  const base = parseFloat(match[1]);
+  if (!Number.isFinite(base)) return 0;
+  const suffix = match[2];
+  if (suffix === 'T') return base * 1e12;
+  if (suffix === 'B') return base * 1e9;
+  if (suffix === 'M') return base * 1e6;
+  if (suffix === 'K') return base * 1e3;
+  return base;
 }
 
 type CategoryFilter = 'all' | WatchlistCategory;
@@ -52,6 +70,8 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
   isPercentMode,
   onToggleBadgeMode,
   flashMap,
+  assetSort = 'default',
+  assetSortDir = 'desc',
 }) => {
   const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>('all');
   const [signalFilter, setSignalFilter] = useState<SignalFilter>('all');
@@ -81,7 +101,7 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
 
   const filteredAssets = useMemo(() => {
     const q = searchQuery.toLowerCase().trim();
-    return assets.filter((a) => {
+    const matched = assets.filter((a) => {
       const matchCat = categoryFilter === 'all' || a.category === categoryFilter;
       const sig = getAssetSignal(a);
       const matchSignal =
@@ -97,7 +117,22 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
         a.categoryLabel.toLowerCase().includes(q);
       return matchCat && matchSignal && matchSearch;
     });
-  }, [assets, categoryFilter, signalFilter, searchQuery]);
+
+    if (assetSort === 'default') return matched;
+    const dirMul = assetSortDir === 'asc' ? 1 : -1;
+    return [...matched].sort((a, b) => {
+      if (assetSort === 'change_pct') {
+        return (a.changePercent - b.changePercent) * dirMul;
+      }
+      if (assetSort === 'volume') {
+        return (parseWatchlistVolume(a.volume) - parseWatchlistVolume(b.volume)) * dirMul;
+      }
+      if (assetSort === 'price') {
+        return (a.price - b.price) * dirMul;
+      }
+      return 0;
+    });
+  }, [assets, categoryFilter, signalFilter, searchQuery, assetSort, assetSortDir]);
 
   const activeAsset = useMemo(
     () => assets.find((a) => a.id === selectedAssetId) ?? assets[0],

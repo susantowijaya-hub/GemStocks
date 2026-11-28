@@ -191,10 +191,10 @@ export const GoogleFinanceDeltaPill: React.FC<GoogleFinanceDeltaPillProps> = Rea
   return (
     <span className="inline-flex items-center gap-1.5 font-mono tabular-nums">
       <span
-        className={`${compact ? 'text-[11px]' : 'text-xs sm:text-sm'} font-extrabold ${
+        className={`${compact ? 'text-xs' : 'text-[13px] sm:text-[15px]'} font-extrabold tracking-tight ${
           isGain
-            ? 'text-[#0F7033] dark:text-[#4ADE80]'
-            : 'text-[#C41C16] dark:text-[#FF6B63]'
+            ? 'text-[#0F7033] dark:text-[#4ADE80] monochrome:text-white'
+            : 'text-[#C41C16] dark:text-[#FF6B63] monochrome:text-[#E4E4E7]'
         }`}
       >
         {text}
@@ -204,8 +204,8 @@ export const GoogleFinanceDeltaPill: React.FC<GoogleFinanceDeltaPillProps> = Rea
           compact ? 'w-4 h-4' : 'w-6 h-4'
         } ${
           isGain
-            ? 'bg-[#22C55E]/22 dark:bg-[#4ADE80] text-[#0B4F24] dark:text-[#052E14]'
-            : 'bg-[#EF4444]/20 dark:bg-[#FF6B63] text-[#7F1D1D] dark:text-[#2D0606]'
+            ? 'bg-[#22C55E]/22 dark:bg-[#4ADE80] monochrome:bg-white text-[#0B4F24] dark:text-[#052E14] monochrome:text-black'
+            : 'bg-[#EF4444]/20 dark:bg-[#FF6B63] monochrome:bg-black monochrome:border monochrome:border-white/75 text-[#7F1D1D] dark:text-[#2D0606] monochrome:text-white'
         }`}
       >
         {isGain ? (

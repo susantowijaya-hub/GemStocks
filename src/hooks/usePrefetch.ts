@@ -15,17 +15,19 @@ const ROUTE_CHUNK_LOADERS: Partial<Record<AppRoute, RouteChunkLoader>> = {
   news: () => import('../components/NewsFeedView'),
   calendar: () => import('../components/EconomicCalendarView'),
   ict: () => import('../components/IctRadarView'),
+  journal: () => import('../components/SignalJournalView'),
 };
 
 const ADJACENT_ROUTES: Record<AppRoute, AppRoute[]> = {
-  dashboard: ['watchlist', 'ict', 'stocks'],
+  dashboard: ['watchlist', 'ict', 'journal'],
   watchlist: ['dashboard', 'portfolio', 'ict'],
-  portfolio: ['watchlist', 'stocks', 'dashboard'],
-  stocks: ['heatmap', 'portfolio', 'dashboard'],
+  portfolio: ['watchlist', 'stocks', 'journal'],
+  stocks: ['journal', 'heatmap', 'portfolio'],
   heatmap: ['stocks', 'news', 'dashboard'],
-  news: ['calendar', 'ict', 'dashboard'],
+  news: ['calendar', 'ict', 'journal'],
   calendar: ['news', 'ict', 'dashboard'],
-  ict: ['watchlist', 'dashboard', 'calendar'],
+  ict: ['journal', 'stocks', 'dashboard'],
+  journal: ['ict', 'stocks', 'portfolio'],
 };
 
 const ROUTE_DATA_ENDPOINTS: Partial<Record<AppRoute, string[]>> = {
@@ -36,7 +38,8 @@ const ROUTE_DATA_ENDPOINTS: Partial<Record<AppRoute, string[]>> = {
   heatmap: ['/api/market/heatmap'],
   news: ['/api/news/feed', '/api/market/daily-summary'],
   calendar: ['/api/calendar/events'],
-  ict: ['/api/market/quotes', '/api/fx/rates'],
+  ict: ['/api/market/quotes', '/api/signals/cloud'],
+  journal: ['/api/signals/cloud'],
 };
 
 function warmEndpoint(url: string): void {
@@ -108,6 +111,7 @@ export function usePrefetch(activeRoute: AppRoute, priorityReady: boolean) {
         ...adjacent,
         'watchlist',
         'ict',
+        'journal',
         'stocks',
         'portfolio',
         'heatmap',

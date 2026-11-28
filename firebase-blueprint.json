@@ -342,8 +342,8 @@
         },
         "status": {
           "type": "string",
-          "description": "Current continuous signal lifecycle status.",
-          "enum": ["PENDING_LIMIT", "RUNNING", "TP1_HIT", "TP2_HIT", "SL_HIT", "BE_CLOSED", "EXPIRED"],
+          "description": "Canonical signal lifecycle status (PENDING, FILLED, EXPIRED, TP, SL) validated server-side against real-time ticks.",
+          "enum": ["PENDING", "FILLED", "EXPIRED", "TP", "SL", "PENDING_LIMIT", "RUNNING", "TP1_HIT", "TP2_HIT", "SL_HIT", "BE_CLOSED"],
           "maxLength": 16
         },
         "filledOnFirstSight": {
@@ -504,6 +504,17 @@
         "sectorLeader": {
           "type": "boolean",
           "description": "Whether the stock belonged to a Top-3 leading sector in its market at lock."
+        },
+        "orderType": {
+          "type": "string",
+          "description": "Recommended order type at signal lock (e.g. BUY NOW, SELL LIMIT, BUY STOP).",
+          "maxLength": 24
+        },
+        "expiredReason": {
+          "type": "string",
+          "description": "Explicit reason why an EXPIRED signal ended (invalidation vs unfilled).",
+          "enum": ["INVALIDATED_SL", "MISSED_TP1", "UNFILLED_TIMEOUT", "TIME_BARRIER"],
+          "maxLength": 24
         },
         "createdAt": {
           "type": "string",

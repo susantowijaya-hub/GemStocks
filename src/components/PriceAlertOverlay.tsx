@@ -126,16 +126,17 @@ export const PriceAlertToastStack: React.FC<{
                       {isBandar
                         ? 'IDX Bandar'
                         : isIct
-                          ? `${toast.ictStrategy === 'sdcv' ? 'S&D' : 'ICT'} ${toast.ictAction ?? 'WAIT'}`
+                          ? toast.actionBadge ?? `${toast.ictStrategy === 'sdcv' ? 'S&D' : 'ICT'} ${toast.ictAction ?? 'WAIT'}`
                           : '5m Alert'}
                     </span>
-                    {isIct && toast.ictStage && (
+                    {isIct && (toast.recommendedOrderType || toast.ictStage) && (
                       <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-black/5 dark:bg-white/10 text-[#4A4D57] dark:text-[#C7CBD6] whitespace-nowrap">
-                        {toast.ictStage === 'triggered'
-                          ? 'In Zone'
-                          : toast.ictStage === 'pullback_limit'
-                            ? 'Pullback Limit'
-                            : 'Armed Limit'}
+                        {toast.recommendedOrderType ??
+                          (toast.ictStage === 'triggered'
+                            ? 'In Zone'
+                            : toast.ictStage === 'pullback_limit'
+                              ? 'Pullback Limit'
+                              : 'Armed Limit')}
                       </span>
                     )}
                   </div>
@@ -167,19 +168,27 @@ export const PriceAlertToastStack: React.FC<{
                     {toast.bandarForeignBias ?? 'Balanced'}
                   </p>
                 ) : isIct ? (
-                  <p className="text-[11px] text-[#4A4D57] dark:text-[#C7CBD6] mt-0.5 leading-snug">
-                    <span className="font-semibold text-[#1C1C1E] dark:text-white">
-                      {toast.ictSetup}
-                    </span>{' '}
-                    ({toast.ictTimeframe ?? '15m'}) · Entry{' '}
-                    <span className="font-mono tabular-nums font-semibold">
-                      {toast.entryZone}
-                    </span>{' '}
-                    · TP{' '}
-                    <span className="font-mono tabular-nums font-bold text-[#0F7033] dark:text-[#4ADE80]">
-                      {toast.targetPrice}
-                    </span>
-                  </p>
+                  <div className="mt-1 space-y-1">
+                    <div className="grid grid-cols-3 gap-1.5 rounded-lg bg-black/5 dark:bg-white/5 px-2 py-1 text-[10px] font-mono tabular-nums">
+                      <div className="min-w-0">
+                        <div className="text-[9px] font-sans uppercase text-[#6C6C70] dark:text-[#9CA3AF]">Zone</div>
+                        <div className="font-bold text-[#1C1C1E] dark:text-white truncate">{toast.entryZone}</div>
+                      </div>
+                      <div className="min-w-0">
+                        <div className="text-[9px] font-sans uppercase text-[#6C6C70] dark:text-[#9CA3AF]">SL</div>
+                        <div className="font-bold text-[#C41C16] dark:text-[#FF6B63] truncate">{toast.stopLoss}</div>
+                      </div>
+                      <div className="min-w-0">
+                        <div className="text-[9px] font-sans uppercase text-[#6C6C70] dark:text-[#9CA3AF]">TP2</div>
+                        <div className="font-bold text-[#0F7033] dark:text-[#4ADE80] truncate">{toast.targetPrice}</div>
+                      </div>
+                    </div>
+                    {toast.waitAtWhere && toast.actionBadge?.startsWith('WAIT') && (
+                      <p className="text-[10px] text-[#4A4D57] dark:text-[#C7CBD6] truncate">
+                        Wait @ {toast.waitAtWhere}
+                      </p>
+                    )}
+                  </div>
                 ) : (
                   <p className="text-[11px] text-[#4A4D57] dark:text-[#C7CBD6] mt-0.5 leading-snug">
                     {isSurge ? 'Surged' : 'Dropped'}{' '}
@@ -249,6 +258,8 @@ export const PriceAlertDrawer: React.FC<{
   alerts: PriceAlertItem[];
   unreadCount: number;
   activeAssetId?: string;
+  alertThresholdPct?: number;
+  onChangeAlertThresholdPct?: (val: number) => void;
   onClose: () => void;
   onSelectAlert: (alert: PriceAlertItem) => void;
   onMarkAllRead: () => void;
@@ -261,6 +272,8 @@ export const PriceAlertDrawer: React.FC<{
   alerts,
   unreadCount,
   activeAssetId,
+  alertThresholdPct = 2.0,
+  onChangeAlertThresholdPct,
   onClose,
   onSelectAlert,
   onMarkAllRead,
@@ -270,6 +283,7 @@ export const PriceAlertDrawer: React.FC<{
   onScanBandar,
 }) => {
   const [filterKind, setFilterKind] = useState<AlertFilterKind>('all');
+  const drawerSliderPct = Math.max(0, Math.min(100, ((alertThresholdPct - 0.5) / 4.5) * 100));
 
   const counts = useMemo(() => {
     let bandar = 0;
@@ -317,7 +331,7 @@ export const PriceAlertDrawer: React.FC<{
               Live Alerts: IDX Bandarmology, ICT Signals &amp; 5m Volatility
             </h3>
             <p className="text-[11px] text-[#6C6C70] dark:text-[#94B0C4]">
-              Auto-triggers on IDX Early ↔ Strong Accumulation shifts, ICT FX/BTC/Gold setups, and &ge;2% spikes
+              Auto-triggers on IDX Accumulation shifts, ICT/S&amp;D setups (5m–4H), and &ge;{alertThresholdPct.toFixed(1)}% 5m moves
             </p>
           </div>
         </div>
@@ -385,6 +399,51 @@ export const PriceAlertDrawer: React.FC<{
           </button>
         </div>
       </div>
+
+      {/* Quick Graphical Alert Threshold Slider */}
+      {onChangeAlertThresholdPct && (
+        <div
+          data-testid="drawer-alert-threshold-slider"
+          className="rounded-xl bg-black/[0.03] dark:bg-white/[0.04] border border-black/8 dark:border-white/10 px-3 py-2 flex flex-wrap sm:flex-nowrap items-center justify-between gap-3"
+        >
+          <div className="flex items-center gap-2 shrink-0">
+            <span className="text-[11px] font-bold uppercase tracking-wider text-[#4A4D57] dark:text-[#B4B8C4]">
+              5m Spike Threshold
+            </span>
+            <span className="font-mono font-extrabold text-xs tabular-nums px-1.5 py-0.5 rounded bg-[var(--accent-soft)] text-[var(--accent-primary)]">
+              ±{alertThresholdPct.toFixed(1)}%
+            </span>
+          </div>
+          <div className="relative flex-1 min-w-[140px] h-5 flex items-center">
+            <div className="w-full h-1.5 rounded-full bg-black/15 dark:bg-white/15 overflow-hidden">
+              <div
+                className="h-full rounded-full bg-[var(--accent-primary)]"
+                style={{ width: `${drawerSliderPct}%` }}
+              />
+            </div>
+            <div
+              aria-hidden="true"
+              className="pointer-events-none absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-3.5 h-3.5 rounded-full bg-[var(--accent-primary)] border-2 border-white dark:border-black shadow"
+              style={{ left: `${drawerSliderPct}%` }}
+            />
+            <input
+              type="range"
+              min={0.5}
+              max={5.0}
+              step={0.1}
+              value={alertThresholdPct}
+              onChange={(e) => onChangeAlertThresholdPct(parseFloat(e.target.value))}
+              aria-label="Adjust 5-minute alert threshold percentage"
+              className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+            />
+          </div>
+          <div className="flex items-center gap-1 shrink-0 font-mono text-[10px] text-[#6C6C70] dark:text-[#9CA3AF]">
+            <span>0.5%</span>
+            <span>–</span>
+            <span>5.0%</span>
+          </div>
+        </div>
+      )}
 
       {/* Category Filter Segmented Control */}
       <div
@@ -499,15 +558,16 @@ export const PriceAlertDrawer: React.FC<{
                                   : 'bg-[#DC2626]/18 text-[#B91C1C] dark:text-[#FF6B63]'
                             }`}
                           >
-                            {alert.ictStrategy === 'sdcv' ? 'S&D' : 'ICT'} {alert.ictAction ?? 'WAIT'} · {alert.ictTimeframe ?? '15m'}
+                            {alert.actionBadge ?? `${alert.ictStrategy === 'sdcv' ? 'S&D' : 'ICT'} ${alert.ictAction ?? 'WAIT'}`} · {alert.ictTimeframe ?? '15m'}
                           </span>
-                          {alert.ictStage && (
+                          {(alert.recommendedOrderType || alert.ictStage) && (
                             <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded bg-black/5 dark:bg-white/10 text-[#4A4D57] dark:text-[#C7CBD6] whitespace-nowrap">
-                              {alert.ictStage === 'triggered'
-                                ? 'In Zone'
-                                : alert.ictStage === 'pullback_limit'
-                                  ? 'Pullback Limit'
-                                  : 'Armed Limit'}
+                              {alert.recommendedOrderType ??
+                                (alert.ictStage === 'triggered'
+                                  ? 'In Zone'
+                                  : alert.ictStage === 'pullback_limit'
+                                    ? 'Pullback Limit'
+                                    : 'Armed Limit')}
                             </span>
                           )}
                           {alert.fillStatus && (
@@ -523,7 +583,9 @@ export const PriceAlertDrawer: React.FC<{
                               {alert.fillStatus === 'filled'
                                 ? 'Filled'
                                 : alert.fillStatus === 'expired_unfilled'
-                                  ? 'Expired Unfilled'
+                                  ? alert.expiredReason === 'INVALIDATED_SL'
+                                    ? 'Invalidated · SL Hit'
+                                    : 'Not Filled · Missed TP1'
                                   : 'Awaiting Fill'}
                             </span>
                           )}
@@ -547,7 +609,8 @@ export const PriceAlertDrawer: React.FC<{
                       </p>
                     ) : isIct ? (
                       <p className="text-[11px] font-mono tabular-nums text-[#4A4D57] dark:text-[#C7CBD6] truncate">
-                        {alert.ictSetup} · Entry {alert.entryZone} · SL {alert.stopLoss} · TP {alert.targetPrice}
+                        Zone {alert.entryZone} · SL {alert.stopLoss} · TP2 {alert.targetPrice}
+                        {alert.waitAtWhere ? ` · Wait @ ${alert.waitAtWhere}` : ''}
                       </p>
                     ) : (
                       <p className="text-[11px] font-mono tabular-nums text-[#4A4D57] dark:text-[#C7CBD6]">

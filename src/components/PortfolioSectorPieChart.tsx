@@ -334,6 +334,18 @@ export const PortfolioSectorPieChart: React.FC<PortfolioSectorPieChartProps> = (
       (a, b) => b[1].value - a[1].value
     );
 
+    const velvetMonoPalette = [
+      '#FFFFFF',
+      '#D4D4D8',
+      '#A1A1AA',
+      '#71717A',
+      '#52525B',
+      '#3F3F46',
+      '#E4E4E7',
+      '#27272A',
+      '#8B8B94',
+    ];
+
     return sorted.map(([label, bucket], idx) => ({
       key: label,
       label,
@@ -341,7 +353,10 @@ export const PortfolioSectorPieChart: React.FC<PortfolioSectorPieChartProps> = (
       pct: (bucket.value / total) * 100,
       weightedDayPct:
         bucket.value > 0 ? bucket.weightedDayNumerator / bucket.value : 0,
-      color: SECTOR_PALETTE[label] ?? FALLBACK_COLORS[idx % FALLBACK_COLORS.length],
+      color:
+        themeMode === 'monochrome'
+          ? velvetMonoPalette[idx % velvetMonoPalette.length]
+          : SECTOR_PALETTE[label] ?? FALLBACK_COLORS[idx % FALLBACK_COLORS.length],
       holdingsCount: bucket.items.length,
       symbols: [...bucket.items]
         .sort((a, b) => b.marketValue - a.marketValue)
@@ -479,8 +494,8 @@ export const PortfolioSectorPieChart: React.FC<PortfolioSectorPieChartProps> = (
                       fill={datum.data.color}
                       fillOpacity={isDimmed ? 0.36 : 0.96}
                       stroke={
-                        themeMode === 'velvet'
-                          ? '#161320'
+                        themeMode === 'monochrome'
+                          ? '#0A0A0B'
                           : themeMode === 'obsidian'
                             ? '#0A0F18'
                             : themeMode === 'parchment'

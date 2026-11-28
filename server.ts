@@ -28,6 +28,14 @@ import {
   type ShareScheduleSlot,
 } from './server/liveFeeds.ts';
 import { attachPriorityRadarSocket } from './server/prioritySocketHub.ts';
+import {
+  getCloudSignalSnapshot,
+  refreshAndRecalibrateCloudLedger,
+  runServerPendingCleanup,
+  startCloudSignalEngine,
+  triggerManualCloudScan,
+  validateClientSignalsOnServer,
+} from './server/cloudSignalEngine.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -117,6 +125,130 @@ async function startServer() {
   // Real-Time Multi-Provider Feed Latency, Failover & Cache Fallback Diagnostics
   app.get('/api/market/diagnostics', (_req: Request, res: Response) => {
     res.json(getServerFeedDiagnostics());
+  });
+
+  // 24H Cloud Background Signal Engine Snapshot & Manual Trigger
+  app.get('/api/signals/cloud', (_req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(getCloudSignalSnapshot());
+  });
+
+  app.post('/api/signals/cloud/scan', async (_req: Request, res: Response) => {
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      const result = await triggerManualCloudScan();
+      return res.status(200).json(result);
+    } catch (err) {
+      console.error('Manual cloud signal scan failed:', err);
+      return res.status(502).json({ error: 'Cloud signal scan failed.' });
+    }
+  });
+
+  app.post('/api/signals/cloud/refresh', async (_req: Request, res: Response) => {
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      const result = await refreshAndRecalibrateCloudLedger();
+      return res.status(200).json(result);
+    } catch (err) {
+      console.error('Cloud signal database refresh failed:', err);
+      return res.status(502).json({ error: 'Cloud signal database refresh failed.' });
+    }
+  });
+
+  // Automated 48-hour Pending Signal Cleanup Service trigger
+  app.post('/api/signals/cloud/cleanup', (_req: Request, res: Response) => {
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      const result = runServerPendingCleanup();
+      return res.status(200).json(result);
+    } catch (err) {
+      console.error('Pending signal cleanup failed:', err);
+      return res.status(502).json({ error: 'Pending signal cleanup failed.' });
+    }
+  });
+
+  // Automated Server-Side Zone-Fill Validator (compares entry ranges against live ticks & filters non-filled signals)
+  app.post('/api/signals/validate-fills', async (req: Request, res: Response) => {
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      const body = (req.body || {}) as { records?: unknown };
+      const rawRecords = Array.isArray(body.records) ? body.records : [];
+      const bounded = rawRecords.slice(0, 150) as Parameters<typeof validateClientSignalsOnServer>[0];
+      const result = await validateClientSignalsOnServer(bounded);
+      return res.json(result);
+    } catch (err) {
+      console.error('Server-side zone-fill validation failed:', err);
+      return res.status(502).json({ error: 'Zone-fill validation failed.' });
+    }
+  });
+
+  // Live quotes + OHLCV candle probes for any persisted stock signals (even after leaving Top 10 movers)
+  app.post('/api/signals/stock-probes', async (req: Request, res: Response) => {
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      const body = (req.body || {}) as { symbols?: unknown };
+      const rawSymbols = Array.isArray(body.symbols) ? body.symbols : [];
+      const cleanSymbols = Array.from(
+        new Set(
+          rawSymbols
+            .filter((s): s is string => typeof s === 'string')
+            .map((s) => s.trim().toUpperCase().replace(/[^A-Z0-9._\-/^=]/g, '').slice(0, 24))
+            .filter(Boolean)
+        )
+      ).slice(0, 30);
+
+      if (cleanSymbols.length === 0) {
+        return res.json({ probes: {}, updatedAt: new Date().toISOString() });
+      }
+
+      const [quotesPayload, chartEntries] = await Promise.all([
+        fetchPortfolioQuotes(cleanSymbols).catch(() => ({ quotes: [] })),
+        Promise.all(
+          cleanSymbols.map(async (sym) => {
+            const series = await fetchPortfolioSymbolSeries(sym, '1M').catch(() => null);
+            return { sym, candles: series?.candles ?? [] };
+          })
+        ),
+      ]);
+
+      const probes: Record<
+        string,
+        {
+          price: number;
+          dayHigh?: number;
+          dayLow?: number;
+          candles?: Array<{ t: number; o: number; h: number; l: number; c: number; v?: number }>;
+        }
+      > = {};
+
+      const quoteMap = new Map(
+        (quotesPayload.quotes ?? []).map((q) => [q.symbol.toUpperCase(), q])
+      );
+
+      for (const { sym, candles } of chartEntries) {
+        const q = quoteMap.get(sym);
+        const lastCandle = candles.length > 0 ? candles[candles.length - 1] : null;
+        const price = q && Number.isFinite(q.price) && q.price > 0 ? q.price : lastCandle?.c ?? 0;
+        if (!Number.isFinite(price) || price <= 0) continue;
+        const probe = {
+          price,
+          dayHigh:
+            q && Number.isFinite(q.dayHigh) && q.dayHigh > 0 ? q.dayHigh : lastCandle?.h,
+          dayLow:
+            q && Number.isFinite(q.dayLow) && q.dayLow > 0 ? q.dayLow : lastCandle?.l,
+          candles: candles.length > 0 ? candles : undefined,
+        };
+        probes[sym] = probe;
+        if (sym.endsWith('.JK')) {
+          probes[sym.replace(/\.JK$/, '')] = probe;
+        }
+      }
+
+      return res.json({ probes, updatedAt: new Date().toISOString() });
+    } catch (err) {
+      console.error('Failed to fetch stock signal probes:', err);
+      return res.status(502).json({ error: 'Unable to fetch stock signal probes.' });
+    }
   });
 
   // 24-Hour Daily Market Summary JSON (Top Performers, Decliners & Economic Events)
@@ -842,6 +974,22 @@ export class ErrorOverlay {}
 
     app.use(async (req: Request, res: Response, next) => {
       if (req.path.startsWith('/api/')) return next();
+
+      // Prevent Vite SPA fallback from ever returning text/html for JS module requests under /node_modules/.vite/deps/
+      if (req.path.startsWith('/node_modules/.vite/deps/')) {
+        const depsDir = path.resolve(__dirname, 'node_modules', '.vite', 'deps');
+        const safeRel = path.normalize(req.path.slice('/node_modules/.vite/deps/'.length)).replace(/^(\.\.[/\\])+/, '');
+        const candidatePath = path.resolve(depsDir, safeRel);
+        if (
+          candidatePath.startsWith(depsDir + path.sep) &&
+          fs.existsSync(candidatePath) &&
+          fs.statSync(candidatePath).isFile()
+        ) {
+          res.setHeader('Cache-Control', 'no-store');
+          return res.type('application/javascript; charset=utf-8').sendFile(candidatePath);
+        }
+      }
+
       try {
         const vite = await vitePromise;
         return vite.middlewares(req, res, next);
@@ -854,6 +1002,7 @@ export class ErrorOverlay {}
   const httpServer = app.listen(PORT, '0.0.0.0', () => {
     console.log(`Stocks Global Market Terminal running at http://0.0.0.0:${PORT}`);
     warmServerCaches();
+    startCloudSignalEngine();
   });
 
   // Attach dedicated low-latency WebSocket server for BTC/USD, XAU/USD & DXY (/ws/priority-radar)

@@ -1,15 +1,18 @@
 import React, { useEffect } from 'react';
 import {
   Activity,
+  BellRing,
   Check,
   Cloud,
   CloudOff,
+  Contrast,
   Gem,
-  Layers,
   LogIn,
   LogOut,
+  Minus,
   Moon,
   Palette,
+  Plus,
   RefreshCw,
   Settings,
   Sun,
@@ -26,8 +29,12 @@ interface SettingsModalProps {
   onSelectTheme: (mode: ThemeMode) => void;
   isPulseActive: boolean;
   onTogglePulse: () => void;
+  alertThresholdPct?: number;
+  onChangeAlertThresholdPct?: (val: number) => void;
   onRefreshAll?: () => void | Promise<void>;
 }
+
+const ALERT_SLIDER_TICKS = [0.5, 1.0, 2.0, 3.5, 5.0] as const;
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
   open,
@@ -36,9 +43,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onSelectTheme,
   isPulseActive,
   onTogglePulse,
+  alertThresholdPct = 2.0,
+  onChangeAlertThresholdPct,
   onRefreshAll,
 }) => {
   const { user, profileReady, authLoading, signInWithGoogle, logout } = useAuth();
+  const sliderPct = Math.max(0, Math.min(100, ((alertThresholdPct - 0.5) / 4.5) * 100));
+  const sensitivityLabel =
+    alertThresholdPct <= 1.2
+      ? 'High Sensitivity · Scalp'
+      : alertThresholdPct <= 2.9
+        ? 'Balanced · Intraday'
+        : 'Macro Spikes Only';
 
   useEffect(() => {
     if (!open) return;
@@ -134,8 +150,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 const Icon =
                   opt.id === 'obsidian'
                     ? Moon
-                    : opt.id === 'velvet'
-                      ? Layers
+                    : opt.id === 'monochrome'
+                      ? Contrast
                       : opt.id === 'parchment'
                         ? Gem
                         : Sun;
@@ -160,8 +176,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       className="w-full h-11 rounded-lg border border-black/15 dark:border-white/15 overflow-hidden mb-2.5 flex flex-col justify-between p-1.5"
                       style={{
                         background:
-                          opt.id === 'velvet'
-                            ? 'radial-gradient(ellipse 90% 60% at 50% -15%, rgba(249, 87, 75, 0.34), transparent 72%), #0D0B14'
+                          opt.id === 'monochrome'
+                            ? 'linear-gradient(180deg, #141416 0%, #000000 100%)'
                             : opt.swatchTop,
                       }}
                     >
@@ -173,14 +189,21 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         <div className="flex items-center gap-1">
                           <span
                             className="w-1.5 h-1.5 rounded-full"
-                            style={{ backgroundColor: opt.isDarkSurface ? '#34D399' : '#047857' }}
+                            style={{
+                              backgroundColor:
+                                opt.id === 'monochrome'
+                                  ? '#FFFFFF'
+                                  : opt.isDarkSurface
+                                    ? '#34D399'
+                                    : '#047857',
+                            }}
                           />
                           <span
                             className="w-1.5 h-1.5 rounded-full"
                             style={{
                               backgroundColor:
-                                opt.id === 'velvet'
-                                  ? '#FB6B62'
+                                opt.id === 'monochrome'
+                                  ? '#71717A'
                                   : opt.isDarkSurface
                                     ? '#F87171'
                                     : '#B91C1C',
@@ -189,7 +212,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         </div>
                       </div>
                       <div
-                        className="h-4 w-full rounded border border-black/10 dark:border-white/10"
+                        className="h-4 w-full rounded border border-black/10 dark:border-white/15"
                         style={{ backgroundColor: opt.swatchSurface }}
                       />
                     </div>
@@ -200,7 +223,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         {opt.label}
                       </span>
                       {selected && (
-                        <span className="w-5 h-5 rounded-full bg-[var(--accent-primary)] text-white flex items-center justify-center shrink-0">
+                        <span className="w-5 h-5 rounded-full bg-[var(--accent-primary)] text-white monochrome:text-black flex items-center justify-center shrink-0">
                           <Check className="w-3 h-3 stroke-[2.6]" />
                         </span>
                       )}
@@ -220,6 +243,121 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               Key: {THEME_STORAGE_KEY} · Active: {themeMode}
             </p>
           </section>
+
+          {/* Graphical Price Alert Threshold Slider */}
+          {onChangeAlertThresholdPct && (
+            <section
+              aria-labelledby="settings-alert-threshold-heading"
+              className="pt-4 border-t border-[var(--border-divider)] space-y-3"
+              data-testid="settings-alert-threshold-section"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <BellRing className="w-4 h-4 text-[var(--accent-primary)] shrink-0" />
+                  <h3
+                    id="settings-alert-threshold-heading"
+                    className="text-xs font-bold uppercase tracking-wider text-[var(--text-secondary)]"
+                  >
+                    Price Alert Threshold (5m Move)
+                  </h3>
+                </div>
+                <span className="text-[11px] font-semibold text-[var(--text-muted)]">
+                  {sensitivityLabel}
+                </span>
+              </div>
+
+              <div className="p-3.5 rounded-xl bg-[var(--bg-inset)] border border-[var(--border-subtle)] space-y-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-[11px] text-[var(--text-muted)]">
+                      Trigger volatility alert when any open asset moves by
+                    </div>
+                    <div className="mt-0.5 flex items-baseline gap-1.5">
+                      <span
+                        data-testid="alert-threshold-value"
+                        className="text-xl font-black font-mono tabular-nums text-[var(--text-primary)]"
+                      >
+                        ±{alertThresholdPct.toFixed(1)}%
+                      </span>
+                      <span className="text-[11px] font-medium text-[var(--text-muted)]">
+                        within 5 min
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      type="button"
+                      aria-label="Decrease alert threshold"
+                      onClick={() =>
+                        onChangeAlertThresholdPct(Math.max(0.5, Number((alertThresholdPct - 0.1).toFixed(1))))
+                      }
+                      className="w-8 h-8 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex items-center justify-center text-[var(--text-primary)] hover:border-[var(--accent-primary)] transition-colors"
+                    >
+                      <Minus className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      aria-label="Increase alert threshold"
+                      onClick={() =>
+                        onChangeAlertThresholdPct(Math.min(5.0, Number((alertThresholdPct + 0.1).toFixed(1))))
+                      }
+                      className="w-8 h-8 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex items-center justify-center text-[var(--text-primary)] hover:border-[var(--accent-primary)] transition-colors"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Custom Graphical Track + Accessible Native Range Input */}
+                <div className="relative h-7 flex items-center">
+                  <div className="w-full h-2 rounded-full bg-black/15 dark:bg-white/15 overflow-hidden">
+                    <div
+                      className="h-full rounded-full bg-[var(--accent-primary)] transition-[width] duration-75"
+                      style={{ width: `${sliderPct}%` }}
+                    />
+                  </div>
+                  <div
+                    aria-hidden="true"
+                    className="pointer-events-none absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-4 h-4 rounded-full bg-[var(--accent-primary)] border-2 border-[var(--bg-surface)] shadow-md"
+                    style={{ left: `${sliderPct}%` }}
+                  />
+                  <input
+                    type="range"
+                    min={0.5}
+                    max={5.0}
+                    step={0.1}
+                    value={alertThresholdPct}
+                    onChange={(e) => onChangeAlertThresholdPct(parseFloat(e.target.value))}
+                    aria-label="Price alert percentage threshold"
+                    data-testid="alert-threshold-slider"
+                    className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                  />
+                </div>
+
+                {/* Interactive Quick Preset Ticks */}
+                <div className="flex items-center justify-between gap-1">
+                  {ALERT_SLIDER_TICKS.map((tick) => {
+                    const active = Math.abs(alertThresholdPct - tick) < 0.05;
+                    return (
+                      <button
+                        key={tick}
+                        type="button"
+                        onClick={() => onChangeAlertThresholdPct(tick)}
+                        className={`px-2 py-0.5 rounded-md font-mono text-[11px] font-bold tabular-nums transition-colors ${
+                          active
+                            ? 'bg-[var(--accent-primary)] text-white monochrome:text-black'
+                            : 'text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-black/5 dark:hover:bg-white/10'
+                        }`}
+                      >
+                        {tick.toFixed(1)}%
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </section>
+          )}
 
           {/* Feed & Session Controls */}
           <section
@@ -260,8 +398,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 }`}
               >
                 <span
-                  className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${
-                    isPulseActive ? 'translate-x-6' : 'translate-x-1'
+                  className={`inline-block h-4 w-4 transform rounded-full shadow transition-transform ${
+                    isPulseActive
+                      ? 'translate-x-6 bg-white monochrome:bg-black'
+                      : 'translate-x-1 bg-white'
                   }`}
                 />
               </button>
@@ -301,7 +441,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   type="button"
                   disabled={authLoading}
                   onClick={() => void signInWithGoogle()}
-                  className="inline-flex items-center gap-1.5 min-h-[36px] px-3 rounded-lg bg-[var(--accent-primary)] hover:bg-[var(--accent-hover)] text-white text-xs font-bold transition-colors shrink-0 disabled:opacity-60"
+                  className="inline-flex items-center gap-1.5 min-h-[36px] px-3 rounded-lg bg-[var(--accent-primary)] hover:bg-[var(--accent-hover)] text-white monochrome:text-black text-xs font-bold transition-colors shrink-0 disabled:opacity-60"
                 >
                   <LogIn className="w-3.5 h-3.5" />
                   <span>{authLoading ? 'Signing in...' : 'Sign In'}</span>

@@ -1,4 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  collection,
+  deleteDoc,
+  deleteField,
+  doc,
+  getDoc,
+  limit,
+  onSnapshot,
+  query,
+  serverTimestamp,
+  setDoc,
+  updateDoc,
+  where,
+} from 'firebase/firestore';
 import { useAuth } from '../contexts/AuthContext';
 import { getFirebaseServices } from '../lib/firebase';
 import { OperationType, handleFirestoreError } from '../lib/firestoreErrors';
@@ -7,6 +21,7 @@ import {
   MarketAsset,
   SignalBarrierOutcome,
   SignalExecutionPostureTag,
+  SignalExpiredReason,
   SignalHistoryRecord,
   SignalHistoryStatus,
   SignalIndexedOutcome,
@@ -29,10 +44,17 @@ import {
   deriveSignalStrategyKey,
   deriveSignalVerificationStatus,
   isTerminalSignalStatus,
+  isUnfilledExpiredSignal,
+  normalizeSignalStatus,
   reconcileSignalHistory,
 } from '../utils/signalHistoryEngine';
+import {
+  PENDING_CLEANUP_INTERVAL_MS,
+  runPendingSignalCleanup,
+} from '../utils/signalCleanupService';
 
-const LOCAL_STORAGE_KEY = 'stocks-signal-history-v1';
+const LOCAL_STORAGE_KEY = 'stocks-signal-history-v2';
+const RECALIBRATED_AT_KEY = 'stocks-signal-recalibrated-at-v1';
 const MAX_LOCAL_RECORDS = 150;
 const RECONCILE_INTERVAL_MS = 4500;
 
@@ -78,7 +100,8 @@ function loadLocalSignalHistory(): SignalHistoryRecord[] {
           typeof item.entryPrice === 'number' &&
           item.entryPrice > 0 &&
           typeof item.stopLoss === 'number' &&
-          item.stopLoss > 0
+          item.stopLoss > 0 &&
+          !isUnfilledExpiredSignal(item)
       )
       .slice(0, MAX_LOCAL_RECORDS);
   } catch {
@@ -119,13 +142,17 @@ function collectUniqueStocks(bucket: StocksMoversBucket): StockMover[] {
 }
 
 const VALID_SIGNAL_STATUSES = new Set<SignalHistoryStatus>([
+  'PENDING',
+  'FILLED',
+  'EXPIRED',
+  'TP',
+  'SL',
   'PENDING_LIMIT',
   'RUNNING',
   'TP1_HIT',
   'TP2_HIT',
   'SL_HIT',
   'BE_CLOSED',
-  'EXPIRED',
 ]);
 
 const VALID_ASSET_CLASSES = new Set(['stock_id', 'stock_us', 'crypto', 'commodity']);
@@ -163,6 +190,12 @@ const VALID_BARRIER_OUTCOMES = new Set<SignalBarrierOutcome>([
   'OPEN',
 ]);
 const VALID_VOL_REGIMES = new Set(['R1_COMPRESSION', 'NORMAL', 'R2_EXPANSION']);
+const VALID_EXPIRED_REASONS = new Set<SignalExpiredReason>([
+  'INVALIDATED_SL',
+  'MISSED_TP1',
+  'UNFILLED_TIMEOUT',
+  'TIME_BARRIER',
+]);
 
 function sanitizeFirestoreDocId(raw: string): string {
   const cleaned = String(raw || '')
@@ -221,8 +254,8 @@ function buildFirestoreCreatePayload(
     ? rec.sourceEngine
     : 'idx_scanner';
   const safeStatus: SignalHistoryStatus = VALID_SIGNAL_STATUSES.has(rec.status)
-    ? rec.status
-    : 'RUNNING';
+    ? normalizeSignalStatus(rec.status)
+    : 'FILLED';
   const rawLock = String(rec.lockKey || `${safeSourceEngine}:${cleanAssetId}`)
     .trim()
     .replace(/[^a-zA-Z0-9_.:/\-]/g, '_')
@@ -348,6 +381,12 @@ function buildFirestoreCreatePayload(
   if (rec.sectorLeader === true) {
     payload.sectorLeader = true;
   }
+  if (typeof rec.orderType === 'string' && rec.orderType.trim().length > 0) {
+    payload.orderType = rec.orderType.trim().slice(0, 24);
+  }
+  if (rec.expiredReason && VALID_EXPIRED_REASONS.has(rec.expiredReason)) {
+    payload.expiredReason = rec.expiredReason;
+  }
 
   return payload;
 }
@@ -409,8 +448,8 @@ function buildFirestoreUpdatePayload(
   serverTimestampFn: () => unknown
 ): Record<string, unknown> | null {
   const safeStatus: SignalHistoryStatus = VALID_SIGNAL_STATUSES.has(rec.status)
-    ? rec.status
-    : 'RUNNING';
+    ? normalizeSignalStatus(rec.status)
+    : 'FILLED';
   const lastPrice = finitePositive(rec.lastPrice, finitePositive(rec.entryPrice, 0));
   if (lastPrice <= 0) return null;
 
@@ -460,8 +499,20 @@ function buildFirestoreUpdatePayload(
   if (rec.barrierOutcome && VALID_BARRIER_OUTCOMES.has(rec.barrierOutcome)) {
     payload.barrierOutcome = rec.barrierOutcome;
   }
+  if (rec.expiredReason && VALID_EXPIRED_REASONS.has(rec.expiredReason)) {
+    payload.expiredReason = rec.expiredReason;
+  }
 
   return payload;
+}
+
+export interface CloudSignalEngineStatus {
+  running: boolean;
+  lastScanAtMs: number | null;
+  recalibratedAtMs?: number | null;
+  trackedCount: number;
+  activeCount: number;
+  scanIntervalSec: number;
 }
 
 export interface UseSignalHistoryResult {
@@ -471,6 +522,9 @@ export interface UseSignalHistoryResult {
   stats: SignalHistoryStats;
   cloudSynced: boolean;
   isSyncing: boolean;
+  cloudEngineStatus: CloudSignalEngineStatus;
+  triggerCloudScan: () => Promise<void>;
+  refreshSignalDatabase: () => Promise<void>;
   annotateSignal: (
     signalId: string,
     outcome: SignalUserOutcome | null,
@@ -500,6 +554,13 @@ export function useSignalHistory(
   const [records, setRecords] = useState<SignalHistoryRecord[]>(() => loadLocalSignalHistory());
   const [cloudSynced, setCloudSynced] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [cloudEngineStatus, setCloudEngineStatus] = useState<CloudSignalEngineStatus>({
+    running: false,
+    lastScanAtMs: null,
+    trackedCount: 0,
+    activeCount: 0,
+    scanIntervalSec: 60,
+  });
 
   const recordsRef = useRef<SignalHistoryRecord[]>(records);
   recordsRef.current = records;
@@ -513,11 +574,325 @@ export function useSignalHistory(
   const backfillInProgressRef = useRef(false);
   const cloudReadyRef = useRef(false);
   const lastReconcileAtRef = useRef(0);
+  const persistedStockProbesRef = useRef<Map<string, LivePriceProbe>>(new Map());
+  const [stockProbeTick, setStockProbeTick] = useState(0);
+
+  const mergeCloudRecords = useCallback(
+    async (cloudRecords: SignalHistoryRecord[], recalibratedAtMs?: number | null) => {
+      if (!Array.isArray(cloudRecords)) return;
+      const validCloud = cloudRecords.filter(
+        (r) => r && r.timeframe !== '1m' && !isUnfilledExpiredSignal(r)
+      );
+
+      // Check if server performed a clean v3 DB refresh/recalibration newer than our last synced epoch
+      let isFreshRecalibration = false;
+      if (typeof recalibratedAtMs === 'number' && recalibratedAtMs > 0 && typeof window !== 'undefined') {
+        const lastSyncedRecal = Number(window.localStorage.getItem(RECALIBRATED_AT_KEY) || '0');
+        if (recalibratedAtMs > lastSyncedRecal) {
+          isFreshRecalibration = true;
+          try {
+            window.localStorage.setItem(RECALIBRATED_AT_KEY, String(recalibratedAtMs));
+          } catch {
+            // ignore storage quota errors
+          }
+        }
+      }
+
+      const getSlotKey = (rec: SignalHistoryRecord): string => {
+        const isStock = rec.assetClass === 'stock_id' || rec.assetClass === 'stock_us';
+        if (isStock) return `stock:${rec.assetClass}:${rec.symbol.toUpperCase()}`;
+        return `radar:${rec.assetId.toUpperCase()}:${rec.timeframe.toLowerCase()}`;
+      };
+
+      const toPersistToFirestore: SignalHistoryRecord[] = [];
+      const staleIdsToPruneFromFirestore: string[] = [];
+
+      if (isFreshRecalibration) {
+        const freshIds = new Set(validCloud.map((c) => sanitizeFirestoreDocId(c.id)));
+        for (const existingRec of recordsRef.current) {
+          const safeId = sanitizeFirestoreDocId(existingRec.id);
+          if (!freshIds.has(safeId)) {
+            staleIdsToPruneFromFirestore.push(safeId);
+          }
+        }
+
+        const freshNormalized: SignalHistoryRecord[] = validCloud
+          .map((c) => {
+            const normalizedStatus = normalizeSignalStatus(c.status);
+            return {
+              ...c,
+              status: normalizedStatus,
+              outcome: deriveSignalIndexedOutcome(normalizedStatus, c.userOutcome),
+              ownerId: user?.uid ?? 'local',
+            };
+          })
+          .sort((a, b) => b.createdAtMs - a.createdAtMs)
+          .slice(0, MAX_LOCAL_RECORDS);
+
+        recordsRef.current = freshNormalized;
+        setRecords(freshNormalized);
+        toPersistToFirestore.push(...freshNormalized);
+      } else {
+        if (validCloud.length === 0) return;
+        setRecords((prev) => {
+          const byId = new Map<string, SignalHistoryRecord>();
+          const activeLockKeys = new Set<string>();
+          const activeSlots = new Set<string>();
+          for (const r of prev) {
+            byId.set(r.id, r);
+            if (!isTerminalSignalStatus(r.status)) {
+              activeLockKeys.add(r.lockKey);
+              activeSlots.add(getSlotKey(r));
+            }
+          }
+
+          let mutated = false;
+          for (const c of validCloud) {
+            const existing = byId.get(c.id);
+            if (!existing) {
+              // Strict Non-Overlay: never add a second active signal on the same lockKey or instrument slot
+              if (
+                !isTerminalSignalStatus(c.status) &&
+                (activeLockKeys.has(c.lockKey) || activeSlots.has(getSlotKey(c)))
+              ) {
+                continue;
+              }
+              const normalizedStatus = normalizeSignalStatus(c.status);
+              const normalized: SignalHistoryRecord = {
+                ...c,
+                status: normalizedStatus,
+                outcome: deriveSignalIndexedOutcome(normalizedStatus, c.userOutcome),
+                ownerId: user?.uid ?? 'local',
+              };
+              byId.set(c.id, normalized);
+              if (!isTerminalSignalStatus(normalizedStatus)) {
+                activeLockKeys.add(c.lockKey);
+                activeSlots.add(getSlotKey(normalized));
+              }
+              toPersistToFirestore.push(normalized);
+              mutated = true;
+            } else if (
+              !isTerminalSignalStatus(existing.status) &&
+              (isTerminalSignalStatus(c.status) || c.lastCheckedAtMs > existing.lastCheckedAtMs)
+            ) {
+              const normalizedStatus = normalizeSignalStatus(c.status);
+              byId.set(c.id, {
+                ...existing,
+                status: normalizedStatus,
+                outcome: deriveSignalIndexedOutcome(normalizedStatus, existing.userOutcome),
+                filledAtMs: existing.filledAtMs ?? c.filledAtMs,
+                tp1HitAtMs: existing.tp1HitAtMs ?? c.tp1HitAtMs,
+                closedAtMs: existing.closedAtMs ?? c.closedAtMs,
+                closedPrice: existing.closedPrice ?? c.closedPrice,
+                zoneFillVerified: existing.zoneFillVerified || c.zoneFillVerified,
+                verificationStatus: c.verificationStatus ?? existing.verificationStatus,
+                expiredReason: c.expiredReason ?? existing.expiredReason,
+                lastPrice: c.lastPrice,
+                maxFavorablePrice: c.maxFavorablePrice,
+                maxAdversePrice: c.maxAdversePrice,
+                pnlPct: c.pnlPct,
+                rMultiple: c.rMultiple,
+                lastCheckedAtMs: Math.max(existing.lastCheckedAtMs, c.lastCheckedAtMs),
+              });
+              mutated = true;
+            }
+          }
+
+          if (!mutated) return prev;
+          const merged = Array.from(byId.values())
+            .sort((a, b) => b.createdAtMs - a.createdAtMs)
+            .slice(0, MAX_LOCAL_RECORDS);
+          recordsRef.current = merged;
+          return merged;
+        });
+      }
+
+      // Mirror newly discovered / recalibrated 24H cloud signals into the user's Firestore ledger
+      if (user && profileReady && cloudReadyRef.current) {
+        try {
+          const { db } = await getFirebaseServices();
+          for (const staleId of staleIdsToPruneFromFirestore) {
+            remoteStatusMapRef.current.delete(staleId);
+            void deleteDoc(doc(db, 'users', user.uid, 'signalHistory', staleId)).catch(() => {
+              // ignore cleanup errors
+            });
+          }
+          for (const rec of toPersistToFirestore) {
+            const safeId = sanitizeFirestoreDocId(rec.id);
+            if (!isFreshRecalibration && (remoteStatusMapRef.current.has(safeId) || inFlightDocIdsRef.current.has(safeId))) {
+              continue;
+            }
+            const payload = buildFirestoreCreatePayload(rec, user.uid, serverTimestamp);
+            if (!payload) continue;
+            inFlightDocIdsRef.current.add(safeId);
+            setDoc(doc(db, 'users', user.uid, 'signalHistory', safeId), payload)
+              .then(() => {
+                remoteStatusMapRef.current.set(safeId, rec.status);
+              })
+              .catch(() => {
+                // Non-fatal: already persisted in cloud ledger + local mirror
+              })
+              .finally(() => {
+                inFlightDocIdsRef.current.delete(safeId);
+              });
+          }
+        } catch {
+          // ignore
+        }
+      }
+    },
+    [user, profileReady]
+  );
+
+  // 24H Cloud Background Signal Engine hydration (runs on mount & every 30s)
+  useEffect(() => {
+    let cancelled = false;
+    const pollCloudSignals = async () => {
+      try {
+        const res = await fetch('/api/signals/cloud', { cache: 'no-store' });
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        if (cancelled || !data) return;
+        const recalMs = typeof data.recalibratedAtMs === 'number' ? data.recalibratedAtMs : null;
+        setCloudEngineStatus({
+          running: Boolean(data.running),
+          lastScanAtMs: typeof data.lastScanAtMs === 'number' ? data.lastScanAtMs : null,
+          recalibratedAtMs: recalMs,
+          trackedCount: Number(data.trackedCount ?? 0),
+          activeCount: Number(data.activeCount ?? 0),
+          scanIntervalSec: Number(data.scanIntervalSec ?? 60),
+        });
+        if (Array.isArray(data.records)) {
+          void mergeCloudRecords(data.records, recalMs);
+        }
+      } catch {
+        // non-fatal
+      }
+    };
+
+    void pollCloudSignals();
+    const timer = window.setInterval(() => {
+      void pollCloudSignals();
+    }, 30_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [mergeCloudRecords]);
+
+  const triggerCloudScan = useCallback(async () => {
+    try {
+      const res = await fetch('/api/signals/cloud/scan', { method: 'POST' });
+      if (!res.ok) return;
+      const data = await res.json();
+      const snap = data?.snapshot;
+      if (snap) {
+        const recalMs = typeof snap.recalibratedAtMs === 'number' ? snap.recalibratedAtMs : null;
+        setCloudEngineStatus({
+          running: Boolean(snap.running),
+          lastScanAtMs: typeof snap.lastScanAtMs === 'number' ? snap.lastScanAtMs : null,
+          recalibratedAtMs: recalMs,
+          trackedCount: Number(snap.trackedCount ?? 0),
+          activeCount: Number(snap.activeCount ?? 0),
+          scanIntervalSec: Number(snap.scanIntervalSec ?? 60),
+        });
+        if (Array.isArray(snap.records)) {
+          void mergeCloudRecords(snap.records, recalMs);
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }, [mergeCloudRecords]);
+
+  const refreshSignalDatabase = useCallback(async () => {
+    try {
+      const res = await fetch('/api/signals/cloud/refresh', { method: 'POST' });
+      if (!res.ok) return;
+      const data = await res.json();
+      const snap = data?.snapshot;
+      if (snap) {
+        const recalMs =
+          typeof data.recalibratedAtMs === 'number'
+            ? data.recalibratedAtMs
+            : typeof snap.recalibratedAtMs === 'number'
+              ? snap.recalibratedAtMs
+              : Date.now();
+        setCloudEngineStatus({
+          running: Boolean(snap.running),
+          lastScanAtMs: typeof snap.lastScanAtMs === 'number' ? snap.lastScanAtMs : null,
+          recalibratedAtMs: recalMs,
+          trackedCount: Number(snap.trackedCount ?? 0),
+          activeCount: Number(snap.activeCount ?? 0),
+          scanIntervalSec: Number(snap.scanIntervalSec ?? 60),
+        });
+        if (Array.isArray(snap.records)) {
+          await mergeCloudRecords(snap.records, recalMs);
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }, [mergeCloudRecords]);
 
   // Persist local mirror whenever records change
   useEffect(() => {
     saveLocalSignalHistory(records);
   }, [records]);
+
+  // Automated 48-Hour Pending Signal Cleanup Service (runs immediately & every 5 minutes)
+  // Moves any 'Pending' signal untriggered for >= 48h to 'Closed/Expired' locally & in Firestore
+  useEffect(() => {
+    let cancelled = false;
+    const executePendingCleanup = async () => {
+      const cleanup = runPendingSignalCleanup(recordsRef.current, Date.now());
+      if (!cleanup.changed || cancelled) return;
+
+      recordsRef.current = cleanup.nextRecords;
+      setRecords(cleanup.nextRecords);
+
+      if (!user || !profileReady || !cloudReadyRef.current) return;
+      try {
+        const { db } = await getFirebaseServices();
+        for (const expiredRec of cleanup.expiredRecords) {
+          if (cancelled) return;
+          const safeId = sanitizeFirestoreDocId(expiredRec.id);
+          const remoteStatus = remoteStatusMapRef.current.get(safeId);
+          if (!remoteStatus || isTerminalSignalStatus(remoteStatus) || inFlightDocIdsRef.current.has(safeId)) {
+            continue;
+          }
+          const payload = buildFirestoreUpdatePayload(expiredRec, serverTimestamp);
+          if (!payload) continue;
+          const docPath = `users/${user.uid}/signalHistory/${safeId}`;
+          inFlightDocIdsRef.current.add(safeId);
+          try {
+            await updateDoc(doc(db, 'users', user.uid, 'signalHistory', safeId), payload);
+            remoteStatusMapRef.current.set(safeId, 'EXPIRED');
+          } catch (err) {
+            try {
+              handleFirestoreError(err, OperationType.UPDATE, docPath);
+            } catch {
+              // logged
+            }
+          } finally {
+            inFlightDocIdsRef.current.delete(safeId);
+          }
+        }
+      } catch {
+        // non-fatal; retried on next cleanup tick
+      }
+    };
+
+    void executePendingCleanup();
+    const timer = window.setInterval(() => {
+      void executePendingCleanup();
+    }, PENDING_CLEANUP_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [user, profileReady]);
 
   // Attach Firestore real-time listener when authenticated & profile ready
   useEffect(() => {
@@ -538,10 +913,7 @@ export function useSignalHistory(
       setIsSyncing(true);
       const collectionPath = `users/${user.uid}/signalHistory`;
       try {
-        const [
-          { db },
-          { collection, doc, limit, onSnapshot, query, serverTimestamp, setDoc, where },
-        ] = await Promise.all([getFirebaseServices(), import('firebase/firestore')]);
+        const { db } = await getFirebaseServices();
         if (disposed) return;
 
         // Filter explicitly by ownerId to satisfy Firestore security rules
@@ -604,7 +976,7 @@ export function useSignalHistory(
                 tp1: Number(d.tp1),
                 tp2: Number(d.tp2),
                 riskReward: String(d.riskReward || '1 : 2'),
-                status: d.status as SignalHistoryStatus,
+                status: normalizeSignalStatus(d.status as SignalHistoryStatus),
                 filledOnFirstSight: Boolean(d.filledOnFirstSight),
                 ...(typeof d.executionPosture === 'string' &&
                 VALID_EXECUTION_POSTURES.has(d.executionPosture as SignalExecutionPostureTag)
@@ -675,7 +1047,23 @@ export function useSignalHistory(
                 ...(typeof d.rsRank === 'number' && Number.isFinite(d.rsRank) ? { rsRank: d.rsRank } : {}),
                 ...(typeof d.vcpDetected === 'boolean' ? { vcpDetected: d.vcpDetected } : {}),
                 ...(typeof d.sectorLeader === 'boolean' ? { sectorLeader: d.sectorLeader } : {}),
+                ...(typeof d.orderType === 'string' && d.orderType.length > 0
+                  ? { orderType: d.orderType }
+                  : {}),
+                ...(typeof d.expiredReason === 'string' &&
+                VALID_EXPIRED_REASONS.has(d.expiredReason as SignalExpiredReason)
+                  ? { expiredReason: d.expiredReason as SignalExpiredReason }
+                  : {}),
               };
+
+              // Automatically purge non-filled expired signals from Firestore & history
+              if (isUnfilledExpiredSignal(rec)) {
+                void deleteDoc(doc(db, 'users', user.uid, 'signalHistory', docSnap.id)).catch(() => {
+                  // ignore cleanup errors
+                });
+                return;
+              }
+
               remoteRecords.push(rec);
               // Only mark as server-confirmed when not a local unacknowledged pending write
               if (!docSnap.metadata.hasPendingWrites) {
@@ -804,16 +1192,26 @@ export function useSignalHistory(
     };
   }, [authReady, profileReady, user]);
 
-  // Helper to push created & updated records to Firestore safely
+  // Helper to push created, updated, and removed (non-filled expired) records to Firestore safely
   const syncDeltaToFirestore = useCallback(
-    async (created: SignalHistoryRecord[], updated: SignalHistoryRecord[]) => {
+    async (
+      created: SignalHistoryRecord[],
+      updated: SignalHistoryRecord[],
+      removedIds: string[] = []
+    ) => {
       if (!user || !profileReady || !cloudReadyRef.current) return;
-      if (created.length === 0 && updated.length === 0) return;
+      if (created.length === 0 && updated.length === 0 && removedIds.length === 0) return;
 
-      const [{ db }, { doc, getDoc, serverTimestamp, setDoc, updateDoc }] = await Promise.all([
-        getFirebaseServices(),
-        import('firebase/firestore'),
-      ]);
+      const { db } = await getFirebaseServices();
+
+      for (const rawId of removedIds) {
+        const safeId = sanitizeFirestoreDocId(rawId);
+        remoteStatusMapRef.current.delete(safeId);
+        remoteStatusMapRef.current.delete(rawId);
+        void deleteDoc(doc(db, 'users', user.uid, 'signalHistory', safeId)).catch(() => {
+          // non-fatal cleanup for non-filled expired signal
+        });
+      }
 
       const nowMs = Date.now();
 
@@ -980,9 +1378,70 @@ export function useSignalHistory(
     [user, profileReady]
   );
 
+  // Cross-device stock continuity probe loop:
+  // Fetches live quotes + 1M OHLCV candles for ALL active saved stock signals in DB (even if no longer in Top 10 movers)
+  // so reopening on any device immediately checks whether each stock position is RUNNING, TP1, TP2, or SL.
+  const activeStockSymbolsKey = useMemo(() => {
+    const syms = new Set<string>();
+    for (const r of records) {
+      if (isTerminalSignalStatus(r.status)) continue;
+      if (r.assetClass !== 'stock_id' && r.assetClass !== 'stock_us') continue;
+      const yahooSym =
+        r.assetClass === 'stock_id' && !r.symbol.endsWith('.JK')
+          ? `${r.symbol}.JK`
+          : r.symbol;
+      syms.add(yahooSym.toUpperCase());
+    }
+    return Array.from(syms).sort().join(',');
+  }, [records]);
+
+  useEffect(() => {
+    if (!activeStockSymbolsKey) return;
+    let cancelled = false;
+    const symbols = activeStockSymbolsKey.split(',').filter(Boolean);
+
+    const fetchStockProbes = async () => {
+      try {
+        const res = await fetch('/api/signals/stock-probes', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ symbols }),
+        });
+        if (!res.ok || cancelled) return;
+        const data = (await res.json()) as {
+          probes?: Record<string, LivePriceProbe>;
+        };
+        if (cancelled || !data?.probes) return;
+        let updatedAny = false;
+        for (const [sym, probe] of Object.entries(data.probes)) {
+          if (probe && Number.isFinite(probe.price) && probe.price > 0) {
+            persistedStockProbesRef.current.set(sym, probe);
+            updatedAny = true;
+          }
+        }
+        if (updatedAny && !cancelled) {
+          lastReconcileAtRef.current = 0;
+          setStockProbeTick((n) => n + 1);
+        }
+      } catch {
+        // non-fatal; will retry on next interval
+      }
+    };
+
+    void fetchStockProbes();
+    const timer = window.setInterval(() => {
+      void fetchStockProbes();
+    }, 60_000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [activeStockSymbolsKey]);
+
   // Continuous reconciliation loop: evaluates active signals + locks new actionable setups
   useEffect(() => {
-    if (!feedsLive) return;
+    if (!feedsLive && stockProbeTick === 0) return;
     let cancelled = false;
 
     const runReconcile = async () => {
@@ -994,15 +1453,24 @@ export function useSignalHistory(
       const liveProbes = new Map<string, LivePriceProbe>();
       const incomingCandidates: SignalHistoryRecord[] = [];
 
+      // Seed persisted stock probes (covers saved stock signals retrieved from DB on any device, even outside Top 10 movers)
+      for (const [sym, probe] of persistedStockProbesRef.current.entries()) {
+        liveProbes.set(sym, probe);
+      }
+
       // 1. Collect IDX & US stock probes + actionable candidates
       const idxStocks = collectUniqueStocks(idxMoversBucket);
       const usStocks = collectUniqueStocks(usMoversBucket);
 
       for (const stock of [...idxStocks, ...usStocks]) {
+        const existingCandleProbe =
+          persistedStockProbesRef.current.get(stock.symbol) ??
+          persistedStockProbesRef.current.get(`${stock.symbol}.JK`);
         liveProbes.set(stock.symbol, {
           price: stock.price,
           dayHigh: stock.dayHigh,
           dayLow: stock.dayLow,
+          candles: existingCandleProbe?.candles,
         });
         const cand = buildStockSignalCandidate(stock, now, ownerId);
         if (cand) incomingCandidates.push(cand);
@@ -1075,7 +1543,11 @@ export function useSignalHistory(
       if (result.changed) {
         recordsRef.current = result.nextRecords;
         setRecords(result.nextRecords);
-        void syncDeltaToFirestore(result.createdRecords, result.updatedRecords);
+        void syncDeltaToFirestore(
+          result.createdRecords,
+          result.updatedRecords,
+          result.removedRecordIds
+        );
       }
     };
 
@@ -1094,6 +1566,7 @@ export function useSignalHistory(
     economicEvents,
     syncedRadarConfig,
     feedsLive,
+    stockProbeTick,
     user?.uid,
     syncDeltaToFirestore,
   ]);
@@ -1139,8 +1612,7 @@ export function useSignalHistory(
       const docPath = `users/${user.uid}/signalHistory/${safeId}`;
 
       try {
-        const [{ db }, { deleteField, doc, getDoc, serverTimestamp, setDoc, updateDoc }] =
-          await Promise.all([getFirebaseServices(), import('firebase/firestore')]);
+        const { db } = await getFirebaseServices();
 
         const ref = doc(db, 'users', user.uid, 'signalHistory', safeId);
         const updatePayload: Record<string, unknown> = {
@@ -1191,17 +1663,16 @@ export function useSignalHistory(
 
   const deleteSignal = useCallback(
     async (signalId: string) => {
-      setRecords((prev) => prev.filter((r) => r.id !== signalId));
+      const safeId = sanitizeFirestoreDocId(signalId);
+      setRecords((prev) => prev.filter((r) => r.id !== signalId && sanitizeFirestoreDocId(r.id) !== safeId));
       remoteStatusMapRef.current.delete(signalId);
+      remoteStatusMapRef.current.delete(safeId);
 
       if (!user || !profileReady) return;
-      const docPath = `users/${user.uid}/signalHistory/${signalId}`;
+      const docPath = `users/${user.uid}/signalHistory/${safeId}`;
       try {
-        const [{ db }, { deleteDoc, doc }] = await Promise.all([
-          getFirebaseServices(),
-          import('firebase/firestore'),
-        ]);
-        await deleteDoc(doc(db, 'users', user.uid, 'signalHistory', signalId));
+        const { db } = await getFirebaseServices();
+        await deleteDoc(doc(db, 'users', user.uid, 'signalHistory', safeId));
       } catch (err) {
         try {
           handleFirestoreError(err, OperationType.DELETE, docPath);
@@ -1220,17 +1691,16 @@ export function useSignalHistory(
     setRecords((prev) => prev.filter((r) => !isTerminalSignalStatus(r.status)));
     for (const r of toDelete) {
       remoteStatusMapRef.current.delete(r.id);
+      remoteStatusMapRef.current.delete(sanitizeFirestoreDocId(r.id));
     }
 
     if (!user || !profileReady) return;
     try {
-      const [{ db }, { deleteDoc, doc }] = await Promise.all([
-        getFirebaseServices(),
-        import('firebase/firestore'),
-      ]);
+      const { db } = await getFirebaseServices();
       for (const r of toDelete) {
-        const docPath = `users/${user.uid}/signalHistory/${r.id}`;
-        await deleteDoc(doc(db, 'users', user.uid, 'signalHistory', r.id)).catch((err) => {
+        const safeId = sanitizeFirestoreDocId(r.id);
+        const docPath = `users/${user.uid}/signalHistory/${safeId}`;
+        await deleteDoc(doc(db, 'users', user.uid, 'signalHistory', safeId)).catch((err) => {
           try {
             handleFirestoreError(err, OperationType.DELETE, docPath);
           } catch {
@@ -1325,6 +1795,9 @@ export function useSignalHistory(
     stats,
     cloudSynced,
     isSyncing,
+    cloudEngineStatus,
+    triggerCloudScan,
+    refreshSignalDatabase,
     annotateSignal,
     applyVerificationPatch,
     isRecordConfirmedOnServer,

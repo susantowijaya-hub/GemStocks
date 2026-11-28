@@ -39,6 +39,18 @@ const UA_STRING =
 
 const quoteStore = new Map<PrioritySymbolId, InternalQuoteState>();
 const lastBroadcastAt = new Map<PrioritySymbolId, number>();
+// High-frequency WebSocket push to clients is strictly dedicated to XAU/USD and BTC/USD.
+// Non-critical symbols (DXY, ETHUSD, indices, stocks) are served via throttled HTTP polling.
+const STRICT_WS_BROADCAST_IDS = new Set<PrioritySymbolId>(['XAUUSD', 'BTCUSD']);
+type PriorityTickListener = (quote: PrioritySocketQuote) => void;
+const tickListeners = new Set<PriorityTickListener>();
+
+export function registerPriorityTickListener(listener: PriorityTickListener): () => void {
+  tickListeners.add(listener);
+  return () => {
+    tickListeners.delete(listener);
+  };
+}
 
 let wss: WebSocketServer | null = null;
 let started = false;
@@ -190,6 +202,24 @@ function upsertQuoteAndBroadcast(
   const priceChanged = !existing || existing.price !== nextState.price;
   quoteStore.set(id, nextState);
 
+  const publicQuote = toPublicQuote(nextState);
+
+  // Notify server-side listeners (e.g., 24/7 Cloud Signal Zone-Fill Validator) on every XAU/BTC tick
+  if (STRICT_WS_BROADCAST_IDS.has(id) && tickListeners.size > 0) {
+    for (const listener of tickListeners) {
+      try {
+        listener(publicQuote);
+      } catch {
+        // isolate listener exceptions
+      }
+    }
+  }
+
+  // High-frequency WebSocket client broadcasts are strictly scoped to XAU/USD & BTC/USD
+  if (!STRICT_WS_BROADCAST_IDS.has(id)) {
+    return;
+  }
+
   // Coalesce broadcasts per symbol to <= 150ms so burst ticks stay smooth and sub-second accurate
   const lastSent = lastBroadcastAt.get(id) ?? 0;
   if (priceChanged || now - lastSent >= 1000) {
@@ -197,7 +227,7 @@ function upsertQuoteAndBroadcast(
       lastBroadcastAt.set(id, now);
       broadcastJson({
         type: 'tick',
-        quote: toPublicQuote(nextState),
+        quote: publicQuote,
         serverTime: now,
       });
     }
@@ -633,8 +663,8 @@ export function attachPriorityRadarSocket(httpServer: http.Server): void {
       wsClient.isAlive = true;
     });
 
-    // Send immediate 0ms snapshot of all warm quotes
-    const snapshotQuotes = getPrioritySocketQuotes();
+    // Send immediate 0ms snapshot strictly for XAU/USD and BTC/USD high-frequency streams
+    const snapshotQuotes = getPrioritySocketQuotes().filter((q) => STRICT_WS_BROADCAST_IDS.has(q.id));
     try {
       wsClient.send(
         JSON.stringify({
