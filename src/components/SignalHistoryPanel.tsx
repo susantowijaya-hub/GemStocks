@@ -1,10 +1,13 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { AnimatePresence, motion } from 'framer-motion';
 import {
   Activity,
   AlertTriangle,
   BookOpen,
+  CandlestickChart,
   Check,
   CheckCircle2,
+  ChevronDown,
   ChevronRight,
   Clock,
   Cloud,
@@ -34,6 +37,7 @@ import {
   computeSignalHistoryStats,
   formatSignalPrice,
   getExpiredReasonMeta,
+  isExcludedUsSignal,
   isTerminalSignalStatus,
   isUnfilledExpiredSignal,
   normalizeSignalStatus,
@@ -44,7 +48,7 @@ import {
   getPendingExpiryRemainingMs,
 } from '../utils/signalCleanupService';
 
-export type SignalJournalCategoryFilter = 'all' | 'xau' | 'btc' | 'stocks' | 'idx' | 'us' | 'radar';
+export type SignalJournalCategoryFilter = 'all' | 'xau' | 'btc' | 'stocks' | 'idx' | 'radar';
 export type SignalJournalStatusFilter = 'all' | 'active' | 'pending' | 'closed';
 
 export interface SignalHistoryPanelProps {
@@ -131,6 +135,12 @@ function isPendingRecord(rec: SignalHistoryRecord): boolean {
 
 function isClosedRecord(rec: SignalHistoryRecord): boolean {
   return isTerminalSignalStatus(rec.status);
+}
+
+function pctFromEntry(entry: number, target: number): string {
+  if (!Number.isFinite(entry) || entry === 0 || !Number.isFinite(target)) return '—';
+  const pct = ((target - entry) / entry) * 100;
+  return `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`;
 }
 
 /**
@@ -295,7 +305,7 @@ export const SignalHistoryPanel: React.FC<SignalHistoryPanelProps> = ({
   statusFilter: controlledStatusFilter,
   onStatusFilterChange,
   title = 'Trade Signal Journal',
-  subtitle = 'Tap any signal to open Entry, Exit & Stop-Loss details',
+  subtitle = 'Tap any row to expand Entry, Stop-Loss & Take-Profit details inline',
   onInspectSignal,
   onAnnotateSignal,
   onDeleteSignal,
@@ -305,9 +315,14 @@ export const SignalHistoryPanel: React.FC<SignalHistoryPanelProps> = ({
   const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>(defaultCategory);
   const [internalStatusFilter, setInternalStatusFilter] = useState<SignalJournalStatusFilter>('all');
   const [closedSubFilter, setClosedSubFilter] = useState<ClosedOutcomeSubFilter>('all');
+  const [expandedRowIds, setExpandedRowIds] = useState<Record<string, boolean>>({});
   const [selectedDetailId, setSelectedDetailId] = useState<string | null>(null);
   const [editingNoteId, setEditingNoteId] = useState<string | null>(null);
   const [noteDraft, setNoteDraft] = useState<string>('');
+
+  const toggleRowExpanded = (id: string) => {
+    setExpandedRowIds((prev) => ({ ...prev, [id]: !prev[id] }));
+  };
 
   const statusFilter = controlledStatusFilter ?? internalStatusFilter;
   const handleStatusFilterChange = (next: SignalJournalStatusFilter) => {
@@ -327,18 +342,16 @@ export const SignalHistoryPanel: React.FC<SignalHistoryPanelProps> = ({
 
   const categoryScopedRecords = useMemo(() => {
     return records.filter((rec) => {
-      if (isUnfilledExpiredSignal(rec)) return false;
+      if (isUnfilledExpiredSignal(rec) || isExcludedUsSignal(rec)) return false;
       if (categoryFilter === 'xau') {
         return rec.assetId === 'XAUUSD' || rec.assetClass === 'commodity';
       }
       if (categoryFilter === 'btc') {
         return rec.assetId === 'BTCUSD' || rec.assetClass === 'crypto';
       }
-      if (categoryFilter === 'stocks') {
-        return rec.assetClass === 'stock_id' || rec.assetClass === 'stock_us';
+      if (categoryFilter === 'stocks' || categoryFilter === 'idx') {
+        return rec.assetClass === 'stock_id';
       }
-      if (categoryFilter === 'idx') return rec.assetClass === 'stock_id';
-      if (categoryFilter === 'us') return rec.assetClass === 'stock_us';
       if (categoryFilter === 'radar') {
         return rec.assetClass === 'crypto' || rec.assetClass === 'commodity';
       }
@@ -603,10 +616,9 @@ export const SignalHistoryPanel: React.FC<SignalHistoryPanelProps> = ({
               {(
                 [
                   { id: 'all', label: 'All' },
+                  { id: 'idx', label: 'IDX Stocks' },
                   { id: 'xau', label: 'XAU/USD' },
                   { id: 'btc', label: 'BTC/USD' },
-                  { id: 'idx', label: 'IDX' },
-                  { id: 'us', label: 'US Stocks' },
                 ] as const
               ).map((cat) => {
                 const active = categoryFilter === cat.id;
@@ -681,12 +693,12 @@ export const SignalHistoryPanel: React.FC<SignalHistoryPanelProps> = ({
             No {statusFilter === 'all' ? '' : `${statusFilter} `}signals in this journal filter yet
           </p>
           <p className="text-[11px] text-[var(--text-muted)] max-w-md">
-            The 24H cloud background engine continuously tracks valid ICT 2022, SMC S&amp;D (5m–4H), and Stock setups and logs exact first-trigger WIB timestamps automatically.
+            The 24H cloud background engine continuously tracks valid Indonesia IDX Stock, XAU/USD, and BTC/USD (5m–4H) setups and logs exact first-trigger WIB timestamps automatically.
           </p>
         </div>
       ) : (
         <>
-          {/* DEDICATED MOBILE VIEW (< 768px): Fast-Scan Interactive Rows -> Tap opens Bottom Sheet */}
+          {/* DEDICATED MOBILE VIEW (< 768px): Framer-Motion Expandable Rows revealing Entry, SL & TP inline */}
           <div
             data-testid="signal-journal-mobile-list"
             className="md:hidden divide-y divide-[var(--border-divider)]"
@@ -706,131 +718,295 @@ export const SignalHistoryPanel: React.FC<SignalHistoryPanelProps> = ({
               const displayPnl = rec.pnlPct;
               const displayR = rec.rMultiple;
               const trailPx = computeActiveTrailingStop(rec);
+              const isExpanded = Boolean(expandedRowIds[rec.id]);
+              const isTerminal = isTerminalSignalStatus(rec.status);
 
               return (
-                <button
+                <div
                   key={rec.id}
-                  type="button"
                   data-testid={`journal-signal-row-${rec.id}`}
-                  onClick={() => setSelectedDetailId(rec.id)}
-                  className="w-full text-left px-4 py-3.5 space-y-2.5 bg-transparent hover:bg-black/[0.02] dark:hover:bg-white/[0.03] active:bg-black/[0.04] dark:active:bg-white/[0.06] transition-colors focus-visible:outline-2 focus-visible:outline-[var(--accent-primary)]"
+                  className="bg-transparent"
                 >
-                  {/* Row 1: Asset Direction + Right-Aligned Tabular Outcome + Chevron */}
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className="text-base font-black tracking-tight text-[var(--text-primary)]">
-                          {rec.symbol}
-                        </span>
+                  <button
+                    type="button"
+                    aria-expanded={isExpanded}
+                    onClick={() => toggleRowExpanded(rec.id)}
+                    className="w-full min-h-[60px] text-left px-4 py-3.5 space-y-2.5 bg-transparent hover:bg-black/[0.02] dark:hover:bg-white/[0.03] active:bg-black/[0.04] dark:active:bg-white/[0.06] transition-colors focus-visible:outline-2 focus-visible:outline-[var(--accent-primary)]"
+                  >
+                    {/* Row 1: Asset Direction + Right-Aligned Tabular Outcome + Animated Chevron */}
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-base font-black tracking-tight text-[var(--text-primary)]">
+                            {rec.symbol}
+                          </span>
+                          <span
+                            className={`inline-flex items-center gap-0.5 text-xs font-black ${
+                              isBuy ? 'text-[var(--gain-text)]' : 'text-[var(--loss-text)]'
+                            }`}
+                          >
+                            {isBuy ? (
+                              <TrendingUp className="w-3.5 h-3.5" />
+                            ) : (
+                              <TrendingDown className="w-3.5 h-3.5" />
+                            )}
+                            {rec.direction}
+                          </span>
+                          <span className="font-mono text-[11px] font-semibold text-[var(--text-muted)]">
+                            {rec.timeframe}
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-[var(--text-muted)] mt-0.5 truncate">
+                          {getEngineLabel(rec.sourceEngine)} · R:R {rec.riskReward} · {triggered.date} {triggered.time}
+                        </p>
+                      </div>
+
+                      <div className="flex items-center gap-2 shrink-0">
+                        <div className="text-right font-mono tabular-nums">
+                          {canonicalStatus === 'PENDING' || canonicalStatus === 'EXPIRED' ? (
+                            <div className="text-sm font-bold text-[var(--text-muted)]">—</div>
+                          ) : (
+                            <>
+                              <div
+                                className={`text-base font-black leading-tight ${
+                                  displayR > 0
+                                    ? 'text-[var(--gain-text)]'
+                                    : displayR < 0
+                                      ? 'text-[var(--loss-text)]'
+                                      : 'text-[var(--text-secondary)]'
+                                }`}
+                              >
+                                {displayR >= 0 ? '+' : ''}
+                                {displayR.toFixed(2)}R
+                              </div>
+                              <div className="text-[11px] font-semibold text-[var(--text-muted)]">
+                                {displayPnl >= 0 ? '+' : ''}
+                                {displayPnl.toFixed(2)}%
+                              </div>
+                            </>
+                          )}
+                        </div>
+                        <motion.span
+                          animate={{ rotate: isExpanded ? 180 : 0 }}
+                          transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+                          className="inline-flex items-center justify-center text-[var(--text-muted)] shrink-0"
+                        >
+                          <ChevronDown className="w-4 h-4" />
+                        </motion.span>
+                      </div>
+                    </div>
+
+                    {/* Row 2: Compact Status + Key Entry / SL Preview */}
+                    <div className="flex items-center justify-between gap-2 text-[11px]">
+                      {rec.status === 'EXPIRED' && expiredMeta ? (
                         <span
-                          className={`inline-flex items-center gap-0.5 text-xs font-black ${
-                            isBuy ? 'text-[var(--gain-text)]' : 'text-[var(--loss-text)]'
+                          className={`inline-flex items-center gap-1 font-extrabold ${
+                            expiredMeta.isInvalidated
+                              ? 'text-[var(--loss-text)]'
+                              : 'text-amber-700 dark:text-amber-300'
                           }`}
                         >
-                          {isBuy ? (
-                            <TrendingUp className="w-3.5 h-3.5" />
+                          {expiredMeta.isInvalidated ? (
+                            <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
                           ) : (
-                            <TrendingDown className="w-3.5 h-3.5" />
+                            <Clock className="w-3.5 h-3.5 shrink-0" />
                           )}
-                          {rec.direction}
+                          <span>{expiredMeta.shortLabel}</span>
                         </span>
-                        <span className="font-mono text-[11px] font-semibold text-[var(--text-muted)]">
-                          {rec.timeframe}
+                      ) : (
+                        <span
+                          className={`inline-flex items-center gap-1 font-extrabold ${
+                            canonicalStatus === 'TP'
+                              ? 'text-[var(--gain-text)]'
+                              : canonicalStatus === 'SL'
+                                ? 'text-[var(--loss-text)]'
+                                : canonicalStatus === 'FILLED'
+                                  ? 'text-sky-600 dark:text-sky-300'
+                                  : 'text-amber-600 dark:text-amber-300'
+                          }`}
+                        >
+                          <StatusIcon className="w-3.5 h-3.5 shrink-0" />
+                          <span>{statusMeta.label}</span>
+                          {canonicalStatus === 'PENDING' && (
+                            <span className="font-mono font-semibold text-[10px] opacity-85">
+                              · {formatPendingExpiryCountdown(getPendingExpiryRemainingMs(rec))}
+                            </span>
+                          )}
                         </span>
-                      </div>
-                      <p className="text-[11px] text-[var(--text-muted)] mt-0.5 truncate">
-                        {getEngineLabel(rec.sourceEngine)} · R:R {rec.riskReward} · {triggered.date} {triggered.time}
+                      )}
+
+                      <span className="font-mono tabular-nums text-[var(--text-secondary)] truncate">
+                        En {formatSignalPrice(rec.entryPrice, cur, dec)} ·{' '}
+                        <span className="text-[var(--loss-text)]">
+                          SL {formatSignalPrice(rec.stopLoss, cur, dec)}
+                        </span>
+                        {trailPx && !isTerminal ? (
+                          <span className="text-amber-600 dark:text-amber-300 font-bold"> · Trail</span>
+                        ) : null}
+                      </span>
+                    </div>
+
+                    {/* Row 3: Live Progress Track (SL -> Entry -> TP1 -> TP2) */}
+                    {canonicalStatus !== 'PENDING' && <MobileSignalProgressTrack rec={rec} />}
+
+                    {rec.journalNote && !isExpanded && (
+                      <p className="text-[11px] text-[var(--text-muted)] italic truncate">
+                        Note: &ldquo;{rec.journalNote}&rdquo;
                       </p>
-                    </div>
-
-                    <div className="flex items-center gap-2 shrink-0">
-                      <div className="text-right font-mono tabular-nums">
-                        {canonicalStatus === 'PENDING' || canonicalStatus === 'EXPIRED' ? (
-                          <div className="text-sm font-bold text-[var(--text-muted)]">—</div>
-                        ) : (
-                          <>
-                            <div
-                              className={`text-base font-black leading-tight ${
-                                displayR > 0
-                                  ? 'text-[var(--gain-text)]'
-                                  : displayR < 0
-                                    ? 'text-[var(--loss-text)]'
-                                    : 'text-[var(--text-secondary)]'
-                              }`}
-                            >
-                              {displayR >= 0 ? '+' : ''}
-                              {displayR.toFixed(2)}R
-                            </div>
-                            <div className="text-[11px] font-semibold text-[var(--text-muted)]">
-                              {displayPnl >= 0 ? '+' : ''}
-                              {displayPnl.toFixed(2)}%
-                            </div>
-                          </>
-                        )}
-                      </div>
-                      <ChevronRight className="w-4 h-4 text-[var(--text-muted)] shrink-0" />
-                    </div>
-                  </div>
-
-                  {/* Row 2: Compact Status + Key Entry / Exit / SL Preview */}
-                  <div className="flex items-center justify-between gap-2 text-[11px]">
-                    {rec.status === 'EXPIRED' && expiredMeta ? (
-                      <span
-                        className={`inline-flex items-center gap-1 font-extrabold ${
-                          expiredMeta.isInvalidated
-                            ? 'text-[var(--loss-text)]'
-                            : 'text-amber-700 dark:text-amber-300'
-                        }`}
-                      >
-                        {expiredMeta.isInvalidated ? (
-                          <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-                        ) : (
-                          <Clock className="w-3.5 h-3.5 shrink-0" />
-                        )}
-                        <span>{expiredMeta.shortLabel}</span>
-                      </span>
-                    ) : (
-                      <span
-                        className={`inline-flex items-center gap-1 font-extrabold ${
-                          canonicalStatus === 'TP'
-                            ? 'text-[var(--gain-text)]'
-                            : canonicalStatus === 'SL'
-                              ? 'text-[var(--loss-text)]'
-                              : canonicalStatus === 'FILLED'
-                                ? 'text-sky-600 dark:text-sky-300'
-                                : 'text-amber-600 dark:text-amber-300'
-                        }`}
-                      >
-                        <StatusIcon className="w-3.5 h-3.5 shrink-0" />
-                        <span>{statusMeta.label}</span>
-                        {canonicalStatus === 'PENDING' && (
-                          <span className="font-mono font-semibold text-[10px] opacity-85">
-                            · {formatPendingExpiryCountdown(getPendingExpiryRemainingMs(rec))}
-                          </span>
-                        )}
-                      </span>
                     )}
+                  </button>
 
-                    <span className="font-mono tabular-nums text-[var(--text-secondary)] truncate">
-                      En {formatSignalPrice(rec.entryPrice, cur, dec)} ·{' '}
-                      <span className="text-[var(--loss-text)]">
-                        SL {formatSignalPrice(rec.stopLoss, cur, dec)}
-                      </span>
-                      {trailPx && !isTerminalSignalStatus(rec.status) ? (
-                        <span className="text-amber-600 dark:text-amber-300 font-bold"> · Trail</span>
-                      ) : null}
-                    </span>
-                  </div>
+                  {/* Framer-Motion Inline Expandable Details: Entry, Stop-Loss, TP1, TP2 & Quick Actions */}
+                  <AnimatePresence initial={false}>
+                    {isExpanded && (
+                      <motion.div
+                        key={`mobile-expand-${rec.id}`}
+                        data-testid={`journal-signal-expanded-${rec.id}`}
+                        initial={{ height: 0, opacity: 0 }}
+                        animate={{ height: 'auto', opacity: 1 }}
+                        exit={{ height: 0, opacity: 0 }}
+                        transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+                        className="overflow-hidden"
+                      >
+                        <div className="px-4 pb-4 pt-2.5 bg-[var(--bg-inset)]/60 border-t border-[var(--border-divider)] space-y-3">
+                          {/* 2x2 Tabular Levels Grid: Entry · Stop-Loss · TP1 · TP2 */}
+                          <div className="grid grid-cols-2 gap-2.5 font-mono tabular-nums">
+                            <div className="rounded-xl bg-[var(--bg-surface)] border border-[var(--border-subtle)] px-3 py-2">
+                              <div className="font-sans text-[10px] font-bold text-[var(--text-muted)]">
+                                Entry {rec.orderType ? `· ${rec.orderType}` : ''}
+                              </div>
+                              <div className="text-sm font-black text-[var(--text-primary)] mt-0.5">
+                                {formatSignalPrice(rec.entryPrice, cur, dec)}
+                              </div>
+                              <div className="text-[10px] text-[var(--text-muted)] truncate mt-0.5">
+                                Zone {formatSignalPrice(rec.entryLow, cur, dec)} – {formatSignalPrice(rec.entryHigh, cur, dec)}
+                              </div>
+                            </div>
 
-                  {/* Row 3: Live Progress Track (SL -> Entry -> TP1 -> TP2) */}
-                  {canonicalStatus !== 'PENDING' && <MobileSignalProgressTrack rec={rec} />}
+                            <div className="rounded-xl bg-[var(--bg-surface)] border border-[var(--border-subtle)] px-3 py-2">
+                              <div className="font-sans text-[10px] font-bold text-[var(--loss-text)] flex items-center justify-between gap-1">
+                                <span>Stop-Loss</span>
+                                <span className="font-mono">{pctFromEntry(rec.entryPrice, rec.stopLoss)}</span>
+                              </div>
+                              <div className="text-sm font-black text-[var(--loss-text)] mt-0.5">
+                                {formatSignalPrice(rec.stopLoss, cur, dec)}
+                              </div>
+                              <div className="text-[10px] text-[var(--text-muted)] truncate mt-0.5">
+                                {trailPx && !isTerminal
+                                  ? `Trail BE ${formatSignalPrice(trailPx, cur, dec)}`
+                                  : rec.closedPrice
+                                    ? `Exit ${formatSignalPrice(rec.closedPrice, cur, dec)}`
+                                    : `Live ${formatSignalPrice(rec.lastPrice || rec.entryPrice, cur, dec)}`}
+                              </div>
+                            </div>
 
-                  {rec.journalNote && (
-                    <p className="text-[11px] text-[var(--text-muted)] italic truncate">
-                      Note: &ldquo;{rec.journalNote}&rdquo;
-                    </p>
-                  )}
-                </button>
+                            <div className="rounded-xl bg-[var(--bg-surface)] border border-[var(--border-subtle)] px-3 py-2">
+                              <div className="font-sans text-[10px] font-bold text-[var(--gain-text)] flex items-center justify-between gap-1">
+                                <span>Take-Profit 1</span>
+                                <span className="font-mono">{pctFromEntry(rec.entryPrice, rec.tp1)}</span>
+                              </div>
+                              <div className="text-sm font-black text-[var(--gain-text)] mt-0.5">
+                                {formatSignalPrice(rec.tp1, cur, dec)}
+                              </div>
+                              <div className="text-[10px] text-[var(--text-muted)] mt-0.5">
+                                Partial scale + SL → BE
+                              </div>
+                            </div>
+
+                            <div className="rounded-xl bg-[var(--bg-surface)] border border-[var(--border-subtle)] px-3 py-2">
+                              <div className="font-sans text-[10px] font-bold text-[var(--gain-text)] flex items-center justify-between gap-1">
+                                <span>Take-Profit 2</span>
+                                <span className="font-mono">{pctFromEntry(rec.entryPrice, rec.tp2)}</span>
+                              </div>
+                              <div className="text-sm font-black text-[var(--gain-text)] mt-0.5">
+                                {formatSignalPrice(rec.tp2, cur, dec)}
+                              </div>
+                              <div className="text-[10px] text-[var(--text-muted)] mt-0.5">
+                                Target R:R {rec.riskReward}
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Clean Unboxed Execution Metadata */}
+                          <div className="text-[11px] text-[var(--text-muted)] flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                            <span className="font-semibold text-[var(--text-secondary)]">
+                              {rec.strategyTag}
+                            </span>
+                            <span aria-hidden="true">·</span>
+                            <span className="font-mono tabular-nums">Conf {rec.confidence}%</span>
+                            {rec.filledAtMs && (
+                              <>
+                                <span aria-hidden="true">·</span>
+                                <span className="font-mono tabular-nums">
+                                  Filled {formatWibDateTime(rec.filledAtMs).time}
+                                </span>
+                              </>
+                            )}
+                            {rec.closedAtMs && (
+                              <>
+                                <span aria-hidden="true">·</span>
+                                <span className="font-mono tabular-nums">
+                                  Closed {formatWibDateTime(rec.closedAtMs).time}
+                                </span>
+                              </>
+                            )}
+                          </div>
+
+                          {rec.journalNote && (
+                            <p className="text-[11px] text-[var(--text-secondary)] italic">
+                              Note: &ldquo;{rec.journalNote}&rdquo;
+                            </p>
+                          )}
+
+                          {/* Touch-Friendly Action Strip (>= 44px height) */}
+                          <div className="flex items-center gap-2 pt-0.5">
+                            <button
+                              type="button"
+                              onClick={() => setSelectedDetailId(rec.id)}
+                              className="flex-1 min-h-[44px] inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-[var(--accent-primary)] text-white monochrome:text-black text-xs font-bold active:scale-[0.98] transition-transform whitespace-nowrap"
+                            >
+                              <CandlestickChart className="w-3.5 h-3.5" />
+                              <span>Quick View &amp; History</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                onInspectSignal(
+                                  rec.assetClass === 'stock_id' && !rec.symbol.endsWith('.JK')
+                                    ? `${rec.symbol}.JK`
+                                    : rec.symbol,
+                                  rec.assetId,
+                                  {
+                                    symbolLabel: `${rec.symbol} (${rec.timeframe})`,
+                                    direction: rec.direction,
+                                    entryLow: rec.entryLow,
+                                    entryHigh: rec.entryHigh,
+                                    stopLoss: rec.stopLoss,
+                                    tp1: rec.tp1,
+                                    tp2: rec.tp2,
+                                  },
+                                  rec.timeframe as Timeframe
+                                )
+                              }
+                              className="min-h-[44px] min-w-[44px] inline-flex items-center justify-center px-3 py-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-xs font-bold text-[var(--text-primary)] hover:border-[var(--accent-primary)] transition-colors"
+                              title="Open Full Interactive Chart"
+                            >
+                              <ExternalLink className="w-4 h-4" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => onDeleteSignal(rec.id)}
+                              className="min-h-[44px] min-w-[44px] inline-flex items-center justify-center px-3 py-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-xs font-bold text-[var(--text-muted)] hover:text-[var(--loss-text)] transition-colors"
+                              title="Delete signal record"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </div>
               );
             })}
           </div>
@@ -868,24 +1044,41 @@ export const SignalHistoryPanel: React.FC<SignalHistoryPanelProps> = ({
                   const rowOutcome = rec.userOutcome;
                   const displayPnl = rec.pnlPct;
                   const displayR = rec.rMultiple;
+                  const isExpanded = Boolean(expandedRowIds[rec.id]);
+                  const trailPx = computeActiveTrailingStop(rec);
+                  const isTerminal = isTerminalSignalStatus(rec.status);
 
                   return (
                     <React.Fragment key={rec.id}>
                       <tr
-                        onClick={() => setSelectedDetailId(rec.id)}
-                        className="cursor-pointer hover:bg-black/[0.03] dark:hover:bg-white/[0.04] transition-colors align-middle"
+                        aria-expanded={isExpanded}
+                        onClick={() => toggleRowExpanded(rec.id)}
+                        className={`cursor-pointer hover:bg-black/[0.03] dark:hover:bg-white/[0.04] transition-colors align-middle ${
+                          isExpanded ? 'bg-[var(--bg-inset)]/45' : ''
+                        }`}
                       >
-                        {/* 1. First Triggered WIB */}
+                        {/* 1. First Triggered WIB + Disclosure Chevron */}
                         <td className="py-2.5 pl-4 pr-3 whitespace-nowrap font-mono tabular-nums">
-                          <div className="font-bold text-[var(--text-primary)] text-[11px]">
-                            {triggered.date} · {triggered.time}
-                          </div>
-                          <div className="text-[10px] text-[var(--text-muted)]">
-                            {rec.filledAtMs
-                              ? `Filled ${formatWibDateTime(rec.filledAtMs).time}`
-                              : rec.closedAtMs
-                                ? `Closed ${formatWibDateTime(rec.closedAtMs).time}`
-                                : 'Pending entry fill'}
+                          <div className="flex items-center gap-2">
+                            <motion.span
+                              animate={{ rotate: isExpanded ? 180 : 0 }}
+                              transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+                              className="inline-flex items-center justify-center text-[var(--text-muted)] shrink-0"
+                            >
+                              <ChevronDown className="w-3.5 h-3.5" />
+                            </motion.span>
+                            <div>
+                              <div className="font-bold text-[var(--text-primary)] text-[11px]">
+                                {triggered.date} · {triggered.time}
+                              </div>
+                              <div className="text-[10px] text-[var(--text-muted)]">
+                                {rec.filledAtMs
+                                  ? `Filled ${formatWibDateTime(rec.filledAtMs).time}`
+                                  : rec.closedAtMs
+                                    ? `Closed ${formatWibDateTime(rec.closedAtMs).time}`
+                                    : 'Pending entry fill'}
+                              </div>
+                            </div>
                           </div>
                         </td>
 
@@ -1113,6 +1306,108 @@ export const SignalHistoryPanel: React.FC<SignalHistoryPanelProps> = ({
                               <Trash2 className="w-3 h-3" />
                             </button>
                           </div>
+                        </td>
+                      </tr>
+
+                      {/* Framer-Motion Inline Expanded Trade Details Row (Desktop & Tablet) */}
+                      <tr className="border-0">
+                        <td colSpan={8} className="p-0 border-0">
+                          <AnimatePresence initial={false}>
+                            {isExpanded && (
+                              <motion.div
+                                key={`desktop-expand-${rec.id}`}
+                                initial={{ height: 0, opacity: 0 }}
+                                animate={{ height: 'auto', opacity: 1 }}
+                                exit={{ height: 0, opacity: 0 }}
+                                transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+                                className="overflow-hidden"
+                              >
+                                <div className="px-5 py-3.5 bg-[var(--bg-inset)]/60 border-t border-[var(--border-divider)] space-y-3">
+                                  <div className="grid grid-cols-4 gap-3 font-mono tabular-nums">
+                                    <div className="rounded-xl bg-[var(--bg-surface)] border border-[var(--border-subtle)] px-3 py-2">
+                                      <div className="font-sans text-[10px] font-bold text-[var(--text-muted)]">
+                                        Entry Price {rec.orderType ? `· ${rec.orderType}` : ''}
+                                      </div>
+                                      <div className="text-sm font-black text-[var(--text-primary)] mt-0.5">
+                                        {formatSignalPrice(rec.entryPrice, cur, dec)}
+                                      </div>
+                                      <div className="text-[10px] text-[var(--text-muted)] mt-0.5">
+                                        Zone {formatSignalPrice(rec.entryLow, cur, dec)} – {formatSignalPrice(rec.entryHigh, cur, dec)}
+                                      </div>
+                                    </div>
+
+                                    <div className="rounded-xl bg-[var(--bg-surface)] border border-[var(--border-subtle)] px-3 py-2">
+                                      <div className="font-sans text-[10px] font-bold text-[var(--loss-text)] flex items-center justify-between">
+                                        <span>Stop-Loss</span>
+                                        <span className="font-mono">{pctFromEntry(rec.entryPrice, rec.stopLoss)}</span>
+                                      </div>
+                                      <div className="text-sm font-black text-[var(--loss-text)] mt-0.5">
+                                        {formatSignalPrice(rec.stopLoss, cur, dec)}
+                                      </div>
+                                      <div className="text-[10px] text-[var(--text-muted)] mt-0.5">
+                                        {trailPx && !isTerminal
+                                          ? `Active Trail BE ${formatSignalPrice(trailPx, cur, dec)}`
+                                          : rec.closedPrice
+                                            ? `Exit ${formatSignalPrice(rec.closedPrice, cur, dec)}`
+                                            : `Spot ${formatSignalPrice(rec.lastPrice || rec.entryPrice, cur, dec)}`}
+                                      </div>
+                                    </div>
+
+                                    <div className="rounded-xl bg-[var(--bg-surface)] border border-[var(--border-subtle)] px-3 py-2">
+                                      <div className="font-sans text-[10px] font-bold text-[var(--gain-text)] flex items-center justify-between">
+                                        <span>Take-Profit 1</span>
+                                        <span className="font-mono">{pctFromEntry(rec.entryPrice, rec.tp1)}</span>
+                                      </div>
+                                      <div className="text-sm font-black text-[var(--gain-text)] mt-0.5">
+                                        {formatSignalPrice(rec.tp1, cur, dec)}
+                                      </div>
+                                      <div className="text-[10px] text-[var(--text-muted)] mt-0.5">
+                                        Scale partial &amp; move SL to BE
+                                      </div>
+                                    </div>
+
+                                    <div className="rounded-xl bg-[var(--bg-surface)] border border-[var(--border-subtle)] px-3 py-2">
+                                      <div className="font-sans text-[10px] font-bold text-[var(--gain-text)] flex items-center justify-between">
+                                        <span>Take-Profit 2</span>
+                                        <span className="font-mono">{pctFromEntry(rec.entryPrice, rec.tp2)}</span>
+                                      </div>
+                                      <div className="text-sm font-black text-[var(--gain-text)] mt-0.5">
+                                        {formatSignalPrice(rec.tp2, cur, dec)}
+                                      </div>
+                                      <div className="text-[10px] text-[var(--text-muted)] mt-0.5">
+                                        Target R:R {rec.riskReward} · Conf {rec.confidence}%
+                                      </div>
+                                    </div>
+                                  </div>
+
+                                  <div className="flex items-center justify-between gap-4">
+                                    <div className="flex-1 max-w-md">
+                                      {canonicalStatus !== 'PENDING' ? (
+                                        <MobileSignalProgressTrack rec={rec} />
+                                      ) : (
+                                        <span className="text-[11px] font-mono text-amber-600 dark:text-amber-300 font-semibold">
+                                          Awaiting Entry Zone Trigger · Auto-expires in {formatPendingExpiryCountdown(getPendingExpiryRemainingMs(rec))}
+                                        </span>
+                                      )}
+                                    </div>
+                                    <div className="flex items-center gap-2 shrink-0">
+                                      <span className="text-[11px] text-[var(--text-muted)]">
+                                        {rec.strategyTag}
+                                      </span>
+                                      <button
+                                        type="button"
+                                        onClick={() => setSelectedDetailId(rec.id)}
+                                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[var(--accent-primary)] text-white monochrome:text-black text-[11px] font-bold hover:opacity-90 transition-opacity whitespace-nowrap"
+                                      >
+                                        <CandlestickChart className="w-3.5 h-3.5" />
+                                        <span>Historical Chart &amp; Quick View</span>
+                                      </button>
+                                    </div>
+                                  </div>
+                                </div>
+                              </motion.div>
+                            )}
+                          </AnimatePresence>
                         </td>
                       </tr>
 

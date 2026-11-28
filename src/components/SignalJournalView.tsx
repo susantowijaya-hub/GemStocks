@@ -1,4 +1,5 @@
 import React, { useMemo, useState } from 'react';
+import { MotionConfig } from 'framer-motion';
 import {
   Activity,
   BarChart3,
@@ -22,6 +23,7 @@ import {
 import {
   SignalHistoryStats,
   computeSignalHistoryStats,
+  isExcludedUsSignal,
   isUnfilledExpiredSignal,
   normalizeSignalStatus,
 } from '../utils/signalHistoryEngine';
@@ -56,10 +58,10 @@ export interface SignalJournalViewProps {
   onNavigate: (route: AppRoute) => void;
 }
 
-type JournalPathKey = 'all' | 'stocks' | 'idx' | 'us' | 'xau' | 'btc';
+type JournalPathKey = 'all' | 'idx' | 'xau' | 'btc';
 
 interface InstrumentSessionBadge {
-  key: 'btc' | 'xau' | 'idx' | 'us';
+  key: 'btc' | 'xau' | 'idx';
   label: string;
   isOpen: boolean;
   windowLabel: string;
@@ -89,33 +91,16 @@ function getInstrumentMarketSessions(nowMs: number = Date.now()): InstrumentSess
   const idxOpen =
     !['Sat', 'Sun'].includes(wibWeekday) && wibTotalMin >= 9 * 60 && wibTotalMin <= 16 * 60;
 
-  const nyParts = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/New_York',
-    weekday: 'short',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  }).formatToParts(now);
-  const nyWeekday = nyParts.find((p) => p.type === 'weekday')?.value ?? '';
-  const nyHour = Number(nyParts.find((p) => p.type === 'hour')?.value ?? '0');
-  const nyMin = Number(nyParts.find((p) => p.type === 'minute')?.value ?? '0');
-  const nyTotalMin = nyHour * 60 + nyMin;
-  const usOpen =
-    !['Sat', 'Sun'].includes(nyWeekday) && nyTotalMin >= 9 * 60 + 30 && nyTotalMin <= 16 * 60;
-
   return [
     { key: 'btc', label: 'BTC', isOpen: true, windowLabel: '24/7' },
     { key: 'xau', label: 'XAU', isOpen: xauOpen, windowLabel: xauOpen ? 'Open' : 'Closed' },
     { key: 'idx', label: 'IDX', isOpen: idxOpen, windowLabel: idxOpen ? 'Open' : 'Closed' },
-    { key: 'us', label: 'US', isOpen: usOpen, windowLabel: usOpen ? 'Open' : 'Closed' },
   ];
 }
 
 function matchesJournalPath(rec: SignalHistoryRecord, path: JournalPathKey): boolean {
   if (path === 'all') return true;
-  if (path === 'stocks') return rec.assetClass === 'stock_id' || rec.assetClass === 'stock_us';
   if (path === 'idx') return rec.sourceEngine === 'idx_scanner' || rec.assetClass === 'stock_id';
-  if (path === 'us') return rec.sourceEngine === 'us_scanner' || rec.assetClass === 'stock_us';
   if (path === 'xau') return rec.symbol === 'XAUUSD' || rec.assetId === 'XAUUSD';
   if (path === 'btc') return rec.symbol === 'BTCUSD' || rec.assetId === 'BTCUSD';
   return true;
@@ -141,25 +126,13 @@ const PATH_TABS: {
     id: 'all',
     label: 'All Signals',
     shortLabel: 'All',
-    subtitle: 'Unified non-overlay ledger across Stocks (7D), XAU/USD & BTC/USD',
-  },
-  {
-    id: 'stocks',
-    label: 'Stocks (7D)',
-    shortLabel: 'Stocks 7D',
-    subtitle: 'Past 7 working days IDX & US equity signals (RSI-2 / 2-Day Pullback + Trailing BE / EMA5 Exit)',
+    subtitle: 'Unified non-overlay ledger across Indonesia IDX (7D), XAU/USD & BTC/USD',
   },
   {
     id: 'idx',
-    label: 'IDX (7D)',
+    label: 'IDX Stocks (7D)',
     shortLabel: 'IDX 7D',
-    subtitle: 'Past 7 working days Indonesian equities verified bar-by-bar',
-  },
-  {
-    id: 'us',
-    label: 'US (7D)',
-    shortLabel: 'US 7D',
-    subtitle: 'Past 7 working days US mega-cap leaders verified bar-by-bar',
+    subtitle: 'Past 7 working days Indonesia IDX equities verified bar-by-bar',
   },
   {
     id: 'xau',
@@ -194,16 +167,14 @@ export const SignalJournalView: React.FC<SignalJournalViewProps> = ({
   const [refreshingDb, setRefreshingDb] = useState(false);
 
   const visibleRecords = useMemo(
-    () => records.filter((rec) => !isUnfilledExpiredSignal(rec)),
+    () => records.filter((rec) => !isUnfilledExpiredSignal(rec) && !isExcludedUsSignal(rec)),
     [records]
   );
 
   const pathCounts = useMemo(() => {
     const counts: Record<JournalPathKey, { total: number; active: number }> = {
       all: { total: 0, active: 0 },
-      stocks: { total: 0, active: 0 },
       idx: { total: 0, active: 0 },
-      us: { total: 0, active: 0 },
       xau: { total: 0, active: 0 },
       btc: { total: 0, active: 0 },
     };
@@ -215,18 +186,7 @@ export const SignalJournalView: React.FC<SignalJournalViewProps> = ({
 
       if (matchesJournalPath(rec, 'idx')) {
         counts.idx.total += 1;
-        counts.stocks.total += 1;
-        if (isActive) {
-          counts.idx.active += 1;
-          counts.stocks.active += 1;
-        }
-      } else if (matchesJournalPath(rec, 'us')) {
-        counts.us.total += 1;
-        counts.stocks.total += 1;
-        if (isActive) {
-          counts.us.active += 1;
-          counts.stocks.active += 1;
-        }
+        if (isActive) counts.idx.active += 1;
       } else if (matchesJournalPath(rec, 'xau')) {
         counts.xau.total += 1;
         if (isActive) counts.xau.active += 1;
@@ -249,7 +209,7 @@ export const SignalJournalView: React.FC<SignalJournalViewProps> = ({
   );
 
   const stocks7dRecords = useMemo(
-    () => visibleRecords.filter((rec) => rec.assetClass === 'stock_id' || rec.assetClass === 'stock_us'),
+    () => visibleRecords.filter((rec) => rec.assetClass === 'stock_id'),
     [visibleRecords]
   );
 
@@ -281,10 +241,11 @@ export const SignalJournalView: React.FC<SignalJournalViewProps> = ({
   };
 
   return (
-    <div
-      data-testid="signal-journal-view"
-      className="w-full max-w-[1440px] mx-auto px-3 sm:px-5 lg:px-6 py-3 sm:py-5 pb-24 lg:pb-8 space-y-3.5 sm:space-y-4"
-    >
+    <MotionConfig reducedMotion="user">
+      <div
+        data-testid="signal-journal-view"
+        className="w-full max-w-[1440px] mx-auto px-3 sm:px-5 lg:px-6 py-3 sm:py-5 pb-24 lg:pb-8 space-y-3.5 sm:space-y-4"
+      >
       {/* 1. Mobile-First Compact Header + Actions */}
       <section className="liquid-glass-card rounded-2xl border border-[var(--border-subtle)] p-3.5 sm:p-5 space-y-3">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -387,7 +348,7 @@ export const SignalJournalView: React.FC<SignalJournalViewProps> = ({
       {/* 2. Thumb-Friendly Horizontal Instrument Path Switcher (>= 44px touch height) */}
       <nav
         aria-label="Signal Journal Instrument Paths"
-        className="flex items-center gap-2 overflow-x-auto no-scrollbar pb-0.5 sm:grid sm:grid-cols-6 sm:overflow-visible"
+        className="flex items-center gap-2 overflow-x-auto no-scrollbar pb-0.5 sm:grid sm:grid-cols-4 sm:overflow-visible"
       >
         {PATH_TABS.map((tab) => {
           const isSelected = activePath === tab.id;
@@ -434,7 +395,7 @@ export const SignalJournalView: React.FC<SignalJournalViewProps> = ({
         onSelectPath={(path) => setActivePath(path)}
       />
 
-      {/* 4. Mobile-First Signal Ledger with Active/Pending/Closed Filtering Bar & Expandable Detail Sheet */}
+      {/* 4. Mobile-First Signal Ledger with Active/Pending/Closed Filtering Bar & Expandable Framer-Motion Rows */}
       <SignalHistoryPanel
         records={visibleRecords}
         stats={scopedStats}
@@ -446,7 +407,7 @@ export const SignalJournalView: React.FC<SignalJournalViewProps> = ({
         statusFilter={statusFilter}
         onStatusFilterChange={setStatusFilter}
         title={`${activeTabMeta.label} Ledger`}
-        subtitle={`${activeTabMeta.subtitle} · Tap any signal for Entry, Exit & SL details`}
+        subtitle={`${activeTabMeta.subtitle} · Tap any row to expand Entry, SL & TP inline`}
         onInspectSignal={(yahooSym, builtInId, overlays, tf) =>
           onInspectSignal(yahooSym, builtInId, overlays, tf)
         }
@@ -454,6 +415,7 @@ export const SignalJournalView: React.FC<SignalJournalViewProps> = ({
         onDeleteSignal={onDeleteSignal}
         onClearClosedSignals={onClearClosedSignals}
       />
-    </div>
+      </div>
+    </MotionConfig>
   );
 };

@@ -43,6 +43,7 @@ import {
   deriveSignalIndexedOutcome,
   deriveSignalStrategyKey,
   deriveSignalVerificationStatus,
+  isExcludedUsSignal,
   isTerminalSignalStatus,
   isUnfilledExpiredSignal,
   normalizeSignalStatus,
@@ -101,7 +102,8 @@ function loadLocalSignalHistory(): SignalHistoryRecord[] {
           item.entryPrice > 0 &&
           typeof item.stopLoss === 'number' &&
           item.stopLoss > 0 &&
-          !isUnfilledExpiredSignal(item)
+          !isUnfilledExpiredSignal(item) &&
+          !isExcludedUsSignal(item)
       )
       .slice(0, MAX_LOCAL_RECORDS);
   } catch {
@@ -581,7 +583,7 @@ export function useSignalHistory(
     async (cloudRecords: SignalHistoryRecord[], recalibratedAtMs?: number | null) => {
       if (!Array.isArray(cloudRecords)) return;
       const validCloud = cloudRecords.filter(
-        (r) => r && r.timeframe !== '1m' && !isUnfilledExpiredSignal(r)
+        (r) => r && r.timeframe !== '1m' && !isUnfilledExpiredSignal(r) && !isExcludedUsSignal(r)
       );
 
       // Check if server performed a clean v3 DB refresh/recalibration newer than our last synced epoch
@@ -1056,8 +1058,8 @@ export function useSignalHistory(
                   : {}),
               };
 
-              // Automatically purge non-filled expired signals from Firestore & history
-              if (isUnfilledExpiredSignal(rec)) {
+              // Automatically purge non-filled expired signals & excluded US market signals from Firestore & history
+              if (isUnfilledExpiredSignal(rec) || isExcludedUsSignal(rec)) {
                 void deleteDoc(doc(db, 'users', user.uid, 'signalHistory', docSnap.id)).catch(() => {
                   // ignore cleanup errors
                 });
@@ -1385,11 +1387,8 @@ export function useSignalHistory(
     const syms = new Set<string>();
     for (const r of records) {
       if (isTerminalSignalStatus(r.status)) continue;
-      if (r.assetClass !== 'stock_id' && r.assetClass !== 'stock_us') continue;
-      const yahooSym =
-        r.assetClass === 'stock_id' && !r.symbol.endsWith('.JK')
-          ? `${r.symbol}.JK`
-          : r.symbol;
+      if (r.assetClass !== 'stock_id') continue;
+      const yahooSym = !r.symbol.endsWith('.JK') ? `${r.symbol}.JK` : r.symbol;
       syms.add(yahooSym.toUpperCase());
     }
     return Array.from(syms).sort().join(',');
@@ -1458,11 +1457,11 @@ export function useSignalHistory(
         liveProbes.set(sym, probe);
       }
 
-      // 1. Collect IDX & US stock probes + actionable candidates
+      // 1. Collect Indonesia IDX stock probes + actionable candidates only (US market scan removed)
       const idxStocks = collectUniqueStocks(idxMoversBucket);
-      const usStocks = collectUniqueStocks(usMoversBucket);
+      void usMoversBucket;
 
-      for (const stock of [...idxStocks, ...usStocks]) {
+      for (const stock of idxStocks) {
         const existingCandleProbe =
           persistedStockProbesRef.current.get(stock.symbol) ??
           persistedStockProbesRef.current.get(`${stock.symbol}.JK`);

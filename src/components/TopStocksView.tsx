@@ -1209,11 +1209,9 @@ export const TopStocksView: React.FC<TopStocksViewProps> = ({
   const savedStockSignals = useMemo(() => {
     const filtered = signalHistory.filter(
       (r) =>
-        (r.assetClass === 'stock_id' || r.assetClass === 'stock_us') &&
+        r.assetClass === 'stock_id' &&
         !isUnfilledExpiredSignal(r) &&
-        (marketFilter === 'all' ||
-          (marketFilter === 'id' && r.assetClass === 'stock_id') ||
-          (marketFilter === 'us' && r.assetClass === 'stock_us'))
+        marketFilter !== 'us'
     );
     return filtered.sort((a, b) => {
       const aActive = isTerminalSignalStatus(a.status) ? 0 : 1;

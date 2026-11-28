@@ -280,17 +280,25 @@ export interface LivePriceProbe {
   candles?: CandlePoint[];
 }
 
+export function isExcludedUsSignal(
+  rec: Pick<SignalHistoryRecord, 'assetClass' | 'sourceEngine'>
+): boolean {
+  return rec.assetClass === 'stock_us' || rec.sourceEngine === 'us_scanner';
+}
+
 export function buildStockSignalCandidate(
   stock: StockMover,
   now: number,
   ownerId = 'local'
 ): SignalHistoryRecord | null {
+  // Signal scanning focuses strictly on Indonesia stocks (IDX), BTC/USD, and XAU/USD only
+  if (stock.market !== 'ID') return null;
   const plan = stock.tradePlan;
   if (!plan) return null;
   if (plan.action !== 'BUY' && plan.action !== 'SELL') return null;
 
-  const isId = stock.market === 'ID';
-  const minConviction = isId ? 58 : 60;
+  const isId = true;
+  const minConviction = 58;
   const isStrongVerdict =
     plan.verdictLabel === 'BUY NOW (ACCUMULATION)' ||
     plan.verdictLabel === 'BUY AT DEMAND' ||
@@ -1797,9 +1805,7 @@ export function computeStockConfluenceExpectancyMatrix(
     .filter(
       (r) =>
         r.sourceEngine === 'idx_scanner' ||
-        r.sourceEngine === 'us_scanner' ||
-        r.assetClass === 'stock_id' ||
-        r.assetClass === 'stock_us'
+        r.assetClass === 'stock_id'
     )
     .sort((a, b) => b.createdAtMs - a.createdAtMs);
 
@@ -1862,20 +1868,14 @@ export function computeStockConfluenceExpectancyMatrix(
       'Execution',
       stockRecords.filter((r) => r.assetClass === 'stock_id')
     ),
-    buildExpectancyRow(
-      'us_swing',
-      'US Institutional Swing',
-      'Execution',
-      stockRecords.filter((r) => r.assetClass === 'stock_us')
-    ),
   ];
 
-  const overallRow = buildExpectancyRow('stock_overall', 'All Stocks Closed', 'Execution', stockRecords);
+  const overallRow = buildExpectancyRow('stock_overall', 'All IDX Stocks Closed', 'Execution', stockRecords);
   const closedOrdered = stockRecords.filter(
     (r) => getEffectiveRForExpectancy(r).outcomeType !== 'skip'
   );
   const rolling20Slice = closedOrdered.slice(0, 20);
-  const rolling20Row = buildExpectancyRow('stock_rolling20', 'Rolling 20 Stock Trades', 'Execution', rolling20Slice);
+  const rolling20Row = buildExpectancyRow('stock_rolling20', 'Rolling 20 IDX Trades', 'Execution', rolling20Slice);
 
   const driftWarning =
     rolling20Row.sampleSize >= 5 &&
@@ -1884,10 +1884,10 @@ export function computeStockConfluenceExpectancyMatrix(
 
   const driftMessage =
     rolling20Row.sampleSize === 0
-      ? 'Awaiting closed IDX/US stock trades to calibrate Stage 2, RS Rank & VCP expectancy.'
+      ? 'Awaiting closed IDX stock trades to calibrate Stage 2, RS Rank & VCP expectancy.'
       : driftWarning
         ? `Equity Expectancy Drift: Rolling ${rolling20Row.sampleSize}-trade expectancy is ${rolling20Row.expectancyR}R. Restrict sizing to 0.5R and require Stage 2 + RS≥75 + Top-3 Sector.`
-        : `Rolling ${rolling20Row.sampleSize}-trade equity expectancy is ${rolling20Row.expectancyR !== null && rolling20Row.expectancyR >= 0 ? '+' : ''}${rolling20Row.expectancyR ?? 0}R (${rolling20Row.winRatePct ?? 0}% WR) — institutional edge intact.`;
+        : `Rolling ${rolling20Row.sampleSize}-trade IDX expectancy is ${rolling20Row.expectancyR !== null && rolling20Row.expectancyR >= 0 ? '+' : ''}${rolling20Row.expectancyR ?? 0}R (${rolling20Row.winRatePct ?? 0}% WR) — institutional edge intact.`;
 
   const avgMfeR = overallRow.avgMfeR;
   const avgMaeR = overallRow.avgMaeR;

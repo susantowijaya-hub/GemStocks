@@ -11,7 +11,7 @@ export interface JournalSummaryCardProps {
   scopeLabel: string;
   stocks7dRecords?: SignalHistoryRecord[];
   activePath?: string;
-  onSelectPath?: (path: 'idx' | 'us') => void;
+  onSelectPath?: (path: 'idx') => void;
 }
 
 interface DynamicSummaryMetrics {
@@ -289,7 +289,7 @@ export const JournalSummaryCard: React.FC<JournalSummaryCardProps> = ({
         <div className="pt-3.5 border-t border-[var(--border-divider)] flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
           <div className="space-y-0.5">
             <div className="text-xs font-extrabold text-[var(--text-primary)]">
-              Past 7 Working Days Stocks Track Record (IDX &amp; US)
+              Past 7 Working Days IDX Stocks Track Record (Indonesia)
             </div>
             <div className="text-[11px] font-mono tabular-nums text-[var(--text-muted)] flex flex-wrap items-center gap-x-2 gap-y-0.5">
               <span>
@@ -333,7 +333,7 @@ export const JournalSummaryCard: React.FC<JournalSummaryCardProps> = ({
             </div>
           </div>
 
-          {onSelectPath && activePath !== 'stocks' && activePath !== 'idx' && activePath !== 'us' && (
+          {onSelectPath && activePath !== 'idx' && (
             <div className="flex items-center gap-2 shrink-0">
               <button
                 type="button"
@@ -341,13 +341,6 @@ export const JournalSummaryCard: React.FC<JournalSummaryCardProps> = ({
                 className="min-h-[40px] sm:min-h-[34px] px-3.5 py-1.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-inset)] text-xs font-bold text-[var(--text-primary)] hover:border-[var(--accent-primary)] transition-colors whitespace-nowrap"
               >
                 View IDX 7D
-              </button>
-              <button
-                type="button"
-                onClick={() => onSelectPath('us')}
-                className="min-h-[40px] sm:min-h-[34px] px-3.5 py-1.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-inset)] text-xs font-bold text-[var(--text-primary)] hover:border-[var(--accent-primary)] transition-colors whitespace-nowrap"
-              >
-                View US 7D
               </button>
             </div>
           )}

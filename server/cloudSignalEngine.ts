@@ -19,6 +19,7 @@ import {
   deriveSignalIndexedOutcome,
   deriveSignalVerificationStatus,
   evaluateSignalRecord,
+  isExcludedUsSignal,
   isTerminalSignalStatus,
   isUnfilledExpiredSignal,
   normalizeSignalStatus,
@@ -55,7 +56,7 @@ const TODAY_REPLAY_TIMEFRAMES: Timeframe[] = ['15m', '30m', '1h', '4h'];
 const WIB_OFFSET_MS = 7 * 60 * 60 * 1000;
 
 interface CloudLedgerState {
-  version: 3;
+  version: 4;
   engineStartedAtMs: number;
   recalibratedAtMs: number;
   lastScanAtMs: number | null;
@@ -70,7 +71,6 @@ export interface MarketOpenStatus {
   btcOpen: boolean;
   xauOpen: boolean;
   idxOpen: boolean;
-  usOpen: boolean;
 }
 
 function getWibDateKey(ms = Date.now()): string {
@@ -116,28 +116,7 @@ export function getInstrumentMarketOpenStatus(nowMs = Date.now()): MarketOpenSta
   const wibMinutes = wibDate.getUTCHours() * 60 + wibDate.getUTCMinutes();
   const idxOpen = wibDay >= 1 && wibDay <= 5 && wibMinutes >= 9 * 60 && wibMinutes <= 16 * 60;
 
-  // US Equities trade Mon-Fri 09:30 - 16:00 America/New_York
-  let usOpen = false;
-  try {
-    const parts = new Intl.DateTimeFormat('en-US', {
-      timeZone: 'America/New_York',
-      weekday: 'short',
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: false,
-    }).formatToParts(nowDate);
-    const weekday = parts.find((p) => p.type === 'weekday')?.value ?? '';
-    const hour = Number(parts.find((p) => p.type === 'hour')?.value ?? '0');
-    const minute = Number(parts.find((p) => p.type === 'minute')?.value ?? '0');
-    const isWeekday = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'].includes(weekday);
-    const mins = hour * 60 + minute;
-    usOpen = isWeekday && mins >= 9 * 60 + 30 && mins <= 16 * 60;
-  } catch {
-    const etHour = (utcHour + 20) % 24;
-    usOpen = utcDay >= 1 && utcDay <= 5 && etHour >= 9 && etHour < 16;
-  }
-
-  return { btcOpen, xauOpen, idxOpen, usOpen };
+  return { btcOpen, xauOpen, idxOpen };
 }
 
 function assertConfinedPath(targetPath: string): void {
@@ -162,7 +141,7 @@ function loadLedgerFromDisk(): CloudLedgerState {
   const todayKey = getWibDateKey(now);
 
   const fallback: CloudLedgerState = {
-    version: 3,
+    version: 4,
     engineStartedAtMs: now,
     recalibratedAtMs: now,
     lastScanAtMs: null,
@@ -179,9 +158,8 @@ function loadLedgerFromDisk(): CloudLedgerState {
     const raw = fs.readFileSync(LEDGER_FILE, 'utf8');
     const parsed = JSON.parse(raw) as Partial<CloudLedgerState> & { version?: number };
 
-    // On v1/v2 -> v3 recalibration, perform a clean full database refresh so all 7-working-day
-    // stocks and today's XAU/BTC signals rebuild cleanly with zero stale overlays.
-    if (parsed.version !== 3) {
+    // On v1/v2/v3 -> v4 recalibration, perform a clean refresh focused strictly on Indonesia IDX stocks, XAU/USD & BTC/USD (zero US signals).
+    if (parsed.version !== 4) {
       return fallback;
     }
 
@@ -199,7 +177,8 @@ function loadLedgerFromDisk(): CloudLedgerState {
                   typeof r.stopLoss === 'number' &&
                   r.stopLoss > 0 &&
                   r.timeframe !== '1m' &&
-                  !isUnfilledExpiredSignal(r)
+                  !isUnfilledExpiredSignal(r) &&
+                  !isExcludedUsSignal(r)
               )
           )
           .map(normalizeLoadedRecord)
@@ -207,7 +186,7 @@ function loadLedgerFromDisk(): CloudLedgerState {
       : [];
 
     return {
-      version: 3,
+      version: 4,
       engineStartedAtMs: now,
       recalibratedAtMs: typeof parsed.recalibratedAtMs === 'number' ? parsed.recalibratedAtMs : now,
       lastScanAtMs: typeof parsed.lastScanAtMs === 'number' ? parsed.lastScanAtMs : null,
@@ -546,33 +525,30 @@ async function fetchYahooDaily6M(yahooSym: string): Promise<CandlePoint[]> {
 }
 
 /**
- * Backtracks verified IDX & US stock signals across the EXACT LAST 7 WORKING DAYS using real
+ * Backtracks verified Indonesia IDX stock signals across the EXACT LAST 7 WORKING DAYS using real
  * 6-month daily OHLCV bars and our empirically 1-year backtested high-accuracy equity strategy:
- * - Connors RSI(2) ≤ 18 / 2-Day Pullback inside EMA50 Uptrend (80.6% WR IDX / 73.3% WR US)
+ * - Connors RSI(2) ≤ 18 / 2-Day Pullback inside EMA50 Uptrend (80.6% WR IDX)
  * - Demand Pullback Reclaim on EMA10/EMA20 inside Stage-2 trend
  * - Strict Non-Overlay: at most 1 active signal per symbol until it hits TP, SL, Dynamic Trailing Stop,
  *   or EMA5 Mean-Reversion Strategy Exit in profit.
  */
 async function seedLast7WorkingDaysStockSignals(
-  stocksRes: { us?: StocksMoversBucket; indonesia?: StocksMoversBucket } | null,
+  stocksRes: { indonesia?: StocksMoversBucket } | null,
   existingRecords: SignalHistoryRecord[],
   nowMs: number
 ): Promise<SignalHistoryRecord[]> {
   const existingLockKeys = new Set(existingRecords.map((r) => r.lockKey));
   const activeStockSymbols = new Set(
     existingRecords
-      .filter((r) => !isTerminalSignalStatus(r.status) && (r.assetClass === 'stock_id' || r.assetClass === 'stock_us'))
+      .filter((r) => !isTerminalSignalStatus(r.status) && r.assetClass === 'stock_id')
       .map((r) => `${r.assetClass}:${r.symbol.toUpperCase()}`)
   );
   const generated: SignalHistoryRecord[] = [];
 
   const idxMovers = collectUniqueStocks(stocksRes?.indonesia);
-  const usMovers = collectUniqueStocks(stocksRes?.us);
-
   const idxMeta = new Map<string, { name: string; sector?: string }>();
-  const usMeta = new Map<string, { name: string; sector?: string }>();
 
-  // Prioritize liquid 1Y-backtested blue-chip leaders FIRST so noisy small-cap movers never crowd them out
+  // Prioritize liquid 1Y-backtested IDX blue-chip leaders FIRST so noisy small-cap movers never crowd them out
   const defaultIdxLeaders: Array<{ sym: string; name: string }> = [
     { sym: 'BBCA', name: 'Bank Central Asia Tbk' },
     { sym: 'BBRI', name: 'Bank Rakyat Indonesia Tbk' },
@@ -601,57 +577,19 @@ async function seedLast7WorkingDaysStockSignals(
     if (!idxMeta.has(clean)) idxMeta.set(clean, { name: m.name, sector: m.sector });
   }
 
-  const defaultUsLeaders: Array<{ sym: string; name: string }> = [
-    { sym: 'NVDA', name: 'NVIDIA Corp.' },
-    { sym: 'AAPL', name: 'Apple Inc.' },
-    { sym: 'MSFT', name: 'Microsoft Corp.' },
-    { sym: 'META', name: 'Meta Platforms Inc.' },
-    { sym: 'AMZN', name: 'Amazon.com Inc.' },
-    { sym: 'GOOGL', name: 'Alphabet Inc.' },
-    { sym: 'AMD', name: 'Advanced Micro Devices' },
-    { sym: 'TSLA', name: 'Tesla Inc.' },
-    { sym: 'AVGO', name: 'Broadcom Inc.' },
-    { sym: 'JPM', name: 'JPMorgan Chase & Co.' },
-    { sym: 'NFLX', name: 'Netflix Inc.' },
-    { sym: 'PLTR', name: 'Palantir Technologies Inc.' },
-    { sym: 'LLY', name: 'Eli Lilly & Co.' },
-    { sym: 'V', name: 'Visa Inc.' },
-    { sym: 'MA', name: 'Mastercard Inc.' },
-    { sym: 'COST', name: 'Costco Wholesale Corp.' },
-    { sym: 'UNH', name: 'UnitedHealth Group Inc.' },
-    { sym: 'XOM', name: 'Exxon Mobil Corp.' },
-  ];
-  for (const d of defaultUsLeaders) {
-    usMeta.set(d.sym, { name: d.name });
-  }
-  for (const m of usMovers) {
-    const clean = m.symbol.toUpperCase();
-    if (!usMeta.has(clean)) usMeta.set(clean, { name: m.name, sector: m.sector });
-  }
-
   const targets: Array<{
     cleanSym: string;
     yahooSym: string;
-    market: 'ID' | 'US';
+    market: 'ID';
     name: string;
-  }> = [
-    ...Array.from(idxMeta.entries())
-      .slice(0, 22)
-      .map(([cleanSym, info]) => ({
-        cleanSym,
-        yahooSym: `${cleanSym}.JK`,
-        market: 'ID' as const,
-        name: info.name,
-      })),
-    ...Array.from(usMeta.entries())
-      .slice(0, 22)
-      .map(([cleanSym, info]) => ({
-        cleanSym,
-        yahooSym: cleanSym,
-        market: 'US' as const,
-        name: info.name,
-      })),
-  ];
+  }> = Array.from(idxMeta.entries())
+    .slice(0, 26)
+    .map(([cleanSym, info]) => ({
+      cleanSym,
+      yahooSym: `${cleanSym}.JK`,
+      market: 'ID' as const,
+      name: info.name,
+    }));
 
   const seriesList = await Promise.all(
     targets.map(async (t) => {
@@ -1134,13 +1072,13 @@ export async function runCloudSignalScan(): Promise<CloudLedgerState> {
       seededAny = true;
     }
 
-    // 2. Last 7 working days backfill for IDX & US stocks using real historical OHLCV bars & proven strategy rules
+    // 2. Last 7 working days backfill for Indonesia IDX stocks using real historical OHLCV bars & proven strategy rules
     if (ledgerState.stock7DaySeededKey !== todayKey) {
       const stock7DaySeeds = await seedLast7WorkingDaysStockSignals(stocksRes, workingRecords, now);
       if (stock7DaySeeds.length > 0) {
         workingRecords = [...stock7DaySeeds, ...workingRecords];
         console.log(
-          `[CloudSignalEngine] Seeded ${stock7DaySeeds.length} verified 7-working-day IDX/US stock signal(s).`
+          `[CloudSignalEngine] Seeded ${stock7DaySeeds.length} verified 7-working-day IDX stock signal(s).`
         );
       }
       ledgerState.stock7DaySeededKey = todayKey;
@@ -1180,7 +1118,7 @@ export async function runCloudSignalScan(): Promise<CloudLedgerState> {
       }
     }
 
-    // 4. Live Scanner for IDX & US Stocks (only generates NEW live signals when each exchange is open; always collects probes)
+    // 4. Live Scanner for Indonesia IDX Stocks only (US stock signal scanning removed)
     if (stocksRes) {
       for (const stock of collectUniqueStocks(stocksRes.indonesia)) {
         liveProbes.set(stock.symbol, {
@@ -1193,24 +1131,11 @@ export async function runCloudSignalScan(): Promise<CloudLedgerState> {
           if (cand) candidates.push(cand);
         }
       }
-      for (const stock of collectUniqueStocks(stocksRes.us)) {
-        liveProbes.set(stock.symbol, {
-          price: stock.price,
-          dayHigh: stock.dayHigh,
-          dayLow: stock.dayLow,
-        });
-        if (marketOpen.usOpen) {
-          const cand = buildStockSignalCandidate(stock, now, 'cloud_24h');
-          if (cand) candidates.push(cand);
-        }
-      }
     }
 
-    // 5. Cross-session continuity check: fetch live quotes + 1M OHLCV candles for ALL active saved stock signals
+    // 5. Cross-session continuity check: fetch live quotes + 1M OHLCV candles for ALL active saved IDX stock signals
     const activeStockRecords = workingRecords.filter(
-      (r) =>
-        !isTerminalSignalStatus(r.status) &&
-        (r.assetClass === 'stock_id' || r.assetClass === 'stock_us')
+      (r) => !isTerminalSignalStatus(r.status) && r.assetClass === 'stock_id'
     );
     if (activeStockRecords.length > 0) {
       const yahooSyms = Array.from(
@@ -1324,11 +1249,13 @@ export async function validateClientSignalsOnServer(
     }
   }
 
+  const filteredClientRecords = clientRecords.filter((r) => !isExcludedUsSignal(r));
+
   const stockSyms = Array.from(
     new Set(
-      clientRecords
-        .filter((r) => !isTerminalSignalStatus(r.status) && (r.assetClass === 'stock_id' || r.assetClass === 'stock_us'))
-        .map((r) => (r.assetClass === 'stock_id' && !r.symbol.endsWith('.JK') ? `${r.symbol}.JK` : r.symbol))
+      filteredClientRecords
+        .filter((r) => !isTerminalSignalStatus(r.status) && r.assetClass === 'stock_id')
+        .map((r) => (!r.symbol.endsWith('.JK') ? `${r.symbol}.JK` : r.symbol))
     )
   ).slice(0, 25);
 
@@ -1343,7 +1270,7 @@ export async function validateClientSignalsOnServer(
     }
   }
 
-  const res = validateSignalZoneFills(clientRecords, tickMap, now);
+  const res = validateSignalZoneFills(filteredClientRecords, tickMap, now);
   return {
     validated: res.nextRecords,
     removedIds: res.removedIds,
@@ -1472,7 +1399,7 @@ export async function refreshAndRecalibrateCloudLedger(): Promise<{
   }
   const now = Date.now();
   ledgerState = {
-    version: 3,
+    version: 4,
     engineStartedAtMs: ledgerState.engineStartedAtMs,
     recalibratedAtMs: now,
     lastScanAtMs: null,
